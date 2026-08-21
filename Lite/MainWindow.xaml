@@ -502,8 +502,16 @@
                                                         <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding BlockingDisplay}" Foreground="{Binding BlockingBrush}" FontWeight="SemiBold" Margin="8,2" HorizontalAlignment="Right"/>
                                                         <TextBlock Grid.Row="3" Grid.Column="0" Text="Deadlocks:" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2"/>
                                                         <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding DeadlockDisplay}" Foreground="{Binding DeadlockBrush}" FontWeight="SemiBold" Margin="8,2" HorizontalAlignment="Right"/>
-                                                        <TextBlock Grid.Row="4" Grid.Column="0" Text="Last Collect:" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2"/>
-                                                        <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding LastCollectionDisplay}" Foreground="{DynamicResource ForegroundBrush}" FontWeight="SemiBold" Margin="8,2" HorizontalAlignment="Right"/>
+                                                        <!-- Last Collect is a BANDED row (#2452): its brush comes from the shared
+                                                             ServerHealthClassifier, and it carries a tooltip that says the band is about
+                                                             collection stopping rather than about the server's metrics. Background="Transparent"
+                                                             on both cells is load-bearing, not decoration: a TextBlock with a null Background
+                                                             hit-tests on its rendered glyphs alone, so the tooltip would appear over the
+                                                             letters and nowhere in the space around them (#2429). -->
+                                                        <TextBlock Grid.Row="4" Grid.Column="0" Text="Last Collect:" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2"
+                                                                   Background="Transparent" ToolTip="{Binding CollectionFreshnessTooltip}"/>
+                                                        <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding LastCollectionDisplay}" Foreground="{Binding LastCollectionBrush}" FontWeight="SemiBold" Margin="8,2" HorizontalAlignment="Right"
+                                                                   Background="Transparent" ToolTip="{Binding CollectionFreshnessTooltip}"/>
                                                     </Grid>
                                                 </StackPanel>
                                                 <!-- Offline overlay -->

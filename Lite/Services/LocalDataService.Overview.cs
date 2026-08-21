@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using System.Windows.Media;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -110,7 +111,7 @@ WHERE server_id = $1";
             }
         }
 
-        return new ServerSummaryItem
+        var summary = new ServerSummaryItem
         {
             DisplayName = displayName,
             ServerId = serverId,
@@ -121,6 +122,14 @@ WHERE server_id = $1";
             DeadlockCount = deadlockCount,
             LastCollectionTime = lastCollection
         };
+
+        /* Band the collection's freshness HERE and not at the Overview loader, because this is the one
+           place a ServerSummaryItem is built: the two MCP reads call this method too, and a band only the
+           Overview applied would be a fact that depended on which caller asked. The clock is handed in
+           rather than read inside the band, so the classification stays a pure function of
+           (last collection, now) — the shape the viewer's ApplyFreshness already has. */
+        summary.ApplyCollectionFreshness(DateTime.UtcNow);
+        return summary;
     }
 }
 
@@ -234,10 +243,113 @@ public class ServerSummaryItem
     public string MemoryDisplay => MemoryMb.HasValue ? $"{MemoryMb / 1024.0:F1} GB" : "--";
     public string BlockingDisplay => BlockingCount > 0 ? BlockingCount.ToString() : "0";
     public string DeadlockDisplay => DeadlockCount > 0 ? DeadlockCount.ToString() : "0";
-    public string LastCollectionDisplay => LastCollectionTime.HasValue ? ServerTimeHelper.FormatServerTime(LastCollectionTime, "HH:mm:ss") : "Never";
+
+    /// <summary>
+    /// How old the newest collection_log row for this server is, banded by the SHARED
+    /// <see cref="ServerHealthClassifier.ClassifyFreshness"/> — the same Fresh / Stale / Offline /
+    /// NeverCollected ladder the Darling viewer bands, off the same <see cref="ServerHealthThresholds"/>
+    /// numbers, so the two SKUs cannot drift on when a collection has gone quiet (#2452).
+    ///
+    /// <para>NULL means nobody classified it. <see cref="ApplyCollectionFreshness"/> always produces a band
+    /// and every ServerSummaryItem the app builds goes through it, so null is unreachable in the shipped
+    /// app; a hand-built item can still produce one, which is why it is a named "not classified" rather
+    /// than a fall-through onto a band that would be a guess. It renders as the card's existing unknown
+    /// grey with no band word — exactly what this row rendered before it had a band.</para>
+    /// </summary>
+    public ServerFreshness? CollectionFreshness { get; set; }
+
+    /// <summary>
+    /// Stamp <see cref="CollectionFreshness"/> from this card's own <see cref="LastCollectionTime"/>. Pure
+    /// over (last collection, now): both instants are UTC (the DuckDB store is naive UTC and
+    /// <paramref name="nowUtc"/> is <see cref="DateTime.UtcNow"/>), so the subtraction inside the classifier
+    /// is a true elapsed time regardless of Kind. Stamped rather than computed on read so the band cannot
+    /// change between the row's brush binding and the tooltip that explains it.
+    /// </summary>
+    public void ApplyCollectionFreshness(DateTime nowUtc) =>
+        CollectionFreshness = ServerHealthClassifier.ClassifyFreshness(LastCollectionTime, nowUtc);
+
+    /// <summary>
+    /// The Last Collect row. Names its band in words when the collection is not current, because a colour
+    /// alone is what this row already had against it: it was a bare "HH:mm:ss" in the plain foreground
+    /// brush, so a timestamp from four hours ago looked exactly like one from four seconds ago and nothing
+    /// on the card asked anyone to read it (#2452).
+    /// </summary>
+    public string LastCollectionDisplay
+    {
+        get
+        {
+            if (!LastCollectionTime.HasValue) return "Never";
+
+            var stamp = ServerTimeHelper.FormatServerTime(LastCollectionTime, "HH:mm:ss");
+            return CollectionFreshness switch
+            {
+                ServerFreshness.Stale => $"{stamp} (stale)",
+                ServerFreshness.Offline => $"{stamp} (stopped)",
+                _ => stamp,
+            };
+        }
+    }
+
+    /// <summary>
+    /// The Last Collect row's band brush — the row's own palette, alongside CPU / Blocking / Deadlocks,
+    /// rather than the neutral foreground it used to be painted in. NeverCollected is amber, never red: a
+    /// server that has not been collected yet is queued, not dead, and red there sent a 24-server field
+    /// report chasing a phantom scheduler bug on the viewer side (see
+    /// <see cref="ServerFreshness.NeverCollected"/>). An unclassified band gets the card's unknown grey.
+    /// </summary>
+    public SolidColorBrush LastCollectionBrush => MakeBrush(CollectionFreshness switch
+    {
+        ServerFreshness.Fresh => "#81C784",
+        ServerFreshness.Stale => "#FFB74D",
+        ServerFreshness.Offline => "#E57373",
+        ServerFreshness.NeverCollected => "#FFB74D",
+        _ => "#888888",
+    });
+
+    /// <summary>
+    /// What the Last Collect row's band MEANS, for the tooltip that row carries.
+    ///
+    /// <para>The second sentence is the point of the wording rather than padding. #2429 found the Darling
+    /// viewer says the same word — "Warning" — for a stale collection and for a metric breach, with nothing
+    /// on the card telling them apart; that was the card @ehaar wrote in about (#2422). So Lite says which
+    /// axis it is about, in words, on the row the band is on. It is deliberately NOT folded into the status
+    /// word: see the note on <see cref="CardStatus"/>.</para>
+    ///
+    /// <para>The thresholds are read from <see cref="ServerHealthThresholds"/> rather than typed, so the
+    /// sentence cannot come to disagree with the band it is explaining.</para>
+    /// </summary>
+    public string? CollectionFreshnessTooltip => CollectionFreshness switch
+    {
+        ServerFreshness.Fresh =>
+            $"Collection is current — something landed within the last {Minutes(ServerHealthThresholds.StaleThreshold)}.",
+        ServerFreshness.Stale =>
+            $"Collection is stale — nothing has landed for over {Minutes(ServerHealthThresholds.StaleThreshold)}.\n" +
+            "This is about collection stopping, not about the server's metrics: the connection check can " +
+            "still be passing and no collector reporting an error.",
+        ServerFreshness.Offline =>
+            $"Collection has stopped — nothing has landed for over {Minutes(ServerHealthThresholds.OfflineThreshold)}.\n" +
+            "This is about collection stopping, not about the server's metrics: the connection check can " +
+            "still be passing and no collector reporting an error.",
+        ServerFreshness.NeverCollected =>
+            "No collection has ever landed for this server.\n" +
+            "This is about collection, not about the server's metrics.",
+        _ => null,
+    };
+
+    /// <summary>Renders a threshold as "2 minutes" / "15 minutes" so the tooltip quotes the shared numbers
+    /// instead of restating them.</summary>
+    private static string Minutes(TimeSpan span) =>
+        $"{span.TotalMinutes:0.#} minute{(Math.Abs(span.TotalMinutes - 1) < 0.001 ? "" : "s")}";
 
     /* Connection status. This is the ONE place the (IsOnline, HasCollectorErrors) pair is read; the word, the
-       colour and the tooltip's first line all render the result. See ServerCardStatus. */
+       colour and the tooltip's first line all render the result. See ServerCardStatus.
+
+       Collection freshness is deliberately NOT one of the states here, and that is option 2 in #2452 being
+       turned down. This word is a CONNECTION word: IsOnline comes from ServerManager.GetConnectionStatus, a
+       live check that succeeds whether or not anything is being collected, and CollectorErrors already means
+       one specific thing. Folding freshness in would make one amber word mean two unrelated failures, which
+       is the conflation #2429 spent four review rounds untangling on the viewer and the reason #2422 was
+       written. Freshness is a third axis: it bands its own row, and the tooltip names it there. */
     public ServerCardStatus CardStatus => IsOnline switch
     {
         true when HasCollectorErrors => ServerCardStatus.CollectorErrors,
@@ -275,6 +387,13 @@ public class ServerSummaryItem
     private bool BlockingIsElevated => BlockingCount > 0;
     private bool DeadlocksAreElevated => DeadlockCount > 0;
 
+    /// <summary>The Last Collect row's gate — stale, stopped, or never started (#2452). Public because the
+    /// card border reads it too; the other three are private only because nothing outside needed them. Like
+    /// them it is the row's OWN "not green" test, so the border, the row brush and the tooltip cannot come
+    /// to disagree about whether this card's collection is in trouble.</summary>
+    public bool CollectionIsNotFresh =>
+        CollectionFreshness is ServerFreshness.Stale or ServerFreshness.Offline or ServerFreshness.NeverCollected;
+
     /* Color coding */
     public SolidColorBrush CpuBrush => MakeBrush(CpuIsCritical ? "#E57373" : CpuIsElevated ? "#FFB74D" : "#81C784");
     public SolidColorBrush BlockingBrush => MakeBrush(BlockingIsElevated ? "#FFB74D" : "#81C784");
@@ -288,6 +407,17 @@ public class ServerSummaryItem
         BlockingIsElevated ? "#FFB74D" :
         CpuIsCritical ? "#FFB74D" :
         CardStatus == ServerCardStatus.CollectorErrors ? "#FFD54F" :   // amber border when collectors are failing
+        /* Collector errors and collector SILENCE are the same class of fault — the monitoring of this server
+           is not working — so they get the same amber, on their own arm rather than folded into the one
+           above. Two named causes reading one colour is the honest shape here, and it keeps #2451's pin on
+           the CollectorErrors arm reading the discriminant it was written to pin.
+
+           Silence is the harder of the two to notice, which is the whole of #2452: nothing on this card
+           moved when a server went quiet. It stays amber even for a STOPPED collection, because the red
+           border belongs to a dark server and a red border under a green "Online" word would be the loudest
+           contradiction on the card; the row underneath carries the severity in its own colour and its own
+           word. */
+        CollectionIsNotFresh ? "#FFD54F" :
         "#2a2d35");
 
     /* ── The card explains itself (#2437 / #2422) ────────────────────────────────────────────────────
@@ -321,12 +451,25 @@ public class ServerSummaryItem
     /// <para>Memory is absent deliberately: the Memory row carries no severity brush on this card, so there is
     /// no band to report. Inventing a threshold here would be the one thing this property exists to prevent —
     /// a tooltip asserting something the rows underneath it do not.</para>
+    ///
+    /// <para>Last Collect joined the list when it gained a band (#2452), and it goes FIRST. It is the row
+    /// that says whether the other four can be believed at all: a card whose collection stopped four hours
+    /// ago is showing four-hour-old CPU, and reading "CPU 4%" before learning that is the wrong order to
+    /// meet the two facts in. It quotes <see cref="LastCollectionDisplay"/> verbatim, like every other part
+    /// here, so the clause and the row cannot render different things — and because that display already
+    /// carries the band word, the clause says which axis it is about without borrowing a metric's
+    /// vocabulary.</para>
     /// </summary>
     public string StatusReason
     {
         get
         {
             var parts = new List<string>();
+
+            if (CollectionIsNotFresh)
+            {
+                parts.Add("Last collect " + LastCollectionDisplay);
+            }
 
             if (CpuIsElevated)
             {
