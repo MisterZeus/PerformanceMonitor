@@ -288,6 +288,15 @@ public sealed class ViewerAppSettingsStore
     /// error where there is one — or null when there was nothing wrong with it.</summary>
     public string? LastLoadProblem { get; private set; }
 
+    /// <summary>
+    /// The settings the last <see cref="Load"/> could not read, by NAME, and empty when there were none
+    /// (#2456). Non-empty means the rest of the file loaded normally and only these reverted to their
+    /// defaults — the distinction <see cref="LastLoadProblem"/> alone cannot make, and the reason the
+    /// startup dialog can now say which settings were lost instead of only where the parse stopped.
+    /// </summary>
+    public IReadOnlyList<SettingsMemberProblem> LastLoadUnreadableMembers { get; private set; } =
+        Array.Empty<SettingsMemberProblem>();
+
     /// <summary>%APPDATA%\PerformanceMonitorDarling\viewer-settings.json.</summary>
     public static string DefaultFilePath()
     {
@@ -307,6 +316,7 @@ public sealed class ViewerAppSettingsStore
         var read = ViewerSettingsFile.Load<ViewerAppSettings>(_filePath, LogSource, s_jsonOptions);
         LastLoadState = read.State;
         LastLoadProblem = read.Problem;
+        LastLoadUnreadableMembers = read.UnreadableMembers ?? Array.Empty<SettingsMemberProblem>();
         return read.Value!.Normalize();
     }
 
