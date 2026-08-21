@@ -38,15 +38,15 @@ AND   delta_execution_count > 0";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(QueryStatsSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var totalSpills = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
             var highDopQueries = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
@@ -88,7 +88,10 @@ AND   delta_execution_count > 0";
                 });
             }
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     public const string ParameterSensitivitySql = @"
@@ -144,7 +147,7 @@ LIMIT 20";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(ParameterSensitivitySql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -158,8 +161,8 @@ LIMIT 20";
             var worstGrantRatio = 0.0;
             var worstSpillDivergence = 0;
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            while (await reader.ReadAsync(context.CancellationToken))
             {
                 // Rows arrive ordered by worker_ratio DESC — the first row is the worst offender.
                 if (offenderCount == 0)
@@ -193,7 +196,10 @@ LIMIT 20";
                 }
             });
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     /// <summary>The PLAN_REGRESSION comparison window, in days — how far back a query's "best known" plan
@@ -381,7 +387,7 @@ LIMIT 20";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(PlanRegressionSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -402,8 +408,8 @@ LIMIT 20";
             var worstLatestForced = 0;
             var worstForceFailures = 0L;
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            while (await reader.ReadAsync(context.CancellationToken))
             {
                 // Rows arrive ordered by regression_factor DESC — the first row is the worst offender.
                 if (offenderCount == 0)
@@ -447,7 +453,10 @@ LIMIT 20";
                 }
             });
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     public const string ProcedureStatsSql = @"
@@ -470,15 +479,15 @@ AND   delta_execution_count > 0";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(ProcedureStatsSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var distinctProcs = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
             var totalExecs = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
@@ -505,7 +514,10 @@ AND   delta_execution_count > 0";
                 }
             });
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     public const string PlanAdvisorySql = @"
@@ -534,15 +546,15 @@ LIMIT 10";
             /* PG port: Lite scopes the connection in a block to release its DuckDB read lock
                before the CPU-only parse; the scoping is kept so the connection closes before
                the parse, even though PG holds no lock. */
-            await using (var connection = await _postgres.OpenConnectionAsync())
+            await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
             {
                 using var command = new NpgsqlCommand(PlanAdvisorySql, connection);
                 command.Parameters.AddWithValue(context.ServerId);
                 command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
                 command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-                using var reader = await command.ExecuteReaderAsync();
-                while (await reader.ReadAsync())
+                using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
+                while (await reader.ReadAsync(context.CancellationToken))
                 {
                     if (!reader.IsDBNull(0))
                         planXmls.Add(reader.GetString(0));
@@ -587,9 +599,10 @@ LIMIT 10";
                 });
             }
         }
-        catch
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             // query_stats / plan parse may be unavailable — skip, the advisory is best-effort.
+            // An abandonment is NOT swallowed here (#2443).
         }
     }
 
