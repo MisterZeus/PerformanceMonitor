@@ -380,7 +380,8 @@ public static class SettingsFileGuard
                 return new SettingsObjectRead<T>(SettingsFileState.Unreadable, null, Describe(failure), dropped);
             }
 
-            (dropped ??= new List<SettingsMemberProblem>()).Add(new SettingsMemberProblem(member, Describe(failure)));
+            (dropped ??= new List<SettingsMemberProblem>()).Add(
+                new SettingsMemberProblem(member, DescribeMemberValue(failure)));
             current = without;
         }
 
@@ -389,6 +390,22 @@ public static class SettingsFileGuard
         return new SettingsObjectRead<T>(SettingsFileState.Unreadable, null,
             "the file holds more unreadable settings than this reader will drop", dropped);
     }
+
+    /// <summary>
+    /// Why one member's value could not be read, deliberately WITHOUT the line and position
+    /// <see cref="Describe"/> renders.
+    ///
+    /// <para>That omission is a correctness fix, not a trim. Each retry runs over the document with the
+    /// previous member removed, and removing it re-serializes — so from the second member onward the
+    /// exception's line and position describe the RE-SERIALIZED text, not the file the user is about to
+    /// open. Measured: three bad members on lines 2, 3 and 4 reported "line 2, position 22", then
+    /// "line 1, position 30" and "line 1, position 14". A position that confidently names the wrong line is
+    /// worse than no position, and here there is a better locator anyway — the member's NAME, which is what
+    /// this whole reader exists to produce and what a reader will search their file for. The line and
+    /// position stay on the DOCUMENT fault, where the parse position is the only locator there is.</para>
+    /// </summary>
+    private static string DescribeMemberValue(JsonException failure) =>
+        WithoutPathSuffix(failure.Message).Trim();
 
     /// <summary>The member a <see cref="JsonException"/> stopped on, or null when it stopped on the document
     /// itself (<c>$</c>) or somewhere this reader will not edit.</summary>
@@ -433,7 +450,7 @@ public static class SettingsFileGuard
     private static string Summarize(List<SettingsMemberProblem> dropped) =>
         string.Format(
             CultureInfo.InvariantCulture,
-            "{0} setting{1} could not be read and {2} at {3} default: {4}",
+            "{0} setting{1} could not be read and {2} at {3} default{1}: {4}",
             dropped.Count,
             dropped.Count == 1 ? "" : "s",
             dropped.Count == 1 ? "is" : "are",

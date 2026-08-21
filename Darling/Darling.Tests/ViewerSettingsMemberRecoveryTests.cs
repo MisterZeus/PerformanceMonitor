@@ -129,6 +129,48 @@ public sealed class ViewerSettingsMemberRecoveryTests : IDisposable
     }
 
     /// <summary>
+    /// A member's problem carries no line or position, and that omission is a correctness fix rather than a
+    /// trim. Each retry runs over the document with the previous member removed, and removing it
+    /// re-serializes — so from the second member onward the exception's position describes the RE-SERIALIZED
+    /// text, not the file the user is about to open. Measured on the first draft of this change: three bad
+    /// members on lines 2, 3 and 4 reported "line 2, position 22", then "line 1, position 30" and "line 1,
+    /// position 14". A position that confidently names the wrong line is worse than none, and the member's
+    /// NAME is a better locator anyway.
+    ///
+    /// <para>The document fault keeps its position, in the same test, because there the parse position is
+    /// the only locator there is — and because a rule applied to both would have quietly taken it away.</para>
+    /// </summary>
+    [Fact]
+    public void AMemberProblemCarriesNoParsePosition_ThoughTheDocumentFaultStillDoes()
+    {
+        File.WriteAllText(SettingsPath, @"{
+  ""McpEnabled"": ""yes"",
+  ""AlertCpuThreshold"": ""ninety"",
+  ""SmtpPort"": [ 25 ]
+}");
+
+        var members = SettingsFileGuard.ReadObject<ViewerAppSettings>(SettingsPath);
+
+        Assert.Equal(3, members.UnreadableMembers!.Count);
+        foreach (var problem in members.UnreadableMembers!)
+        {
+            Assert.DoesNotContain("line ", problem.Problem, StringComparison.Ordinal);
+            Assert.DoesNotContain("position ", problem.Problem, StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotContain("line ", members.Problem!, StringComparison.Ordinal);
+
+        File.WriteAllText(SettingsPath, @"{
+  ""AlertsEnabled"": true,
+  ""AlertCpuThreshold"": 91,
+}");
+
+        var document = SettingsFileGuard.ReadObject<ViewerAppSettings>(SettingsPath);
+
+        Assert.Contains("line 4, position 1", document.Problem!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A bad ELEMENT inside a list-valued setting costs that setting and nothing else. The exception's path
     /// is <c>$.AlertExcludedDatabases[1]</c>, so the reader takes the top-level member off the front of it
     /// and drops the whole list — coarse on purpose: editing an operator's list down to the elements that
