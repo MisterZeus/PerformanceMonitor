@@ -789,6 +789,7 @@
                                         VerticalAlignment="Center"/>
                                 <TextBlock x:Name="CurrentActiveQueriesStatus"
                                            Text="Click Refresh to fetch what is running on the server right now."
+                                           TextWrapping="Wrap" MaxWidth="640"
                                            FontSize="12" Foreground="DarkGoldenrod" FontWeight="SemiBold" VerticalAlignment="Center"/>
                             </StackPanel>
                             <DataGrid Grid.Row="1" x:Name="CurrentActiveQueriesGrid" Style="{StaticResource DarkGrid}"
