@@ -21,6 +21,62 @@ namespace PerformanceMonitor.Collectors;
 public readonly record struct EnumeratedRunResult(int Rows, long SqlMs, long StorageMs);
 
 /// <summary>
+/// What a per-database fan-out cost, rolled up to the one thing a blended <c>collection_log</c> row cannot
+/// say: how many items it covered, which one was dearest, and what that one cost (#2472).
+///
+/// <para>The point is the RATIO, not the parts. <c>SlowestItemMs * ItemCount / duration_ms</c> is 1.0 for a
+/// perfectly even fan-out and rises with concentration, so 8 databases at 10.1s each reads 1.0 and one at
+/// 62s beside seven at 2.7s reads 6.1 — two runs that are both 80,900 ms and want opposite fixes. Neither
+/// <c>max_duration_ms</c> nor <c>p95_duration_ms</c> can tell them apart, because both aggregate over RUNS
+/// and each of those runs is one row.</para>
+///
+/// <para>Deliberately a rollup and not a distribution. The full per-item series would need its own retained
+/// hypertable; this rides three nullable columns on a row that is written anyway, and answers the question
+/// the remedies in #2468 actually turn on.</para>
+/// </summary>
+/// <param name="ItemCount">Items whose cost was counted — every item that completed a read, empty batch or not,
+/// because their SQL slices are in the blended total too and the ratio has to be against the same denominator.</param>
+/// <param name="SlowestItem">The dearest item's name (a database, for every fan-out that exists today).</param>
+/// <param name="SlowestItemMs">That item's SQL plus storage milliseconds.</param>
+public readonly record struct FanoutCost(int ItemCount, string SlowestItem, int SlowestItemMs);
+
+/// <summary>
+/// Accumulates a fan-out's per-item costs into one <see cref="FanoutCost"/>. Shared by both SKUs and by both
+/// fan-out shapes — the enumeration driver's <c>onItemComplete</c> hook and the Azure per-database connection
+/// loop — because two hand-rolled copies of "keep the biggest" is how the two paths would come to disagree
+/// about what a slow database is.
+/// </summary>
+public sealed class FanoutCostAccumulator
+{
+    private int _itemCount;
+    private string? _slowestItem;
+
+    /* -1, not 0: an item that genuinely cost 0 ms still has to become the slowest one when it is the only
+       item, and 0 as the floor would leave SlowestItem null on a fan-out that really did run. */
+    private long _slowestMs = -1;
+
+    /// <summary>Records one item's total cost. Ties keep the FIRST item seen, so a run's answer does not
+    /// wobble between equally-priced databases from cycle to cycle.</summary>
+    public void Observe(string item, long itemMs)
+    {
+        _itemCount++;
+        if (itemMs > _slowestMs)
+        {
+            _slowestMs = itemMs;
+            _slowestItem = item;
+        }
+    }
+
+    /// <summary>The rollup, or null when nothing fanned out — a plain single-query collector, or an
+    /// enumeration that yielded no items. Null is the honest answer there: the columns say "this run had no
+    /// fan-out", which is not the same claim as "its fan-out was free".</summary>
+    public FanoutCost? Result =>
+        _itemCount > 0 && _slowestItem is not null
+            ? new FanoutCost(_itemCount, _slowestItem, (int)Math.Min(_slowestMs, int.MaxValue))
+            : null;
+}
+
+/// <summary>
 /// One item the enumeration query could not PROBE (#1837): the enumeration reached the item but the
 /// per-item eligibility check failed — a database mid-restore, a login that cannot enter it, a
 /// cross-database reference the target rejected. Distinct from a per-item COLLECTION failure, which the

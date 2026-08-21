@@ -77,8 +77,8 @@ WHERE s.is_enabled
       (SELECT 1 FROM config.config_monitored_servers c WHERE c.server_id = s.server_id);";
 
     private const string InsertCollectionLogSql = @"
-INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);";
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms, fanout_item_count, slowest_item, slowest_item_ms)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14);";
 
     /* The fleet-sentinel server_id the daily retention purge writes its run-record under. collection_log's
        server_id is NOT NULL and Collection Health reads per real server_id, but the purge is fleet-wide (per
@@ -188,6 +188,13 @@ ON CONFLICT (server_id) DO UPDATE SET
     /// the storage phase; duckdb_duration_ms carries the storage (Postgres) milliseconds under
     /// Lite's column name so analysis SQL can twin.
     /// </summary>
+    /// <param name="fanout">
+    /// The per-database rollup for a run that fanned out, null for one that did not (#2472). REQUIRED rather
+    /// than defaulted on purpose: five collectors fan out and the rest do not, so every call site has to say
+    /// which it is. A default would have let the five failure sites below — which genuinely have no fan-out —
+    /// stand in for a success site that forgot, and the whole point of the columns is that a blended number
+    /// stops being the only thing recorded.
+    /// </param>
     public static async Task LogCollectionAsync(
         NpgsqlDataSource postgres,
         ServerRuntime server,
@@ -197,6 +204,7 @@ ON CONFLICT (server_id) DO UPDATE SET
         long sqlMs,
         long storageMs,
         string? errorMessage,
+        FanoutCost? fanout,
         ILogger? logger,
         CancellationToken cancellationToken)
     {
@@ -222,6 +230,12 @@ ON CONFLICT (server_id) DO UPDATE SET
             command.Parameters.AddWithValue(rowsCollected);
             command.Parameters.AddWithValue((int)sqlMs);
             command.Parameters.AddWithValue((int)storageMs);
+
+            /* All three NULL together or all three set: a slowest item with no count cannot be turned into
+               the dominance ratio the columns exist for, so half an answer is worse than none. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = fanout.HasValue ? fanout.Value.ItemCount : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = fanout.HasValue ? fanout.Value.SlowestItem : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = fanout.HasValue ? fanout.Value.SlowestItemMs : (object)DBNull.Value });
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)
@@ -276,6 +290,14 @@ ON CONFLICT (server_id) DO UPDATE SET
             command.Parameters.AddWithValue(rowsPurged);                                                      // rows_collected
             command.Parameters.AddWithValue(0);                                                               // sql_duration_ms (no SQL-target phase)
             command.Parameters.AddWithValue(elapsed);                                                         // duckdb_duration_ms (storage phase = whole sweep)
+
+            /* The fan-out rollup columns (#2472). The retention sweep is fleet-wide over shared tables, not
+               a per-database fan-out, so it has nothing to attribute and says so with NULL rather than a
+               zero that would read as "fanned out over nothing". These three exist because this INSERT is
+               shared with the collector writer above; the shape is one statement on purpose. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // fanout_item_count
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DBNull.Value });    // slowest_item
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // slowest_item_ms
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)

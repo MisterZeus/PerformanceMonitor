@@ -32,7 +32,13 @@ namespace PerformanceMonitor.Darling.Service;
 /// Darling twin of Lite's <c>_lastCollectionNote</c>; null (the default) leaves the row's message column
 /// null exactly as before.
 /// </summary>
-public sealed record CollectorRunResult(int Rows, long SqlMs, long StorageMs, string? Note = null);
+/// <param name="Fanout">
+/// The per-database rollup for a run that fanned out, null for one that did not (#2472). Defaulted because
+/// the great majority of construction sites here are the early returns of runs that never reached a fan-out
+/// — a single query, an enumeration that yielded nothing — and null is their correct answer rather than a
+/// value they forgot to supply. The one site that MUST set it is the success return.
+/// </param>
+public sealed record CollectorRunResult(int Rows, long SqlMs, long StorageMs, string? Note = null, FanoutCost? Fanout = null);
 
 /// <summary>
 /// Runs a shared collector definition against one monitored server and binary-COPYs the rows
@@ -328,6 +334,13 @@ public sealed class DarlingCollectorRunner
         long storageMs = 0;
         var rowsWritten = 0;
 
+        /* The per-database rollup (#2472). Both fan-out shapes feed it — the enumeration driver's
+           onItemComplete hook and the Azure per-database connection loop — so a collector that fans out on
+           one branch on Azure and the other on-prem reports the same shape either way. A run that never
+           fans out never calls Observe and the accumulator stays empty, which is how the columns end up
+           NULL on ~98 percent of collection_log rows. */
+        var fanout = new FanoutCostAccumulator();
+
         /* The collection_log note for this run (#1837) — null on every ordinary path. Only the enumeration
            branch sets it, but it is declared here so the note reaches the single success return below when
            items WERE found and merely some of their probes failed. Lite's twin is _lastCollectionNote. */
@@ -540,15 +553,29 @@ public sealed class DarlingCollectorRunner
                                 await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(dbReader, dbToken));
                         }
                     }
-                    sqlMs += sqlSlice.ElapsedMilliseconds;
+                    /* Read ONCE. The stopwatch is still running, so a second read a few statements later
+                       returns a larger number, and the per-item total would then exceed the blended total
+                       it is a ratio against — a dominance a hair above the truth, on every Azure run
+                       (#2472). Small, and wrong in the direction that matters. */
+                    var dbSqlMs = sqlSlice.ElapsedMilliseconds;
+                    sqlMs += dbSqlMs;
 
                     /* Flush this database before reading the next — peak memory is one database's rows. */
+                    long dbStorageMs = 0;
                     if (batch.Count > 0)
                     {
                         var storageSlice = Stopwatch.StartNew();
                         rowsWritten += await WriteBatchAsync(pgConnection, definition, batch, server, collectionTime, context, cancellationToken);
-                        storageMs += storageSlice.ElapsedMilliseconds;
+                        dbStorageMs = storageSlice.ElapsedMilliseconds;
+                        storageMs += dbStorageMs;
                     }
+
+                    /* #2472: this database's slice, counted even when its batch was empty — an empty batch
+                       still paid for its read, and that read is in the blended total the rollup is a ratio
+                       against. Observed here rather than beside the log line below for the same reason the
+                       completion hook fires after the flush: both slices are only known once the write is
+                       done. */
+                    fanout.Observe(databaseName, dbSqlMs + dbStorageMs);
 
                     /* Same per-database bounded-cycle WARNING the enumeration path emits from
                        onItemComplete, mirroring Lite. Reachable here since #1836 put query_store — the
@@ -909,6 +936,12 @@ public sealed class DarlingCollectorRunner
                     writeBatch: (batch, ct) => WriteBatchAsync(pgConnection, definition, batch, server, collectionTime, context, ct),
                     onItemComplete: (item, batchCount, itemSqlMs, itemStorageMs) =>
                     {
+                        /* #2472: the per-database cost the blended collection_log row cannot carry. Counted
+                           for every completed item, including the quiet ones the log line below skips —
+                           their read time is in the blended total, so leaving them out would inflate the
+                           dominance ratio of whichever database happened to have rows. */
+                        fanout.Observe(item, itemSqlMs + itemStorageMs);
+
                         /* #2111: a completed item resets the adaptive-shrink count — recovery returns
                            the member to the full catch-up width on its next cycle. */
                         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
@@ -1085,7 +1118,7 @@ public sealed class DarlingCollectorRunner
 
         _logger?.LogDebug("Collected {RowCount} {Collector} rows for server '{Server}'",
             rowsWritten, definition.Name, server.Config.DisplayName);
-        return new CollectorRunResult(rowsWritten, sqlMs, storageMs, collectionNote);
+        return new CollectorRunResult(rowsWritten, sqlMs, storageMs, collectionNote, fanout.Result);
     }
 
     /// <summary>

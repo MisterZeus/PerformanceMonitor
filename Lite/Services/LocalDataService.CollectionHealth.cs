@@ -128,7 +128,19 @@ SELECT
              )
         THEN 1
         ELSE 0
-    END AS has_user_databases
+    END AS has_user_databases,
+    -- #2472: the per-database fan-out, described for ONE run — the dearest one in the window. Five
+    -- collectors run once per database and the run writes a single blended duration_ms, so eight
+    -- databases at 10.1s and one at 62s beside seven at 2.7s are the same 80,900 ms and want
+    -- opposite fixes. (No double quotes anywhere in this string: it is a verbatim literal, where a
+    -- lone quote ends it.) The four parts compose into slowest_item_ms * fanout_items /
+    -- slowest_run_duration_ms, which is 1.0 for an even fan-out and 6.1 for the dominated example.
+    -- All four come from the SAME row via slowest_rank: parts taken from different runs would
+    -- compose into a ratio describing no run that ever happened. Twins Darling's read.
+    MAX(CASE WHEN slowest_rank = 1 THEN fanout_item_count END) AS fanout_items,
+    MAX(CASE WHEN slowest_rank = 1 THEN slowest_item END) AS slowest_item,
+    MAX(CASE WHEN slowest_rank = 1 THEN slowest_item_ms END) AS slowest_item_ms,
+    MAX(CASE WHEN slowest_rank = 1 THEN duration_ms END) AS slowest_run_duration_ms
 FROM
 (
     -- #1855: rank each class of message newest-first so the two exemplar columns above can take the
@@ -145,6 +157,12 @@ FROM
         duration_ms,
         status,
         error_message,
+        -- #2472: projected here because this subquery enumerates its columns rather than SELECT *-ing
+        -- them, so an aggregate outside that names a column the inner query does not carry fails at the
+        -- store and nowhere earlier.
+        fanout_item_count,
+        slowest_item,
+        slowest_item_ms,
         ROW_NUMBER() OVER
         (
             PARTITION BY collector_name
@@ -158,7 +176,17 @@ FROM
             ORDER BY (CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN error_message END) IS NULL,
                      collection_time DESC,
                      error_message DESC
-        ) AS error_rank
+        ) AS error_rank,
+        -- #2472: the window's dearest single ITEM, and with it the run that carried it. Ranked on
+        -- slowest_item_ms rather than duration_ms because the question is which database is expensive,
+        -- not which cycle was.
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY collector_name
+            ORDER BY slowest_item_ms IS NULL,
+                     slowest_item_ms DESC,
+                     collection_time DESC
+        ) AS slowest_rank
     FROM v_collection_log
     WHERE server_id = $1
     AND   collection_time >= $2
@@ -190,7 +218,12 @@ ORDER BY collector_name";
                 YieldCount = reader.IsDBNull(12) ? 0 : ToInt64(reader.GetValue(12)),
                 LastNote = reader.IsDBNull(13) ? null : reader.GetString(13),
                 NoteCount = reader.IsDBNull(14) ? 0 : ToInt64(reader.GetValue(14)),
-                TargetHasUserDatabases = !reader.IsDBNull(15) && ToInt64(reader.GetValue(15)) != 0
+                TargetHasUserDatabases = !reader.IsDBNull(15) && ToInt64(reader.GetValue(15)) != 0,
+                /* Ordinals are positional and these four were APPENDED (#2472) — never inserted. */
+                FanoutItems = reader.IsDBNull(16) ? null : Convert.ToInt32(reader.GetValue(16)),
+                SlowestItem = reader.IsDBNull(17) ? null : reader.GetString(17),
+                SlowestItemMs = reader.IsDBNull(18) ? null : Convert.ToInt32(reader.GetValue(18)),
+                SlowestRunDurationMs = reader.IsDBNull(19) ? null : Convert.ToInt32(reader.GetValue(19))
             });
         }
 
@@ -386,6 +419,33 @@ public class CollectorHealthRow
     /// <see cref="HealthStatus"/> never sees it.
     /// </summary>
     public bool TargetHasUserDatabases { get; set; }
+
+    /* ── The per-database fan-out rollup (#2472), twinning Darling's CollectorHealth ─────────────────
+       Four parts of ONE run — the window's dearest single item and the run that carried it. NULL on
+       every collector that does not fan out. The tail statistics above cannot answer this: they
+       aggregate over RUNS, and each run is one blended row however many databases it covered. */
+
+    /// <summary>How many items that run fanned out over, or null when it did not fan out.</summary>
+    public int? FanoutItems { get; set; }
+
+    /// <summary>The dearest item in the window — a database name, for every fan-out that exists today.</summary>
+    public string? SlowestItem { get; set; }
+
+    /// <summary>What that item cost, SQL plus storage.</summary>
+    public int? SlowestItemMs { get; set; }
+
+    /// <summary>The whole run that item came from.</summary>
+    public int? SlowestRunDurationMs { get; set; }
+
+    /// <summary>The answer, as one number: 1.0 is a perfectly even fan-out and it rises with
+    /// concentration. Near 1.0 the cost is the fan-out's WIDTH; around 2.0 or above one database
+    /// dominates and a per-database override or a stagger is the lever (#2468). Null when the collector
+    /// does not fan out, or when the run's duration is zero — a ratio against nothing is a wrong
+    /// answer rather than a smaller one.</summary>
+    public double? FanoutDominance =>
+        FanoutItems is > 0 && SlowestItemMs.HasValue && SlowestRunDurationMs is > 0
+            ? (double)SlowestItemMs.Value * FanoutItems.Value / SlowestRunDurationMs.Value
+            : null;
 
     public double FailureRatePercent => TotalRuns > 0 ? (double)ErrorCount / TotalRuns * 100 : 0;
     public double HoursSinceLastSuccess => LastSuccessTime.HasValue
