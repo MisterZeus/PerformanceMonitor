@@ -315,7 +315,7 @@ public sealed class DarlingPeerDisclosureTests
         var postgres = snapshot.Peers[1];
 
         Assert.True(use2.CoversServerName("prod-sql-use2-beta-01"));
-        Assert.True(use2.CoversServerName("PROD-POS-USE2-AYR-01"));
+        Assert.True(use2.CoversServerName("PROD-SQL-USE2-GAMMA-01"));
         Assert.False(use2.CoversServerName("prod-sql-use1-beta-01"));
         Assert.False(use2.CoversServerName(null));
         Assert.False(use2.CoversServerName("   "));
