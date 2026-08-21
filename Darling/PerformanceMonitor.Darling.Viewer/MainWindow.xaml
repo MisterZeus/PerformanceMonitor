@@ -1377,8 +1377,14 @@
         </Border>
 
         <!-- Multi-field status bar (ported from Lite, adapted to what the viewer knows): general status,
-             collector health across all servers (from collection freshness), store database size, overall
-             collection status, and server count. -->
+             which SEAT this viewer holds, collector health across all servers (from collection freshness),
+             store database size, overall collection status, and server count.
+
+             SeatText sits first among the fixed fields, immediately right of the message area, because it
+             is the only one that describes THIS CONNECTION rather than the fleet, and #2479 exists because
+             the answer was previously discoverable only by tripping a refusal. Its text, colour and tooltip
+             are all set from ViewerSeatIndicator in the connect flow; the XAML holds only the not-probed-yet
+             state, which is what an operator sees if the window opens before OnLoaded finishes. -->
         <Grid Grid.Row="1" Margin="0,8,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
@@ -1386,12 +1392,14 @@
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <TextBlock Grid.Column="0" x:Name="StatusText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center"/>
-            <TextBlock Grid.Column="1" x:Name="CollectorHealthText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
-            <TextBlock Grid.Column="2" x:Name="DatabaseSizeText" Text="Database: --" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
-            <TextBlock Grid.Column="3" x:Name="CollectionStatusText" Text="Collection: --" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
-            <TextBlock Grid.Column="4" x:Name="ServerCountText" Text="Servers: 0" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center"/>
+            <TextBlock Grid.Column="1" x:Name="SeatText" Text="Seat: --" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
+            <TextBlock Grid.Column="2" x:Name="CollectorHealthText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
+            <TextBlock Grid.Column="3" x:Name="DatabaseSizeText" Text="Database: --" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
+            <TextBlock Grid.Column="4" x:Name="CollectionStatusText" Text="Collection: --" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
+            <TextBlock Grid.Column="5" x:Name="ServerCountText" Text="Servers: 0" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center"/>
         </Grid>
     </Grid>
 </Window>
