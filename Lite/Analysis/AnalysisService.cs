@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
@@ -76,7 +77,12 @@ public class AnalysisService
     /// Runs the full analysis pipeline for a server.
     /// Default time range is the last 4 hours.
     /// </summary>
-    public async Task<List<AnalysisFinding>> AnalyzeAsync(int serverId, string serverName, int hoursBack = 4)
+    /// <param name="cancellationToken">#2412: abandons the pass at the scheduler's per-server
+    /// budget (and at app shutdown). Optional so the on-demand callers — the Recommendations tab
+    /// and the MCP tool, neither of which has a budget to enforce — keep the prior behavior. The
+    /// argument order matches the Darling twin's AnalyzeAsync so the two stay transplantable.</param>
+    public async Task<List<AnalysisFinding>> AnalyzeAsync(
+        int serverId, string serverName, int hoursBack = 4, CancellationToken cancellationToken = default)
     {
         var timeRangeEnd = DateTime.UtcNow;
         var timeRangeStart = timeRangeEnd.AddHours(-hoursBack);
@@ -86,7 +92,8 @@ public class AnalysisService
             ServerId = serverId,
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
-            TimeRangeEnd = timeRangeEnd
+            TimeRangeEnd = timeRangeEnd,
+            CancellationToken = cancellationToken
         };
 
         return await AnalyzeAsync(context);
@@ -105,6 +112,17 @@ public class AnalysisService
 
         try
         {
+            /* #2412: a checkpoint ahead of every store-touching stage, so the rule is simply that
+               no store read STARTS after the budget has gone. One check at the top of the method
+               would not deliver that — each stage below is a many-query phase, and a cancelled
+               pass would run out whichever one it was already inside. This first checkpoint earns
+               its place even though the read below is a single scalar: an already-cancelled
+               context arrives here whenever the budget is very short or the pass queued behind a
+               wedged server, and it should not buy a round-trip. The post-enrichment tail (action
+               build + insert) carries no check on purpose — by then the expensive work is paid
+               for and finishing is what preserves it. */
+            context.CancellationToken.ThrowIfCancellationRequested();
+
             // 0. Check minimum data span — total history, not the analysis window.
             // A server with 100h of total history can be analyzed over a 4h window.
             var dataSpanHours = await GetTotalDataSpanHoursAsync(context.ServerId);
@@ -128,6 +146,8 @@ public class AnalysisService
                 return [];
             }
 
+            context.CancellationToken.ThrowIfCancellationRequested();
+
             // 1. Collect facts from DuckDB
             var facts = await _collector.CollectFactsAsync(context);
 
@@ -136,6 +156,8 @@ public class AnalysisService
                 LastAnalysisTime = DateTime.UtcNow;
                 return [];
             }
+
+            context.CancellationToken.ThrowIfCancellationRequested();
 
             // 1.5. Detect anomalies (compare analysis window against baseline)
             var anomalies = await _anomalyDetector.DetectAnomaliesAsync(context);
@@ -167,10 +189,14 @@ public class AnalysisService
             // dropped, only the incident tag is reconciled.
             AnomalyIncidentReconciler.Reconcile(stories);
 
+            context.CancellationToken.ThrowIfCancellationRequested();
+
             // 4. Mute-filter the stories into the surviving findings WITHOUT inserting yet (the
             //    Darling twin's D2/P2 reorder) — enrichment + action-build happen on the survivors
             //    first so the BUILT RemediationAction is persisted on each row.
             var findings = await _findingStore.FilterMutedFindingsAsync(stories, context);
+
+            context.CancellationToken.ThrowIfCancellationRequested();
 
             // 5. Enrich the survivors with drill-down data (ephemeral except through the built action).
             await _drillDown.EnrichFindingsAsync(findings, context);
@@ -212,6 +238,25 @@ public class AnalysisService
                 $"highest severity {(findings.Count > 0 ? findings.Max(f => f.Severity) : 0):F2}");
 
             return findings;
+        }
+        catch (OperationCanceledException ex) when (context.CancellationToken.IsCancellationRequested)
+        {
+            /* #2412: the pass was abandoned because it outlived its budget (or the app is
+               stopping), which is not a fault and must not read as one. Whatever this pass would
+               have written is gone; the next scheduled pass recomputes it from the store.
+
+               Both halves of the filter are load-bearing, and the TYPE half especially so here.
+               This token fires on TIMEOUT as well as at shutdown, so it is signalled during
+               ordinary running — a blanket `Exception` filter would relabel any genuine fault
+               that happened to land after the budget elapsed as abandonment and drop it to Info,
+               burying the one line of evidence it left. OperationCanceledException is what the
+               checkpoints throw, and what DuckDB's own duckdb_interrupt surfaces, so nothing the
+               cancellation actually produces is lost by naming it. This is the Darling twin's
+               AnalysisShutdown.IsShutdownAbandon discipline — signalled token AND a shape the
+               cancellation really produces — narrowed to the one shape that arises here. */
+            AppLogger.Info("AnalysisService",
+                $"Analysis abandoned for {context.ServerName} — this pass's findings are lost by design; the next pass recomputes them ({ex.Message})");
+            return [];
         }
         catch (Exception ex)
         {
