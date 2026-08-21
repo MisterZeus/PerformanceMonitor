@@ -231,14 +231,6 @@ ORDER BY collector_name";
     }
 
     /// <summary>
-    /// Gets recent collection log entries for a server, most recent first, bounded to the tab's
-    /// settable window. A preset ends "now" (<paramref name="hoursBack"/> from now); a custom range
-    /// (<paramref name="fromDate"/>/<paramref name="toDate"/>, both already server-time) bounds
-    /// <c>collection_time</c> on BOTH sides EXACTLY via <see cref="GetTimeRange"/> — mirroring how
-    /// <see cref="GetWaitStatsAsync"/> windows its read. The old single now-relative lower bound ignored
-    /// the custom To, rounding a custom range to a hours-back-from-now span.
-    /// </summary>
-    /// <summary>
     /// Whether this server has EVER recorded a collector run, ignoring any window.
     /// <para>Lets an empty log read say WHICH kind of nothing it found. "No runs in the last N hours" is
     /// true both of a quiet window and of a server that has never collected, and those want opposite
@@ -261,6 +253,14 @@ LIMIT 1";
         return await command.ExecuteScalarAsync() is not null and not DBNull;
     }
 
+    /// <summary>
+    /// Gets recent collection log entries for a server, most recent first, bounded to the tab's
+    /// settable window. A preset ends "now" (<paramref name="hoursBack"/> from now); a custom range
+    /// (<paramref name="fromDate"/>/<paramref name="toDate"/>, both already server-time) bounds
+    /// <c>collection_time</c> on BOTH sides EXACTLY via <see cref="GetTimeRange"/> — mirroring how
+    /// <see cref="GetWaitStatsAsync"/> windows its read. The old single now-relative lower bound ignored
+    /// the custom To, rounding a custom range to a hours-back-from-now span.
+    /// </summary>
     public async Task<List<CollectionLogRow>> GetRecentCollectionLogAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, int maxRows = 500)
     {
         using var connection = await OpenConnectionAsync();
