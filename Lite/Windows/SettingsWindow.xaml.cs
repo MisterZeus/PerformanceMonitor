@@ -191,6 +191,10 @@ public partial class SettingsWindow : Window
 
     private void UpdateMcpStatus()
     {
+        /* Cleared first, so a re-run after the file is fixed does not leave the unreadable-file
+           explanation hanging off a status line that no longer says it. */
+        McpStatusText.ToolTip = null;
+
         if (_mcpService != null)
         {
             /* Asked of the running host rather than re-read from settings.json, which may have been
@@ -245,6 +249,18 @@ public partial class SettingsWindow : Window
 
         _saved = true;
         if (mcpChanged) McpSettingsChanged = true;
+
+        /* #2431: the saves above copy an unreadable settings.json aside and write a fresh one, so a
+           warning raised when this window opened may simply not be true any more — and this window
+           stays open afterwards, so it would otherwise keep saying "settings.json could not be read"
+           over a file that now reads fine. Re-read rather than assume the save fixed it: a write that
+           failed leaves the file exactly as unreadable as it was, and this is the one surface in Lite
+           claiming to show the endpoint's state. */
+        if (_mcpSettingsProblem != null)
+        {
+            _mcpSettingsProblem = McpSettings.Load(App.ConfigDirectory).Problem;
+            UpdateMcpStatus();
+        }
 
         if (!alertsValid || !mcpValid || !webhooksValid) return;
 

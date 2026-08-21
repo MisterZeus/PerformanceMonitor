@@ -295,6 +295,23 @@ public sealed class McpEndpointLossReportingTests
     }
 
     /// <summary>
+    /// A warning that cannot go away is its own defect. Every Save in this window copies an unreadable
+    /// settings.json aside and writes a fresh one, and the window stays open afterwards — so a status
+    /// line set once at construction would keep telling the user the file cannot be read over a file
+    /// they have just fixed, for the rest of the session. Found in review on the first round of #2431.
+    /// </summary>
+    [Fact]
+    public void TheSettingsWindow_ReconsidersTheEndpointStateAfterASave()
+    {
+        var body = MethodBody(
+            File.ReadAllText(FindRepoFile(Path.Combine("Lite", "Windows", "SettingsWindow.xaml.cs"))),
+            "private async void SaveButton_Click(");
+
+        Assert.Contains("_mcpSettingsProblem", body, StringComparison.Ordinal);
+        Assert.Contains("UpdateMcpStatus()", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Everything between a method's signature and the first line that closes it at method indentation.
     /// Crude on purpose: it is enough to keep an assertion from being satisfied by a match somewhere else
     /// in a two-thousand-line window class, which is the only thing that would make these pins vacuous.
