@@ -139,6 +139,11 @@ public partial class RemoteCollectorService
         public long SqlMs { get; set; }
         public long StorageMs { get; set; }
         public string? Note { get; set; }
+
+        /// <summary>The per-database rollup for a run that fanned out, null for one that did not (#2472).
+        /// Lives beside the fetch/store split for the same reason it does: both are things one run has to
+        /// hand its own collection_log row, and both are meaningless once the next run resets the slot.</summary>
+        public FanoutCost? Fanout { get; set; }
     }
 
     /// <summary>
@@ -680,7 +685,7 @@ public partial class RemoteCollectorService
         RecordCollectorResult(GetServerId(server), collectorName, status, errorMessage, xeSessionUnavailable);
 
         // Log the collection attempt
-        await LogCollectionAsync(GetServerId(server), server.DisplayName, collectorName, startTime, status, errorMessage, rowsCollected, telemetry.SqlMs, telemetry.StorageMs);
+        await LogCollectionAsync(GetServerId(server), server.DisplayName, collectorName, startTime, status, errorMessage, rowsCollected, telemetry.SqlMs, telemetry.StorageMs, telemetry.Fanout);
     }
 
     /// <summary>
@@ -720,7 +725,7 @@ WHERE server_id = $3";
     /// <summary>
     /// Logs a collection attempt to the collection_log table.
     /// </summary>
-    private async Task LogCollectionAsync(int serverId, string serverName, string collectorName, DateTime startTime, string status, string? errorMessage, int rowsCollected, long sqlMs = 0, long duckDbMs = 0)
+    private async Task LogCollectionAsync(int serverId, string serverName, string collectorName, DateTime startTime, string status, string? errorMessage, int rowsCollected, long sqlMs = 0, long duckDbMs = 0, FanoutCost? fanout = null)
     {
         try
         {
@@ -731,8 +736,8 @@ WHERE server_id = $3";
 
             using var command = connection.CreateCommand();
             command.CommandText = @"
-                INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
+                INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms, fanout_item_count, slowest_item, slowest_item_ms)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)";
 
             command.Parameters.Add(new DuckDBParameter { Value = GenerateCollectionId() });
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -745,6 +750,14 @@ WHERE server_id = $3";
             command.Parameters.Add(new DuckDBParameter { Value = rowsCollected });
             command.Parameters.Add(new DuckDBParameter { Value = (int)sqlMs });
             command.Parameters.Add(new DuckDBParameter { Value = (int)duckDbMs });
+
+            /* All three NULL together or all three set (#2472): a slowest item with no count cannot be
+               turned into the dominance ratio the columns exist for, so half an answer is worse than none.
+               This INSERT names every column deliberately — it is a plain INSERT rather than the partial
+               INSERT OR REPLACE that resets untouched columns elsewhere in this SKU, and it stays that way. */
+            command.Parameters.Add(new DuckDBParameter { Value = fanout.HasValue ? fanout.Value.ItemCount : (object)DBNull.Value });
+            command.Parameters.Add(new DuckDBParameter { Value = fanout.HasValue ? fanout.Value.SlowestItem : (object)DBNull.Value });
+            command.Parameters.Add(new DuckDBParameter { Value = fanout.HasValue ? fanout.Value.SlowestItemMs : (object)DBNull.Value });
 
             await command.ExecuteNonQueryAsync();
 

@@ -185,7 +185,7 @@ public sealed class ViewerOverviewExplainsItselfTests
     /// <para>Two rounds on #2429 each surfaced a different contradicting pair (<c>IsOnline</c> null with no
     /// awaiting marker, then <c>IsOnline</c> true WITH one). Guarding those two would have left the third to
     /// be found the same way, so the renderings now share one discriminant
-    /// (<see cref="ServerCardStatus"/>) and this walks the whole product to prove no pair is left.</para>
+    /// (<see cref="ServerCollectionStatus"/>) and this walks the whole product to prove no pair is left.</para>
     /// </summary>
     [Fact]
     public void TheCardsTooltip_AgreesWithTheStatusWord_ForEveryCombinationOfTheFreshnessFlags()
@@ -265,27 +265,33 @@ public sealed class ViewerOverviewExplainsItselfTests
     [Fact]
     public void TheCardStatus_IsTheOnlyPlaceTheFreshnessFlagsAreRead()
     {
-        Assert.Equal(ServerCardStatus.Online, Healthy().CardStatus);
-        Assert.Equal(ServerCardStatus.Stale, Stale().CardStatus);
-        Assert.Equal(ServerCardStatus.Offline, Offline().CardStatus);
-        Assert.Equal(ServerCardStatus.AwaitingFirstCollection, Awaiting().CardStatus);
-        Assert.Equal(ServerCardStatus.Unknown, UnknownStatus().CardStatus);
+        Assert.Equal(ServerCollectionStatus.Online, Healthy().CardStatus);
+        Assert.Equal(ServerCollectionStatus.Stale, Stale().CardStatus);
+        Assert.Equal(ServerCollectionStatus.Offline, Offline().CardStatus);
+        Assert.Equal(ServerCollectionStatus.AwaitingFirstCollection, Awaiting().CardStatus);
+        Assert.Equal(ServerCollectionStatus.Unknown, UnknownStatus().CardStatus);
 
         /* The pair the second review round found: awaiting set alongside an online card. The status word has
            always ignored the marker there, and now so does everything downstream of it. */
         var onlineAndAwaiting = Healthy();
         onlineAndAwaiting.AwaitingFirstCollection = true;
 
-        Assert.Equal(ServerCardStatus.Online, onlineAndAwaiting.CardStatus);
+        Assert.Equal(ServerCollectionStatus.Online, onlineAndAwaiting.CardStatus);
         Assert.Equal("Online", onlineAndAwaiting.StatusDisplay);
         Assert.DoesNotContain("Awaiting", onlineAndAwaiting.StatusTooltip, StringComparison.Ordinal);
         Assert.DoesNotContain("Awaiting", FleetRollup.BuildReason(onlineAndAwaiting), StringComparison.Ordinal);
 
-        /* The source pin: nothing but CardStatus may branch on the flag pair. */
+        /* The source pin: nothing but CardStatus may branch on the flag triple, and since #2473 the ladder
+           itself is not written here either — the card RENDERS PerformanceMonitor.Common's one copy, which
+           the sidebar row and the service's two status surfaces also render. The syntax-agnostic half of that
+           claim (nobody re-spells the words anywhere) is ViewerSidebarDotRendersTheCardStatusTests'. */
         var overview = ReadRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.Overview.cs"));
-        Assert.Contains("public ServerCardStatus CardStatus => IsOnline switch", overview, StringComparison.Ordinal);
-        Assert.Contains("public string StatusDisplay => CardStatus switch", overview, StringComparison.Ordinal);
+        Assert.Contains("public ServerCollectionStatus CardStatus =>", overview, StringComparison.Ordinal);
+        Assert.Contains(
+            "ServerCollectionStatusRules.Classify(IsOnline, HasCollectorErrors, AwaitingFirstCollection);",
+            overview, StringComparison.Ordinal);
+        Assert.Contains("public string StatusDisplay => CardStatus.Word();", overview, StringComparison.Ordinal);
         Assert.Contains("public SolidColorBrush StatusBrush => MakeBrush(CardStatus switch", overview, StringComparison.Ordinal);
     }
 

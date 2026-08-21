@@ -43,6 +43,12 @@ public partial class RemoteCollectorService
         telemetry.SqlMs = 0;
         telemetry.StorageMs = 0;
         telemetry.Note = null;
+        telemetry.Fanout = null;
+
+        /* The per-database rollup (#2472), fed by both fan-out shapes — the Azure per-database connection
+           loop and the enumeration driver's onItemComplete hook — through the same shared accumulator the
+           Darling runner uses, so the two SKUs cannot come to disagree about what a slow database is. */
+        var fanout = new FanoutCostAccumulator();
 
         var status = _serverManager.GetConnectionStatus(server.Id);
         var target = new CollectorTargetInfo
@@ -354,15 +360,26 @@ public partial class RemoteCollectorService
                                 await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(dbReader, dbToken));
                         }
                     }
-                    sqlMs += sqlSlice.ElapsedMilliseconds;
+                    /* Read ONCE: the stopwatch is still running, so a second read a few statements later
+                       returns a larger number and the per-item total would exceed the blended total it is
+                       a ratio against (#2472). */
+                    var dbSqlMs = sqlSlice.ElapsedMilliseconds;
+                    sqlMs += dbSqlMs;
 
                     /* Flush this database before reading the next — peak memory is one database's rows. */
+                    long dbStorageMs = 0;
                     if (batch.Count > 0)
                     {
                         var storageSlice = Stopwatch.StartNew();
                         rowsWritten += WriteBatch(duckConnection, definition, batch, serverId, context.ServerName, collectionTime, context);
-                        storageMs += storageSlice.ElapsedMilliseconds;
+                        dbStorageMs = storageSlice.ElapsedMilliseconds;
+                        storageMs += dbStorageMs;
                     }
+
+                    /* #2472: this database's slice, counted even when its batch was empty — an empty batch
+                       still paid for its read, and that read is in the blended total the rollup is a ratio
+                       against. */
+                    fanout.Observe(databaseName, dbSqlMs + dbStorageMs);
 
                     /* Same per-database bounded-cycle WARNING the enumeration path emits from
                        onItemComplete. Reachable here since #1836 put query_store — the only collector
@@ -654,6 +671,11 @@ public partial class RemoteCollectorService
                     writeBatch: (batch, ct) => Task.FromResult(WriteBatch(duckConnection, definition, batch, serverId, context.ServerName, collectionTime, context)),
                     onItemComplete: (item, batchCount, itemSqlMs, itemStorageMs) =>
                     {
+                        /* #2472: the per-database cost the blended collection_log row cannot carry.
+                           Counted for every completed item, including the quiet ones the log line below
+                           skips — their read time is in the blended total too. */
+                        fanout.Observe(item, itemSqlMs + itemStorageMs);
+
                         /* #2111: a completed item resets the adaptive-shrink count — recovery returns
                            the member to the full catch-up width on its next cycle. */
                         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
@@ -805,6 +827,7 @@ public partial class RemoteCollectorService
 
         telemetry.SqlMs = sqlMs;
         telemetry.StorageMs = storageMs;
+        telemetry.Fanout = fanout.Result;
 
         _logger?.LogDebug("Collected {RowCount} {Collector} rows for server '{Server}'", rowsWritten, definition.Name, server.DisplayName);
         return rowsWritten;

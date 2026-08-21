@@ -23,8 +23,9 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// One row of the servers table, as the viewer's server list shows it. Was a positional record; it is now
 /// a class because the ported Lite server-row chrome needs mutable, change-notifying runtime state on each
 /// row — the favorite star (<see cref="IsFavorite"/>, matched from the viewer's registry) and the
-/// collection-freshness status dot (<see cref="IsOnline"/> / <see cref="HasCollectorErrors"/> →
-/// <see cref="DotStatus"/>) update in place on the refresh timers without resetting the list's selection.
+/// collection-freshness status dot (<see cref="IsOnline"/> / <see cref="HasCollectorErrors"/> /
+/// <see cref="AwaitingFirstCollection"/> → <see cref="CardStatus"/> → <see cref="DotStatus"/>) update in
+/// place on the refresh timers without resetting the list's selection.
 /// The Postgres-sourced fields stay immutable (get-only); only the sidebar overlay state is settable.
 /// Equality is now reference-based, which every consumer already relies on (they key on
 /// <see cref="ServerId"/> or hold the list's own instances).
@@ -87,7 +88,7 @@ public sealed class DarlingServer : INotifyPropertyChanged
             {
                 _isOnline = value;
                 OnPropertyChanged(nameof(IsOnline));
-                OnPropertyChanged(nameof(DotStatus));
+                RaiseDotChanged();
             }
         }
     }
@@ -104,34 +105,103 @@ public sealed class DarlingServer : INotifyPropertyChanged
             {
                 _hasCollectorErrors = value;
                 OnPropertyChanged(nameof(HasCollectorErrors));
-                OnPropertyChanged(nameof(DotStatus));
+                RaiseDotChanged();
+            }
+        }
+    }
+
+    private bool _awaitingFirstCollection;
+
+    /// <summary>
+    /// True when no collection has EVER landed for this server: the service hasn't reached it yet — a
+    /// registered-but-queued server during bootstrap, not a dead one. The row had no such flag until #2473,
+    /// which is precisely why its dot went grey "Unknown" while the Overview card one panel over said amber
+    /// "Awaiting first collection" about the same server, off the same freshness call.
+    /// </summary>
+    public bool AwaitingFirstCollection
+    {
+        get => _awaitingFirstCollection;
+        set
+        {
+            if (_awaitingFirstCollection != value)
+            {
+                _awaitingFirstCollection = value;
+                OnPropertyChanged(nameof(AwaitingFirstCollection));
+                RaiseDotChanged();
             }
         }
     }
 
     /// <summary>
-    /// Sidebar status-dot vocabulary — "Online"/"Warning"/"Offline"/"Unknown", identical to Lite's
-    /// <c>ServerConnection.DotStatus</c> so the ported server-row DataTriggers colour the Ellipse the same way.
+    /// The sidebar row's status, as a VALUE — the same <see cref="ServerCollectionStatus"/> the Overview card
+    /// renders (#2473). This row used to derive its own copy of the status ladder from the same flags, on a
+    /// different type, on a different surface, and with only four of the five states: the sidebar and the card
+    /// could therefore say different things about one server, and for a never-collected server they did. Both
+    /// now read <see cref="ServerCollectionStatusRules.Classify"/>, which is the collapse #2429 argued for —
+    /// with one discriminant there is no flag combination left for the renderings to disagree about.
     /// </summary>
-    public string DotStatus => IsOnline switch
+    public ServerCollectionStatus CardStatus =>
+        ServerCollectionStatusRules.Classify(IsOnline, HasCollectorErrors, AwaitingFirstCollection);
+
+    /// <summary>
+    /// Sidebar status-dot vocabulary — the SAME words the Overview card's <c>StatusDisplay</c> shows, because
+    /// both render <see cref="CardStatus"/>. They are also the <c>DataTrigger</c> values MainWindow.xaml keys
+    /// the Ellipse fill off, so a state with no trigger falls through to the muted grey default rather than
+    /// failing anything — which is how "Awaiting first collection" was silently grey. The trigger set is
+    /// pinned against the enum in <c>ViewerSidebarDotRendersTheCardStatusTests</c>.
+    /// </summary>
+    public string DotStatus => CardStatus.Word();
+
+    /// <summary>
+    /// What the dot means, for the ToolTip the sidebar Ellipse carries — the answer to #2422 one surface over,
+    /// and the thing that makes an amber dot legible at all. The card's amber covers two states (a stale
+    /// collection and a never-collected server) and the card disambiguates them with a WORD; a dot has no room
+    /// for one, so the tooltip does that job instead. The first line is
+    /// <see cref="ServerCollectionStatusRules.Headline"/>, word-for-word what the Overview card says for the
+    /// same state.
+    ///
+    /// <para>The second line names the axis. In Darling every one of these words is a COLLECTION answer —
+    /// there is no live ping to a monitored server — which is the opposite of Lite, where the identically
+    /// coloured dot reports a connection check. A reader who uses both should not have to infer which. The
+    /// third names the gesture THIS surface supports: <c>ServerList_MouseDoubleClick</c> opens the tab, and a
+    /// single click only selects, so naming one would be naming a no-op.</para>
+    /// </summary>
+    public string DotTooltip => string.Join(
+        "\n",
+        CardStatus.Headline(),
+        "Darling has no live ping: this is how old the newest collection is, not a connection check.",
+        "Double-click the row to open this server's tab");
+
+    /// <summary>Raises the change notifications for everything derived from the three status flags. One
+    /// helper rather than three call sites per setter: <see cref="DotTooltip"/> was added after
+    /// <see cref="DotStatus"/>, and a derived member that a setter forgets to announce is a dot that stops
+    /// updating in place — silent, and only visible on a list refresh.</summary>
+    private void RaiseDotChanged()
     {
-        true => HasCollectorErrors ? "Warning" : "Online",
-        false => "Offline",
-        _ => "Unknown"
-    };
+        OnPropertyChanged(nameof(CardStatus));
+        OnPropertyChanged(nameof(DotStatus));
+        OnPropertyChanged(nameof(DotTooltip));
+    }
 
     /// <summary>
     /// Sets the dot from the same collection-freshness classification the Overview cards use
-    /// (<see cref="ServerSummaryItem.ClassifyFreshness"/>): Fresh → Online, Stale → the amber Warning,
-    /// Offline → red, NeverCollected → the grey Unknown dot (the service hasn't reached the server yet —
-    /// during a fleet bootstrap that is "queued", not "dead"). Both instants are UTC (the store is naive
-    /// UTC; nowUtc is <see cref="DateTime.UtcNow"/>).
+    /// (<see cref="ServerSummaryItem.ClassifyFreshness"/>), through the same
+    /// <see cref="ServerCollectionStatusRules.FlagsFor"/> mapping: Fresh → Online, Stale → the amber Warning,
+    /// Offline → red, NeverCollected → the amber "Awaiting first collection" (the service hasn't reached the
+    /// server yet — during a fleet bootstrap that is "queued", not "dead"). Both instants are UTC (the store
+    /// is naive UTC; nowUtc is <see cref="DateTime.UtcNow"/>).
+    ///
+    /// <para>This method used to set two flags out of three by hand and drop the awaiting marker on the floor.
+    /// Nothing about a block of assignments makes a missing one visible, which is why the flags now arrive as
+    /// a single value (#2473).</para>
     /// </summary>
     public void ApplyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc)
     {
-        var freshness = ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, nowUtc);
-        IsOnline = freshness == ServerFreshness.NeverCollected ? null : freshness != ServerFreshness.Offline;
-        HasCollectorErrors = freshness == ServerFreshness.Stale;
+        var flags = ServerCollectionStatusRules.FlagsFor(
+            ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, nowUtc));
+        IsOnline = flags.IsOnline;
+        HasCollectorErrors = flags.HasCollectorErrors;
+        AwaitingFirstCollection = flags.AwaitingFirstCollection;
     }
 
     // ── Per-server alert "needs attention" badge state (from the polled alert history, ack-aware) ──
@@ -528,7 +598,8 @@ SELECT
     EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'query_store_health'),
     EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'query_store_text' AND column_name = 'query_hash'),
     EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_service' AND column_name = 'compose_statement_timeout_seconds'),
-    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_alert_settings' AND column_name = 'file_growth_enabled')";
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_alert_settings' AND column_name = 'file_growth_enabled'),
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'collection_log' AND column_name = 'slowest_item_ms')";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
     /// (<see cref="StorageVersion.SchemaVersion"/>). The connect-time gate blocks a store below this.</summary>
@@ -549,7 +620,7 @@ SELECT
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
-                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22), reader.GetBoolean(23), reader.GetBoolean(24), reader.GetBoolean(25), reader.GetBoolean(26), reader.GetBoolean(27), reader.GetBoolean(28), reader.GetBoolean(29), reader.GetBoolean(30), reader.GetBoolean(31), reader.GetBoolean(32), reader.GetBoolean(33), reader.GetBoolean(34), reader.GetBoolean(35), reader.GetBoolean(36), reader.GetBoolean(37), reader.GetBoolean(38), reader.GetBoolean(39), reader.GetBoolean(40), reader.GetBoolean(41), reader.GetBoolean(42), reader.GetBoolean(43), reader.GetBoolean(44), reader.GetBoolean(45), reader.GetBoolean(46), reader.GetBoolean(47), reader.GetBoolean(48), reader.GetBoolean(49), reader.GetBoolean(50), reader.GetBoolean(51), reader.GetBoolean(52), reader.GetBoolean(53), reader.GetBoolean(54));
+                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22), reader.GetBoolean(23), reader.GetBoolean(24), reader.GetBoolean(25), reader.GetBoolean(26), reader.GetBoolean(27), reader.GetBoolean(28), reader.GetBoolean(29), reader.GetBoolean(30), reader.GetBoolean(31), reader.GetBoolean(32), reader.GetBoolean(33), reader.GetBoolean(34), reader.GetBoolean(35), reader.GetBoolean(36), reader.GetBoolean(37), reader.GetBoolean(38), reader.GetBoolean(39), reader.GetBoolean(40), reader.GetBoolean(41), reader.GetBoolean(42), reader.GetBoolean(43), reader.GetBoolean(44), reader.GetBoolean(45), reader.GetBoolean(46), reader.GetBoolean(47), reader.GetBoolean(48), reader.GetBoolean(49), reader.GetBoolean(50), reader.GetBoolean(51), reader.GetBoolean(52), reader.GetBoolean(53), reader.GetBoolean(54), reader.GetBoolean(55));
             }
 
             return null;
@@ -574,7 +645,7 @@ SELECT
     /// is unit-tested without a live store; any schema bump past the newest arm trips the pinning test that keeps
     /// this in step with <see cref="StorageVersion.SchemaVersion"/>.
     /// </summary>
-    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false, bool hasCollectorState = false, bool hasPlanCorrection = false, bool hasPvsStats = false, bool hasPvsPressureKnobs = false, bool hasDatabaseStateAlert = false, bool hasServerTagColour = false, bool hasQueryStatsHostObject = false, bool hasFindingDrillDown = false, bool hasStoreMetrics = false, bool hasPlanDimGzip = false, bool hasSelfAlertKnobs = false, bool hasJobMetricsColumns = false, bool hasJobCadenceKnob = false, bool hasBackfillSwitch = false, bool hasCollectorMemoryKnobs = false, bool hasDatabaseStateEdgeMemory = false, bool hasIncidentOccurrences = false, bool hasPlanXmlCompressionKnob = false, bool hasMonitoredServerEngine = false, bool hasPgBlockingEdges = false, bool hasQueryStorePlanMap = false, bool hasPgStatementText = false, bool hasQueryStoreText = false, bool hasPlanContentRetentionKnob = false, bool hasQueryStoreHealth = false, bool hasQueryStoreTextHash = false, bool hasComposeTimeoutKnob = false, bool hasFileGrowthAlert = false)
+    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false, bool hasCollectorState = false, bool hasPlanCorrection = false, bool hasPvsStats = false, bool hasPvsPressureKnobs = false, bool hasDatabaseStateAlert = false, bool hasServerTagColour = false, bool hasQueryStatsHostObject = false, bool hasFindingDrillDown = false, bool hasStoreMetrics = false, bool hasPlanDimGzip = false, bool hasSelfAlertKnobs = false, bool hasJobMetricsColumns = false, bool hasJobCadenceKnob = false, bool hasBackfillSwitch = false, bool hasCollectorMemoryKnobs = false, bool hasDatabaseStateEdgeMemory = false, bool hasIncidentOccurrences = false, bool hasPlanXmlCompressionKnob = false, bool hasMonitoredServerEngine = false, bool hasPgBlockingEdges = false, bool hasQueryStorePlanMap = false, bool hasPgStatementText = false, bool hasQueryStoreText = false, bool hasPlanContentRetentionKnob = false, bool hasQueryStoreHealth = false, bool hasQueryStoreTextHash = false, bool hasComposeTimeoutKnob = false, bool hasFileGrowthAlert = false, bool hasCollectionLogFanoutRollup = false)
     {
         /* V71 (the PostgreSQL blocking-edges rung): a table-existence sentinel and now the newest-first arm.
            A collector table would ordinarily get no arm at all — see the V63-V69 note below — but the TOP
@@ -628,6 +699,19 @@ SELECT
         /* #2349: newest first. The arm below STAYS — a store migrated to exactly 78 must map to 78 rather
            than falling through. The column is named only in the probe line, not in this prose, per the V71
            finding: the coverage ratchet strips information_schema lines but cannot strip a comment. */
+        /* #2472: newest first. The arm below STAYS — a store migrated to exactly 79 must map to 79 rather
+           than falling through. The column is named only in the probe line, not in this prose, per the V71
+           finding: the coverage ratchet strips information_schema lines but cannot strip a comment.
+
+           This rung's gate earns its place rather than being bookkeeping. The service writes the fan-out
+           rollup on every productive per-database run and Collection Health reads it; a viewer on a V79
+           store would find the column missing and the read would throw rather than degrade, so the banner
+           has to fire before the tab does. */
+        if (hasCollectionLogFanoutRollup)
+        {
+            return 80;
+        }
+
         if (hasFileGrowthAlert)
         {
             return 79;
