@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Net;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Service.Hosting;
@@ -246,5 +247,125 @@ public sealed class DarlingHostBindingTests
         Assert.Equal((int)DarlingHostBinding.BindReason.ListenInvalid, (int)DarlingMcpHostService.McpBindReason.ListenInvalid);
         Assert.Equal((int)DarlingHostBinding.BindReason.TokenMissing, (int)DarlingMcpHostService.McpBindReason.TokenMissing);
         Assert.Equal((int)DarlingHostBinding.BindReason.AllowFromInvalid, (int)DarlingMcpHostService.McpBindReason.AllowFromInvalid);
+    }
+
+    /* ================================================================================================
+       #2389: WHICH PLANE decided enabled/port. One mcp object in darling.json has two owners —
+       enabled/port are a seed the store overrides forever after, network.* is file-only and restart-only —
+       and before this the supervisor's `published?.Enabled ?? config.Mcp.Enabled` could not say which side
+       it had taken. The resolution now carries its provenance, so the start line names it and a
+       disagreement is reported at the point of override.
+       ================================================================================================ */
+
+    /// <summary>Nothing published yet (worker bootstrapping, or a store it never reached): the FILE values
+    /// apply, unchanged — and are flagged as such, because the control plane can still contradict them.</summary>
+    [Fact]
+    public void ResolveEndpointToggle_Unpublished_TakesTheFileValues_AndSaysSo()
+    {
+        var toggle = DarlingHostBinding.ResolveEndpointToggle(published: null, fileEnabled: true, filePort: 5152);
+
+        Assert.True(toggle.Enabled);
+        Assert.Equal(5152, toggle.Port);
+        Assert.Equal(DarlingHostBinding.EndpointToggleOrigin.File, toggle.Origin);
+
+        /* Nothing is published, so there is nothing to disagree WITH — an unpublished read is not an override. */
+        Assert.False(toggle.EnabledOverridden);
+        Assert.False(toggle.PortOverridden);
+        Assert.Null(DarlingHostBinding.DescribeToggleOverride(toggle, "mcp", "MCP", fileEnabled: true, filePort: 5152));
+    }
+
+    /// <summary>The published row wins — the pre-existing behavior, pinned so the diagnostic did not change it.</summary>
+    [Theory]
+    [InlineData(true, 5152, false, 5199)]
+    [InlineData(false, 5199, true, 5152)]
+    public void ResolveEndpointToggle_Published_AlwaysWins(bool storeEnabled, int storePort, bool fileEnabled, int filePort)
+    {
+        var toggle = DarlingHostBinding.ResolveEndpointToggle((storeEnabled, storePort), fileEnabled, filePort);
+
+        Assert.Equal(storeEnabled, toggle.Enabled);
+        Assert.Equal(storePort, toggle.Port);
+        Assert.Equal(DarlingHostBinding.EndpointToggleOrigin.ControlPlane, toggle.Origin);
+    }
+
+    /// <summary>Agreeing planes are silent: the warning fires on the MISMATCH, not on every start.</summary>
+    [Fact]
+    public void DescribeToggleOverride_PlanesAgree_IsSilent()
+    {
+        var toggle = DarlingHostBinding.ResolveEndpointToggle((true, 5152), fileEnabled: true, filePort: 5152);
+
+        Assert.False(toggle.EnabledOverridden);
+        Assert.False(toggle.PortOverridden);
+        Assert.Null(DarlingHostBinding.DescribeToggleOverride(toggle, "mcp", "MCP", fileEnabled: true, filePort: 5152));
+    }
+
+    /// <summary>
+    /// The reported case (#2389): darling.json says enabled, the store says disabled, the store wins and the
+    /// server is stopped five seconds after announcing a successful start. The message has to name BOTH sides
+    /// with the key/column an operator can act on, say which one wins, and disclose the opposite ownership of
+    /// the network block — otherwise the reader concludes their file edit worked.
+    /// </summary>
+    [Fact]
+    public void DescribeToggleOverride_FileEnabledButStoreDisabled_NamesBothPlanesAndTheWinner()
+    {
+        var toggle = DarlingHostBinding.ResolveEndpointToggle((false, 5152), fileEnabled: true, filePort: 5152);
+        var report = DarlingHostBinding.DescribeToggleOverride(toggle, "mcp", "MCP", fileEnabled: true, filePort: 5152);
+
+        Assert.NotNull(report);
+        Assert.Contains("true in darling.json (mcp.enabled)", report, StringComparison.Ordinal);
+        Assert.Contains("false in config.config_service.mcp_enabled", report, StringComparison.Ordinal);
+        Assert.Contains("CONTROL PLANE WINS", report, StringComparison.Ordinal);
+        Assert.Contains("--enable-mcp/--disable-mcp", report, StringComparison.Ordinal);
+        /* The other half of the confusion: network.* is file-authoritative, so an exposure block stays live
+           while the control plane keeps the endpoint off. */
+        Assert.Contains("mcp.network", report, StringComparison.Ordinal);
+        /* Only the field that actually DIFFERS gets a clause — the ports agree here, so no port clause.
+           (The closing advice still names mcp.port, which is why this pins the clause form, not the key.) */
+        Assert.DoesNotContain("port is 5152 in darling.json", report, StringComparison.Ordinal);
+    }
+
+    /// <summary>The port has the identical shape (the issue's second half): a server on an unexpected port
+    /// with no explanation. Both fields differing are reported together, in one line.</summary>
+    [Fact]
+    public void DescribeToggleOverride_ReportsThePortToo_AndBothFieldsAtOnce()
+    {
+        var toggle = DarlingHostBinding.ResolveEndpointToggle((true, 5199), fileEnabled: false, filePort: 5152);
+        var report = DarlingHostBinding.DescribeToggleOverride(toggle, "mcp", "MCP", fileEnabled: false, filePort: 5152);
+
+        Assert.NotNull(report);
+        Assert.Contains("false in darling.json (mcp.enabled)", report, StringComparison.Ordinal);
+        Assert.Contains("true in config.config_service.mcp_enabled", report, StringComparison.Ordinal);
+        Assert.Contains("port is 5152 in darling.json (mcp.port) but 5199 in config.config_service.mcp_port", report, StringComparison.Ordinal);
+    }
+
+    /// <summary>The web dashboard is the same defect on the same seam, so it shares the resolver: one
+    /// <c>section</c> argument drives the file key, the store column and the CLI verb, which is what stops the
+    /// two surfaces' wordings from drifting apart.</summary>
+    [Fact]
+    public void DescribeToggleOverride_WebSurface_NamesTheWebKeysAndVerbs()
+    {
+        var toggle = DarlingHostBinding.ResolveEndpointToggle((false, 5153), fileEnabled: true, filePort: 5153);
+        var report = DarlingHostBinding.DescribeToggleOverride(toggle, "web", "Web dashboard", fileEnabled: true, filePort: 5153);
+
+        Assert.NotNull(report);
+        Assert.Contains("web.enabled", report, StringComparison.Ordinal);
+        Assert.Contains("config.config_service.web_enabled", report, StringComparison.Ordinal);
+        Assert.Contains("--enable-web/--disable-web", report, StringComparison.Ordinal);
+        Assert.DoesNotContain("mcp", report, StringComparison.Ordinal);
+    }
+
+    /// <summary>The start line's provenance clause distinguishes the two planes, and the file case admits it
+    /// is provisional — that line is the one the operator greps and stops reading.</summary>
+    [Fact]
+    public void DescribeToggleOrigin_DistinguishesThePlanes_AndFlagsTheFileCaseAsProvisional()
+    {
+        var fromStore = DarlingHostBinding.DescribeToggleOrigin(
+            DarlingHostBinding.ResolveEndpointToggle((true, 5152), fileEnabled: true, filePort: 5152));
+        var fromFile = DarlingHostBinding.DescribeToggleOrigin(
+            DarlingHostBinding.ResolveEndpointToggle(published: null, fileEnabled: true, filePort: 5152));
+
+        Assert.Contains("config.config_service", fromStore, StringComparison.Ordinal);
+        Assert.Contains("darling.json", fromFile, StringComparison.Ordinal);
+        Assert.Contains("PROVISIONAL", fromFile, StringComparison.Ordinal);
+        Assert.NotEqual(fromStore, fromFile);
     }
 }
