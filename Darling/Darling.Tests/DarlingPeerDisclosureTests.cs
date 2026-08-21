@@ -517,7 +517,7 @@ public sealed class DarlingPeerDisclosureTests
             Stores =
             {
                 new PeerStoreConfig { Name = "box2", Covers = "the replicas", Matches = { "use2" } },
-                new PeerStoreConfig { Name = "box3", Covers = "the archive replicas", Matches = { "prod-pos" } },
+                new PeerStoreConfig { Name = "box3", Covers = "the archive replicas", Matches = { "prod-sql" } },
             },
         });
 
