@@ -142,6 +142,49 @@ public sealed class ServerTagPill
     public System.Windows.Media.Brush TextBrush => TagColorBrushes.PillText;
 }
 
+/// <summary>
+/// The Overview card's status-line state, as a VALUE rather than a rendered string. The word on the card
+/// (<see cref="ServerSummaryItem.StatusDisplay"/>), the colour it is painted
+/// (<see cref="ServerSummaryItem.StatusBrush"/>), the card's border
+/// (<see cref="ServerSummaryItem.CardBorderBrush"/>), the offline overlay
+/// (<see cref="ServerSummaryItem.IsOffline"/>) and the first line of its tooltip
+/// (<see cref="ServerSummaryItem.StatusTooltip"/>) are all renderings OF THIS — the
+/// (<c>IsOnline</c>, <c>HasCollectorErrors</c>) pair is read here and nowhere else, so no two of them can land
+/// on different answers for the same card. The Darling viewer's twin (<c>ServerCardStatus</c> there) exists
+/// because two review passes on #2429 each found a flag combination where two independent readings disagreed;
+/// the word and the colour here already carried their own copy of the ladder, and the tooltip would have been
+/// a third.
+///
+/// <para>Review on #2451 found the fifth: <c>CardBorderBrush</c> read <c>IsOffline</c> and
+/// <c>HasCollectorErrors</c> raw, agreeing with the status word by coincidence rather than by construction.
+/// It disagreed on one pair already — an unchecked card carrying a collector-error marker drew the amber
+/// "collectors failing" border while its word read "Unknown". The Overview loader only sets that marker when
+/// the connection check SUCCEEDED, so the pair is unreached in practice, which is exactly the argument for
+/// making it unrepresentable rather than leaving it to a caller to keep avoiding.</para>
+///
+/// <para><b>The amber state is NOT the viewer's.</b> The viewer derives its status from collection freshness
+/// and calls this member <c>Stale</c>; Lite's <c>IsOnline</c> comes from a live connection check and
+/// <c>HasCollectorErrors</c> from <c>ErroringCollectors > 0</c> — collectors that are actually failing. Same
+/// amber, same word "Warning", different cause. That is precisely why the tooltip has to say which one it is
+/// rather than leaving the reader to infer it from a colour.</para>
+/// </summary>
+public enum ServerCardStatus
+{
+    /// <summary>The last connection check succeeded and no collector is erroring.</summary>
+    Online,
+
+    /// <summary>Connected, but one or more collectors have consecutive errors — the card's amber "Warning".
+    /// Nothing to do with the metric rows, which is the whole reason it needs explaining.</summary>
+    CollectorErrors,
+
+    /// <summary>The last connection check failed — the card's red offline overlay.</summary>
+    Offline,
+
+    /// <summary>The server has not been connection-checked yet (<c>IsOnline</c> is null): a card built before
+    /// the first check completed, not a dead server.</summary>
+    Unknown,
+}
+
 public class ServerSummaryItem
 {
     public string DisplayName { get; set; } = "";
@@ -193,41 +236,150 @@ public class ServerSummaryItem
     public string DeadlockDisplay => DeadlockCount > 0 ? DeadlockCount.ToString() : "0";
     public string LastCollectionDisplay => LastCollectionTime.HasValue ? ServerTimeHelper.FormatServerTime(LastCollectionTime, "HH:mm:ss") : "Never";
 
-    /* Connection status */
-    public string StatusDisplay => IsOnline switch
+    /* Connection status. This is the ONE place the (IsOnline, HasCollectorErrors) pair is read; the word, the
+       colour and the tooltip's first line all render the result. See ServerCardStatus. */
+    public ServerCardStatus CardStatus => IsOnline switch
     {
-        true when HasCollectorErrors => "Warning",
-        true => "Online",
-        false => "Offline",
+        true when HasCollectorErrors => ServerCardStatus.CollectorErrors,
+        true => ServerCardStatus.Online,
+        false => ServerCardStatus.Offline,
+        _ => ServerCardStatus.Unknown
+    };
+
+    public string StatusDisplay => CardStatus switch
+    {
+        ServerCardStatus.CollectorErrors => "Warning",
+        ServerCardStatus.Online => "Online",
+        ServerCardStatus.Offline => "Offline",
         _ => "Unknown"
     };
-    public SolidColorBrush StatusBrush => MakeBrush(IsOnline switch
+    public SolidColorBrush StatusBrush => MakeBrush(CardStatus switch
     {
-        true when HasCollectorErrors => "#FFD54F",  // amber — connected but collectors failing
-        true => "#81C784",
-        false => "#E57373",
+        ServerCardStatus.CollectorErrors => "#FFD54F",  // amber — connected but collectors failing
+        ServerCardStatus.Online => "#81C784",
+        ServerCardStatus.Offline => "#E57373",
         _ => "#888888"
     });
-    public bool IsOffline => IsOnline == false;
+    public bool IsOffline => CardStatus == ServerCardStatus.Offline;
+
+    /* ── Per-row concern gates ───────────────────────────────────────────────────────────────────────
+       Each metric row's "this is not green" test, evaluated ONCE. The row's own brush reads it and so does
+       StatusReason, which is what makes the tooltip incapable of naming a metric whose row is green — or of
+       staying silent about one that is not. A tooltip built from an independent severity calculation would
+       lose exactly that property, and the one place it would disagree is a card the reader is staring at.
+
+       Note the gates follow the ROW, not the card border: the CPU row goes amber at 50 while the border only
+       escalates at 80. The reason names rows, so it uses the row's threshold. */
+    private bool CpuIsElevated => CpuPercentForAlert >= 50;
+    private bool CpuIsCritical => CpuPercentForAlert >= 80;
+    private bool BlockingIsElevated => BlockingCount > 0;
+    private bool DeadlocksAreElevated => DeadlockCount > 0;
 
     /* Color coding */
-    public SolidColorBrush CpuBrush
+    public SolidColorBrush CpuBrush => MakeBrush(CpuIsCritical ? "#E57373" : CpuIsElevated ? "#FFB74D" : "#81C784");
+    public SolidColorBrush BlockingBrush => MakeBrush(BlockingIsElevated ? "#FFB74D" : "#81C784");
+    public SolidColorBrush DeadlockBrush => MakeBrush(DeadlocksAreElevated ? "#E57373" : "#81C784");
+    /* The border ranks the same states the status word names, so it reads the SAME discriminant rather than
+       the flags behind it — see ServerCardStatus for the pair the raw reads disagreed on. The precedence is
+       unchanged: a dark server first, then the metric rows worst-first, then failing collectors. */
+    public SolidColorBrush CardBorderBrush => MakeBrush(
+        CardStatus == ServerCardStatus.Offline ? "#E57373" :
+        DeadlocksAreElevated ? "#E57373" :
+        BlockingIsElevated ? "#FFB74D" :
+        CpuIsCritical ? "#FFB74D" :
+        CardStatus == ServerCardStatus.CollectorErrors ? "#FFD54F" :   // amber border when collectors are failing
+        "#2a2d35");
+
+    /* ── The card explains itself (#2437 / #2422) ────────────────────────────────────────────────────
+       Reported against the Darling viewer and fixed there in #2429; Lite's card had the identical bare
+       status binding. A reader saw a word and a colour and had to scan the metric rows guessing which one
+       the card meant — once per card, on every card.
+
+       Lite's version has one more thing to say than the viewer's, because Lite's status word is a CONNECTION
+       word, not a health band: a card with 96% CPU and two deadlocks still says "Online" in green while its
+       border is red, and a card saying "Warning" in amber is reporting failing COLLECTORS and nothing about
+       the metrics at all. Fusing the two into one clause would reproduce the ambiguity in prose, so the
+       tooltip keeps them on separate lines: what the status word means, then what the rows say. */
+
+    /// <summary>What the status word means, in words — the tooltip's first line. Switches on
+    /// <see cref="CardStatus"/>, the same discriminant <see cref="StatusDisplay"/> renders, so a tooltip that
+    /// hangs off a word can never contradict it.</summary>
+    private string StatusHeadline => CardStatus switch
+    {
+        ServerCardStatus.CollectorErrors => "Warning — one or more collectors are failing on this server",
+        ServerCardStatus.Online => "Online — the last connection check succeeded",
+        ServerCardStatus.Offline => "Offline — the last connection check failed",
+        _ => "Unknown — this server has not been connection-checked yet",
+    };
+
+    /// <summary>
+    /// The metric rows that are not green, in the card's OWN display strings — "CPU 96% (SQL 90%), Deadlocks 2".
+    /// Assembled from the displays rather than from the underlying numbers so the sentence and the rows cannot
+    /// render differently, and gated on the same predicates the row brushes use so it cannot name a different
+    /// set of rows than the ones that are coloured. Empty when every row is green.
+    ///
+    /// <para>Memory is absent deliberately: the Memory row carries no severity brush on this card, so there is
+    /// no band to report. Inventing a threshold here would be the one thing this property exists to prevent —
+    /// a tooltip asserting something the rows underneath it do not.</para>
+    /// </summary>
+    public string StatusReason
     {
         get
         {
-            var v = CpuPercentForAlert;
-            return MakeBrush(v >= 80 ? "#E57373" : v >= 50 ? "#FFB74D" : "#81C784");
+            var parts = new List<string>();
+
+            if (CpuIsElevated)
+            {
+                parts.Add("CPU " + CpuDisplay);
+            }
+
+            if (BlockingIsElevated)
+            {
+                parts.Add("Blocking " + BlockingDisplay);
+            }
+
+            if (DeadlocksAreElevated)
+            {
+                parts.Add("Deadlocks " + DeadlockDisplay);
+            }
+
+            return string.Join(", ", parts);
         }
     }
-    public SolidColorBrush BlockingBrush => MakeBrush(BlockingCount > 0 ? "#FFB74D" : "#81C784");
-    public SolidColorBrush DeadlockBrush => MakeBrush(DeadlockCount > 0 ? "#E57373" : "#81C784");
-    public SolidColorBrush CardBorderBrush => MakeBrush(
-        IsOnline == false ? "#E57373" :
-        DeadlockCount > 0 ? "#E57373" :
-        BlockingCount > 0 ? "#FFB74D" :
-        CpuPercentForAlert >= 80 ? "#FFB74D" :
-        HasCollectorErrors ? "#FFD54F" :   // amber border when collectors are failing
-        "#2a2d35");
+
+    /// <summary>
+    /// The Overview card's status tooltip (#2437, answering #2422 on Lite's surface): what the status word
+    /// means, what the metric rows say, and what to do next.
+    ///
+    /// <para>The metric line is omitted on an Offline card. The card draws a dimming overlay across those rows
+    /// precisely because the numbers under it are the last ones collected before the server went dark, so
+    /// demanding attention for them would contradict the card while the reader is looking at it.</para>
+    /// </summary>
+    public string StatusTooltip
+    {
+        get
+        {
+            var lines = new List<string> { StatusHeadline };
+
+            if (CardStatus != ServerCardStatus.Offline)
+            {
+                var reason = StatusReason;
+                lines.Add(reason.Length > 0
+                    ? "Needs attention: " + reason
+                    : "Every metric on this card is inside its threshold");
+            }
+
+            lines.Add(CardTooltipAction);
+
+            return string.Join("\n", lines);
+        }
+    }
+
+    /// <summary>The line every card tooltip ends on — the gesture the card actually supports.
+    /// <c>OverviewCard_MouseLeftButtonDown</c> acts only on <c>ClickCount == 2</c>, so naming a single click
+    /// would be naming a no-op. The viewer's card tooltip ends on this same sentence, so a reader moving
+    /// between the two apps is told the same thing in the same words.</summary>
+    private const string CardTooltipAction = "Double-click the card to open this server's tab";
 
     private static SolidColorBrush MakeBrush(string hex)
     {
