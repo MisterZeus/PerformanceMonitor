@@ -86,8 +86,13 @@
   </ItemGroup>
 
   <ItemGroup>
-<None Update="config\settings.json">
-      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+    <!-- The commented settings.json reference (#2418). It SHIPS beside the exe, because the whole
+         point is that someone hand-editing an install can find what settings.json may contain,
+         including the knobs with no Settings-window control. It is deliberately absent from
+         ConfigSeeder's seed list: documentation to read, not a file to drop in, and the .sample.
+         name keeps it from being mistaken for the live one. SettingsSampleTests holds it honest. -->
+    <None Update="config\settings.sample.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Update="config\collection_schedule.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
