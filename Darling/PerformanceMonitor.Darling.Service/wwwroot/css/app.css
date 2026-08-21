@@ -952,3 +952,13 @@ pre.code {
 /* The in-panel picker row (wait-type / perfmon-counter composites) — the single-select web twin of the desktop
    viewer's checkbox pickers. Sits between a panel's table and its chart. */
 .picker-row { display: flex; align-items: center; gap: 0.5rem; margin: 0.85rem 0 0.4rem; }
+
+/* The server header's "why": the pre-banded reason sentence (when the fleet ranked this server) over the same
+   metric chips the fleet card carries. A band word with no way to ask why is #2422 on a new surface. */
+.server-why { margin: -0.4rem 0 1rem; }
+.server-reason { font-size: 0.85rem; margin-bottom: 0.5rem; }
+.server-reason.band-Critical { color: var(--err); }
+.server-reason.band-Warning { color: var(--warn); }
+.server-reason.band-Offline { color: var(--err); }
+.server-reason.band-Healthy { color: var(--ok); }
+.server-why .metric-bands { max-width: 900px; }

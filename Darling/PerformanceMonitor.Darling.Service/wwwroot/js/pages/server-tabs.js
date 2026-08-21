@@ -1088,9 +1088,11 @@ const SPINLOCK_COLUMNS = [
   { key: "description", label: "What it means", wrap: true },
 ];
 
+/* #1949 ordering, which every query grid in both apps follows: the time/identity anchor, then the QUERY TEXT,
+   then the metrics. Text pushed behind the metrics is text nobody scrolls to. */
 const TOP_QUERY_COLUMNS = [
-  { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
   { key: "database_name", label: "Database" },
+  { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
   { key: "host_object", label: "Host object" },
   { key: "execution_count", label: "Execs", format: "int" },
   { key: "total_cpu_ms", label: "Total CPU", format: "ms" },
@@ -1117,8 +1119,8 @@ const TOP_PROC_COLUMNS = [
 ];
 
 const QUERY_STORE_COLUMNS = [
-  { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
   { key: "database_name", label: "Database" },
+  { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
   { key: "query_id", label: "Query ID", format: "int" },
   { key: "plan_id", label: "Plan ID", format: "int" },
   { key: "execution_count", label: "Execs", format: "int" },
@@ -1144,6 +1146,7 @@ const LONG_QUERY_COLUMNS = [
 
 const PLAN_CORRECTION_COLUMNS = [
   { key: "collection_time", label: "Collected", format: "time" },
+  { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
   { key: "database_name", label: "Database" },
   { key: "query_id", label: "Query ID", format: "int" },
   { key: "recommendation_state", label: "State" },
@@ -1151,7 +1154,6 @@ const PLAN_CORRECTION_COLUMNS = [
   { key: "score", label: "Score", format: "int" },
   { key: "estimated_gain_seconds", label: "Est. gain (s)", format: "num1" },
   { key: "last_good_plan_is_forced", label: "Forced", format: "bool" },
-  { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
 ];
 
 const AUTO_TUNING_COLUMNS = [
@@ -1179,23 +1181,23 @@ const ACTIVE_COLUMNS = [
 
 const BLOCKING_COLUMNS = [
   { key: "event_time", label: "Time", format: "time" },
+  { key: "blocked_sql_text", label: "Blocked SQL", render: (r) => codeDisclosure(r.blocked_sql_text) },
+  { key: "blocking_sql_text", label: "Blocking SQL", render: (r) => codeDisclosure(r.blocking_sql_text) },
   { key: "database_name", label: "Database" },
   { key: "blocked_spid", label: "Blocked", format: "int" },
   { key: "blocking_spid", label: "Blocker", format: "int" },
   { key: "wait_time_ms", label: "Wait", format: "ms" },
   { key: "lock_mode", label: "Mode" },
   { key: "contentious_object", label: "Object" },
-  { key: "blocked_sql_text", label: "Blocked SQL", render: (r) => codeDisclosure(r.blocked_sql_text) },
-  { key: "blocking_sql_text", label: "Blocking SQL", render: (r) => codeDisclosure(r.blocking_sql_text) },
   { key: "blocked_client_app", label: "Blocked App" },
   { key: "blocking_client_app", label: "Blocking App" },
 ];
 
 const DEADLOCK_COLUMNS = [
   { key: "deadlock_time", label: "Deadlock Time", format: "time" },
+  { key: "victim_sql_text", label: "Victim SQL", render: (r) => codeDisclosure(r.victim_sql_text) },
   { key: "victim_process_id", label: "Victim" },
   { key: "process_summary", label: "Processes", wrap: true },
-  { key: "victim_sql_text", label: "Victim SQL", render: (r) => codeDisclosure(r.victim_sql_text) },
   { key: "has_deadlock_xml", label: "Graph", format: "bool" },
 ];
 

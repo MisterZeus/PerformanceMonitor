@@ -26,6 +26,7 @@
 
 import { el, mount, apiGet, bandClass } from "../util.js";
 import { SERVER_TABS, findServerTab, tabNote } from "./server-tabs.js";
+import { metricBands } from "./fleet.js";
 
 /** The page time range. Mirrors the desktop viewer's presets, plus the two longer windows the view chrome uses. */
 const RANGE_OPTIONS = [
@@ -55,6 +56,7 @@ export function renderServer(main, server, tabId) {
 
   const dot = el("span", { class: "dot" });
   const badgeSlot = el("span", { class: "server-band" });
+  const whySlot = el("div", { class: "server-why" });
   const head = el("div", { class: "page-head" }, [
     el("a", { href: "#/fleet", text: "← Fleet" }),
     el("span", { class: "server-title" }, [dot, el("h2", { text: server })]),
@@ -62,12 +64,12 @@ export function renderServer(main, server, tabId) {
     el("div", { class: "spacer" }),
     rangeControl(),
   ]);
-  enrichServerHead(dot, badgeSlot, server);
+  enrichServerHead(dot, badgeSlot, whySlot, server);
 
   gridNode = el("div", { class: "panel-grid" });
   redrawPanels();
 
-  mount(main, [head, subtabBar(server, tab), tabNote(tab), gridNode]);
+  mount(main, [head, whySlot, subtabBar(server, tab), tabNote(tab), gridNode]);
 }
 
 /** (Re)fill the panel grid for the current server + tab at the current range. No refetch of anything else. */
@@ -109,15 +111,36 @@ function rangeControl() {
   return el("label", { class: "range-control" }, [el("span", { text: "Range" }), sel]);
 }
 
-/* The server header's status dot + band badge come from this server's pre-banded fleet card (one /api/fleet
- * read); the header renders immediately and this fills the dot/badge in when the card arrives. */
-function enrichServerHead(dot, badgeSlot, server) {
+/* The server header's status dot, band badge and the WHY beneath them, all from this server's pre-banded fleet
+ * card (one /api/fleet read). The header renders immediately and this fills them in when the card arrives.
+ *
+ * The band word alone is not an answer. `Warning` has three unrelated causes — a genuine metric breach, a server
+ * awaiting its first collection, and a collector error — so a badge reading "Warning" with no way to ask why is
+ * the #2422 report rebuilt on a new surface, which is exactly what #2429 fixed on the desktop by attaching the
+ * card's own metric rows. Two things are shown here and NEITHER is derived in the browser (R1): the per-metric
+ * severity chips, rendered by fleet.js's own metricBands so there is one implementation rather than two, and —
+ * when this server is in the fleet's worst-first ranking — the reason string the server already computed for it,
+ * the same sentence the fleet page shows. A server outside that ranking gets the chips and no sentence, because
+ * inventing one here is the second derivation this comment exists to refuse. */
+function enrichServerHead(dot, badgeSlot, whySlot, server) {
   (async () => {
     const res = await apiGet("/api/fleet");
     if (res.kind !== "data") return;
-    const card = (res.data.cards || []).find((c) => c.server_name === server || c.display_name === server);
+    const matches = (c) => c.server_name === server || c.display_name === server;
+    const card = (res.data.cards || []).find(matches);
     if (!card) return;
+
     dot.className = "dot " + bandClass(card.band);
-    mount(badgeSlot, el("span", { class: "badge " + bandClass(card.band), text: card.status || card.band }));
+    const ranked = (res.data.worst_servers || []).find((w) => w.display_name === server);
+    const reason = ranked && ranked.reason ? ranked.reason : null;
+    mount(
+      badgeSlot,
+      el("span", { class: "badge " + bandClass(card.band), text: card.status || card.band, title: reason || null })
+    );
+
+    mount(whySlot, [
+      reason ? el("div", { class: "server-reason " + bandClass(card.band), text: reason }) : null,
+      metricBands(card),
+    ]);
   })();
 }

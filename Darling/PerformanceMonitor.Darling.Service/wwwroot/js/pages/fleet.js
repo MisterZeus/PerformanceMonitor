@@ -498,8 +498,14 @@ function serverCard(c) {
 
 /* Enriched metric chips (M1): each carries a secondary detail line from fields /api/fleet already returns —
    the SQL-vs-total CPU split, threads available/max, memory + buffer-pool GB, blocking max wait, deadlocks
-   last-seen, and collectors healthy/failing. */
-function metricBands(c) {
+   last-seen, and collectors healthy/failing.
+
+   EXPORTED because the server detail page's header renders the same chips under its band badge. `Warning` has
+   three unrelated causes — a real metric breach, awaiting-first-collection, and a collector error — and a badge
+   that says only "Warning" is #2422 rebuilt on a new surface. These chips are the answer, and they are the
+   SERVER's severities read off the card (R1), so the two surfaces cannot drift into different opinions the way
+   a second derivation would. */
+export function metricBands(c) {
   const threadsValue =
     c.threads_severity === "Unknown"
       ? "n/a"

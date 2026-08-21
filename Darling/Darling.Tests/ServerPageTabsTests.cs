@@ -23,7 +23,7 @@ namespace Darling.Tests;
 /// <para><b>The invariant these pins exist for.</b> A panel descriptor names its data source as a STRING
 /// (<c>read: "get_wait_stats"</c>). A typo, or a read renamed on the C# side, produces a 400 inside one panel at
 /// runtime and is completely invisible to inspection — the JS still parses, the page still renders, one panel
-/// just says "unknown". With ~60 reads named across eleven tabs that is not a defect you find by reading. So
+/// just says "unknown". With ~60 reads named across twelve tabs that is not a defect you find by reading. So
 /// rather than pinning individual panels, this asserts the CATEGORY: every read name the shipped module mentions
 /// exists in the shipped dispatch table, and every viz it names exists in the shipped viz vocabulary. Both sides
 /// come from the artifacts themselves, never a transcribed copy, so the check cannot drift into agreeing with a
@@ -197,7 +197,9 @@ public sealed class ServerPageTabsTests
         var ids = Regex.Matches(ServerTabsJs, "^\\s{4}id: \"([a-z-]+)\",$", RegexOptions.Multiline)
             .Select(m => m.Groups[1].Value)
             .ToArray();
-        Assert.True(ids.Length >= 10, "expected the full tab set; found " + ids.Length);
+        /* An exact count, not a floor. A floor would have let the prose in the CHANGELOG, the commit and this
+           file drift from the registry — which it did, at "eleven" against twelve, before this pin existed. */
+        Assert.Equal(12, ids.Length);
         Assert.Equal(ids.Length, ids.Distinct(StringComparer.Ordinal).Count());
         Assert.Equal("overview", ids[0]); // the fallback tab must be the first one
     }
