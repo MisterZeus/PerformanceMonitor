@@ -18,6 +18,15 @@
  * on the next upgrade after the user deleted it. A template is created only when someone asks for it, and what
  * they get is an ordinary view they own, can edit, and can delete for good.
  *
+ * A fresh install has nothing collected for its first cycles, so every table and chart panel here carries its
+ * own `emptyText` and every read it names has an honest {status,message} envelope behind it. That matters more
+ * for a STARTER dashboard than for anything else in the product: it is the first screen a UAT tester opens, on
+ * the store with the least data it will ever have, and a wall of unexplained blank rectangles on day one is a
+ * worse first impression than the feature not existing. Two reads are deliberately ABSENT for the same reason:
+ * analysis findings (the pass needs 24 hours of history before it writes any) and Query Store (a target with it
+ * switched off has nothing, ever) — both are on the built-in server page, where the reader arrived looking for
+ * that specific thing rather than for a first impression.
+ *
  * The panels here are v1 READ descriptors: `{title, read, params, viz, span, ...vizcfg}`, exactly the shape
  * renderPanel and the server's ValidateDefinition already take. They deliberately do NOT import the built-in
  * server page's descriptors: a created view is the USER's copy from that moment on, and a template that shared
@@ -59,6 +68,7 @@ export const DASHBOARD_TEMPLATES = [
             xKey: "sample_time",
             format: "pct",
             unit: "%",
+            emptyText: "No CPU samples in this window.",
             series: [
               { key: "sql_server_cpu", label: "SQL CPU %" },
               { key: "other_process_cpu", label: "Other %" },
@@ -73,6 +83,7 @@ export const DASHBOARD_TEMPLATES = [
             rowsKey: "trend",
             xKey: "time",
             format: "mb",
+            emptyText: "No memory samples in this window.",
             series: [
               { key: "total_server_memory_mb", label: "Total Server" },
               { key: "target_server_memory_mb", label: "Target" },
@@ -138,6 +149,7 @@ export const DASHBOARD_TEMPLATES = [
             xKey: "sample_time",
             format: "pct",
             unit: "%",
+            emptyText: "No CPU samples in this window.",
             series: [
               { key: "sql_server_cpu", label: "SQL CPU %" },
               { key: "other_process_cpu", label: "Other %" },
@@ -215,6 +227,7 @@ export const DASHBOARD_TEMPLATES = [
             viz: "line",
             rowsKey: "trend",
             xKey: "time",
+            emptyText: "No blocking events in this window — an empty trend here means none happened, not that nothing was collected.",
             series: [{ key: "count", label: "Events" }],
           },
           {
@@ -224,6 +237,7 @@ export const DASHBOARD_TEMPLATES = [
             viz: "line",
             rowsKey: "trend",
             xKey: "time",
+            emptyText: "No deadlocks in this window — an empty trend here means none happened, not that nothing was collected.",
             series: [{ key: "count", label: "Deadlocks" }],
           },
           {
@@ -301,6 +315,7 @@ export const DASHBOARD_TEMPLATES = [
             rowsKey: "trend",
             xKey: "time",
             format: "mb",
+            emptyText: "No memory samples in this window.",
             series: [
               { key: "total_server_memory_mb", label: "Total Server" },
               { key: "target_server_memory_mb", label: "Target" },
@@ -328,6 +343,7 @@ export const DASHBOARD_TEMPLATES = [
             rowsKey: "grants",
             xKey: "collection_time",
             format: "mb",
+            emptyText: "No memory grant samples in this window.",
             series: [
               { key: "granted_memory_mb", label: "Granted" },
               { key: "used_memory_mb", label: "Used" },

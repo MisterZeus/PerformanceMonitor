@@ -207,6 +207,43 @@ public sealed class ViewTemplatesTests
         Assert.Contains("if (res.kind !== \"data\" || !res.data) return [];", js, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Every table and chart panel in every template says why it could be empty.
+    ///
+    /// <para>This matters more here than anywhere else in the product. A starter dashboard is the first screen a
+    /// UAT tester opens, on the store with the least data it will ever have — a fresh install has collected
+    /// nothing for its first cycles — and a wall of unexplained blank rectangles on day one is a worse first
+    /// impression than the feature not existing. The chart case is the one that bites without looking like it:
+    /// <c>get_blocking_trend</c> and <c>get_deadlock_trend</c> answer an idle server with <c>trend: []</c> and NO
+    /// <c>{status,message}</c> envelope, so the panel has real data in hand and falls through to the chart's
+    /// "Not enough data points to chart yet" — a warming-up message on a server that simply never blocked.</para>
+    ///
+    /// <para>A COUNT rather than a spot-check, and exact rather than a floor: <c>emptyText</c> appears nowhere
+    /// else in this module, so one dropped sentence is one panel that will render blank in front of a new
+    /// user.</para>
+    /// </summary>
+    [Fact]
+    public void EveryTemplateDataPanel_ExplainsItsOwnEmptyState()
+    {
+        var js = TemplatesJs;
+
+        var dataPanels = Regex.Matches(js, "viz: \"(table|line)\"").Count;
+        var sentences = Regex.Matches(js, "emptyText: \"").Count;
+
+        Assert.True(dataPanels >= 15, "expected the full template panel set; found " + dataPanels);
+        Assert.Equal(dataPanels, sentences);
+
+        /* The two reads whose EMPTY ARRAY means "it did not happen" say exactly that, rather than inheriting a
+           sentence about collection. Absence and non-occurrence are the distinction this whole codebase keeps
+           closing, and a starter dashboard is the worst place to blur it. */
+        Assert.Contains("an empty trend here means none happened, not that nothing was collected", js, StringComparison.Ordinal);
+
+        /* And the two reads that CANNOT be honest on day one are deliberately absent, not merely unused: the
+           analysis pass writes nothing for 24 hours, and a target with Query Store off has nothing ever. */
+        Assert.DoesNotContain("get_analysis_findings", js, StringComparison.Ordinal);
+        Assert.DoesNotContain("get_query_store_top", js, StringComparison.Ordinal);
+    }
+
     private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
     {
         for (var dir = new DirectoryInfo(Path.GetDirectoryName(thisFile)!); dir is not null; dir = dir.Parent)
