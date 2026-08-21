@@ -198,6 +198,44 @@ public class SettingsValueReadTests
     }
 
     /// <summary>
+    /// Review found the boundary the clamp promise stopped at (#2453): the clamped readers go through
+    /// <c>TryGetInt64</c>, so a number beyond Int64 fell out of the clamp and was reported as though it were
+    /// not a whole number — a nonsense sentence about a number, and in a dialog. It clamps by SIGN instead,
+    /// which makes the promise absolute rather than "up to Int64".
+    /// </summary>
+    [Fact]
+    public void ANumberBeyondInt64_StillClampsToABound()
+    {
+        var read = ReaderOver("""{ "vast": 99999999999999999999, "vast_negative": -99999999999999999999 }""");
+
+        Assert.True(read.TryGetProperty("vast", out var vast));
+        Assert.Equal(100, vast.Int(1, 0, 100));
+
+        Assert.True(read.TryGetProperty("vast_negative", out var negative));
+        Assert.Equal(0, negative.Int(1, 0, 100));
+
+        Assert.Empty(read.Problems);
+    }
+
+    /// <summary>
+    /// The other side of that boundary. An UNCLAMPED read has no range to put an unusable number into, so it
+    /// does report one — but as out of range, naming the value, rather than as the wrong shape.
+    /// </summary>
+    [Fact]
+    public void AnUnclampedReadReportsAnOutOfRangeNumber_AsOutOfRangeRatherThanWrongShape()
+    {
+        var read = ReaderOver("""{ "vast": 99999999999999999999 }""");
+
+        Assert.True(read.TryGetProperty("vast", out var vast));
+        Assert.Equal(7, vast.Int(7));
+
+        var problem = Assert.Single(read.Problems);
+        Assert.Equal("vast", problem.Key);
+        Assert.Contains("out of range", problem.Problem, StringComparison.Ordinal);
+        Assert.DoesNotContain("where a whole number belongs", problem.Problem, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The line between "wrong shape" and "wrong word", which decides what the startup dialog is allowed to
     /// complain about. A number where a theme name belongs is this file's business; a string that is simply
     /// not one of the three theme names is the caller's own vocabulary, has always been ignored quietly, and

@@ -128,11 +128,16 @@ public readonly struct SettingsValue
             ? Element.GetBoolean()
             : Reject(fallback, "true or false");
 
-    /// <summary>The value as an int, unclamped — for the settings that have never had a range.</summary>
+    /// <summary>
+    /// The value as an int, unclamped — for the settings that have never had a range. With no range there is
+    /// nothing to put an unusable number INTO, so one is reported; it is reported as out of range rather than
+    /// as the wrong shape, because "holds a JSON number where a whole number belongs" is a nonsense sentence
+    /// about a number.
+    /// </summary>
     public int Int(int fallback) =>
-        Element.ValueKind == JsonValueKind.Number && Element.TryGetInt32(out var number)
-            ? number
-            : Reject(fallback, "a whole number");
+        Element.ValueKind != JsonValueKind.Number ? Reject(fallback, "a whole number")
+        : Element.TryGetInt32(out var number) ? number
+        : RejectAsOutOfRange(fallback);
 
     /// <summary>
     /// The value as an int, clamped into <paramref name="min"/>..<paramref name="max"/>. Read as Int64 first
@@ -140,21 +145,31 @@ public readonly struct SettingsValue
     /// handle, not a value of the wrong shape.
     /// </summary>
     public int Int(int fallback, int min, int max) =>
-        Element.ValueKind == JsonValueKind.Number && Element.TryGetInt64(out var number)
-            ? (int)Math.Clamp(number, min, max)
-            : Reject(fallback, "a whole number");
+        Element.ValueKind != JsonValueKind.Number ? Reject(fallback, "a whole number")
+        : Element.TryGetInt64(out var number) ? (int)Math.Clamp(number, min, max)
+        : IsNegative() ? min : max;
 
     /// <summary>The value as a long, clamped into <paramref name="min"/>..<paramref name="max"/>.</summary>
     public long Long(long fallback, long min, long max) =>
-        Element.ValueKind == JsonValueKind.Number && Element.TryGetInt64(out var number)
-            ? Math.Clamp(number, min, max)
-            : Reject(fallback, "a whole number");
+        Element.ValueKind != JsonValueKind.Number ? Reject(fallback, "a whole number")
+        : Element.TryGetInt64(out var number) ? Math.Clamp(number, min, max)
+        : IsNegative() ? min : max;
 
     /// <summary>The value as a double, clamped into <paramref name="min"/>..<paramref name="max"/>.</summary>
     public double Double(double fallback, double min, double max) =>
-        Element.ValueKind == JsonValueKind.Number && Element.TryGetDouble(out var number)
-            ? Math.Clamp(number, min, max)
-            : Reject(fallback, "a number");
+        Element.ValueKind != JsonValueKind.Number ? Reject(fallback, "a number")
+        : Element.TryGetDouble(out var number) ? Math.Clamp(number, min, max)
+        : IsNegative() ? min : max;
+
+    /// <summary>
+    /// Which BOUND a number that will not fit in an <see cref="long"/> clamps to (review finding on #2444).
+    /// A value beyond Int64 in either direction cannot be inside any range a caller can express, so the only
+    /// question is which end, and the sign answers it — which keeps the clamped readers' promise absolute
+    /// rather than "up to Int64", and stops a plainly-whole number being reported as not a whole number.
+    /// <para>Read off the raw token rather than through a <see cref="double"/>: <c>long.MaxValue</c> does not
+    /// survive that round trip, so a bound near it would come back wrong in the one case this exists for.</para>
+    /// </summary>
+    private bool IsNegative() => Element.GetRawText().TrimStart().StartsWith('-');
 
     /// <summary>The value as a string, or <paramref name="fallback"/> when it is not one.</summary>
     public string Text(string fallback) =>
@@ -180,6 +195,21 @@ public readonly struct SettingsValue
     /// expression. The message names the kind that WAS there, in the same phrasing the MCP settings loader
     /// already uses, because "it holds a JSON string" is what lets someone find the line in their file.
     /// </summary>
+    private T RejectAsOutOfRange<T>(T fallback)
+    {
+        /* The token, truncated: a hand-edited file is where a thousand-digit number comes from, and this
+           string goes into a dialog. */
+        var token = Element.GetRawText();
+        _reader?.Reject(
+            _key,
+            string.Format(
+                CultureInfo.InvariantCulture,
+                "holds {0}, which is out of range for this setting",
+                token.Length > 40 ? token[..40] + "…" : token));
+
+        return fallback;
+    }
+
     private T Reject<T>(T fallback, string expected)
     {
         _reader?.Reject(
