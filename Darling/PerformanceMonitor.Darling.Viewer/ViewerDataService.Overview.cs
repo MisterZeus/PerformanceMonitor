@@ -577,6 +577,18 @@ public sealed class ServerSummaryItem
         _ => AwaitingFirstCollection ? "#FFD54F" : "#888888"  // amber — queued, not dead
     });
 
+    /// <summary>
+    /// What the status word MEANS on this card, for the tooltip the status line carries (#2422). A colour and
+    /// a one-word band were the whole answer the Overview gave, and the reporter's question — "what is it that
+    /// this text warns me about?" — is one the card could already answer: <see cref="FleetRollup.BuildReason"/>
+    /// builds the sentence out of THIS card's own metric displays, and until now only the Needs Attention
+    /// ranking got to see it.
+    ///
+    /// <para>Delegated rather than reimplemented on purpose: two independent derivations of "why is this amber"
+    /// would eventually disagree, and the one place they would disagree is a card the reader is staring at.</para>
+    /// </summary>
+    public string StatusTooltip => FleetRollup.BuildStatusTooltip(this);
+
     public bool IsOffline => IsOnline == false;
 
     // ── Per-metric severity bands (delegated to the SHARED ServerHealthClassifier — one place for the

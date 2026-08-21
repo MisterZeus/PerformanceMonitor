@@ -187,7 +187,17 @@ public sealed class FleetRankedServer
 /// </summary>
 public sealed class FleetRollup
 {
-    /// <summary>The default depth of the worst-first ranking (the "Needs attention" list caps at this).</summary>
+    /// <summary>
+    /// The default depth of the worst-first ranking (the "Needs attention" list caps at this).
+    ///
+    /// <para>Deliberately small, and deliberately unchanged by #2424 even though a 57-server fleet can leave
+    /// 52 servers behind it. The ranking renders inside the fleet roll-up panel, which is docked to the top
+    /// of the Overview and does NOT scroll — only the card grid beneath it does. A list that grew with the
+    /// fleet would therefore push the cards it is pointing at off the screen, and it would stop being a
+    /// triage shortlist ("look at these first") and become a second, worse copy of the grid without the
+    /// metrics. The overflow is answered by giving it somewhere to go instead — the needs-attention card
+    /// filter, over the grid that scrolls and carries the six metric rows.</para>
+    /// </summary>
     public const int DefaultWorstCount = 5;
 
     /// <summary>An empty fleet (no servers registered) — every count zero, no ranking.</summary>
@@ -211,7 +221,12 @@ public sealed class FleetRollup
     /// <summary>The worst-first problem servers (band != Healthy), capped at the requested depth.</summary>
     public IReadOnlyList<FleetRankedServer> WorstServers { get; init; } = Array.Empty<FleetRankedServer>();
 
-    /// <summary>Problem servers beyond the capped ranking — surfaced as a "+N more" affordance.</summary>
+    /// <summary>
+    /// Problem servers beyond the capped ranking. Surfaced as the "+N more need attention" affordance,
+    /// which is a LINK into the needs-attention card filter rather than a dead count (#2424): the ranking
+    /// deliberately stays short (see <see cref="DefaultWorstCount"/>), so this number is the whole reason
+    /// the filter exists.
+    /// </summary>
     public int AdditionalProblemCount { get; init; }
 
     /// <summary>Any server needs attention (band != Healthy) — drives the ranking list vs the all-clear line.</summary>
@@ -381,5 +396,82 @@ public sealed class FleetRollup
         }
 
         return parts.Count > 0 ? string.Join(", ", parts) : "Needs attention";
+    }
+
+    /// <summary>The line every card tooltip ends on. The sidebar alert badge's tooltip has the same shape —
+    /// the breakdown, then how to act on it — so the Overview card is not the surface that explains itself
+    /// least; this one names the gesture the card actually supports.</summary>
+    private const string CardTooltipAction = "Double-click the card to open this server's tab";
+
+    /// <summary>
+    /// The Overview card's status tooltip (#2422): the band the card's border is painted from, WHY it is in
+    /// that band, and what to do next. Reported as "the card says Warning and will not say why" — the reader
+    /// had to scan six metric rows hunting for the amber one, once per card, on a 57-server fleet.
+    ///
+    /// <para>It is <see cref="BuildReason"/>'s output verbatim, the same sentence the Needs Attention ranking
+    /// already shows for that exact server. Re-deriving it here instead would forfeit the one property
+    /// BuildReason exists for: it is built from the card's OWN metric displays, so it cannot disagree with the
+    /// six rows the reader is looking at while they are looking at them.</para>
+    /// </summary>
+    public static string BuildStatusTooltip(ServerSummaryItem s)
+    {
+        ArgumentNullException.ThrowIfNull(s);
+
+        var band = ClassifyBand(s);
+
+        /* A healthy card has no reason to give. BuildReason's "Needs attention" fallback is written for a
+           ranking that only ever holds problem servers; the card grid shows EVERY server, so reusing the
+           fallback here would tell a green card the opposite of the truth. */
+        var body = band == FleetHealthBand.Healthy
+            ? "Healthy — every metric on this card is inside its threshold"
+            : DescribeBand(band, s);
+
+        return body + "\n" + CardTooltipAction;
+    }
+
+    /// <summary>The band label in front of the reason — except for the two states whose reason is already a
+    /// whole sentence naming them, where the label would only say "Offline" twice.</summary>
+    private static string DescribeBand(FleetHealthBand band, ServerSummaryItem s)
+    {
+        var reason = BuildReason(s);
+
+        return s.IsOnline == false || s.AwaitingFirstCollection
+            ? reason
+            : $"{ServerHealthClassifier.BandLabel(band)} — {reason}";
+    }
+
+    /// <summary>
+    /// The problem servers among the Overview's cards — band != Healthy — kept in the order the caller handed
+    /// them in, so the grid's chosen sort survives the filter. This is the SAME predicate <see cref="Build"/>
+    /// uses to decide who is in the ranking and who counts toward <see cref="AdditionalProblemCount"/>, which
+    /// is what makes "+52 more need attention" land on exactly 52 cards rather than on a second opinion.
+    /// </summary>
+    public static List<ServerSummaryItem> NeedsAttention(IEnumerable<ServerSummaryItem> summaries)
+    {
+        ArgumentNullException.ThrowIfNull(summaries);
+
+        return summaries.Where(s => ClassifyBand(s) != FleetHealthBand.Healthy).ToList();
+    }
+
+    /// <summary>
+    /// The count shown beside the filter toggle while it is on. A filtered grid that looks like an unfiltered
+    /// one is a worse defect than the one the filter fixes, so the active state carries its own arithmetic —
+    /// including the all-clear case, which is otherwise an empty grid with nothing saying why.
+    /// </summary>
+    public static string AttentionFilterCountText(int shown, int total)
+    {
+        if (shown > 0)
+        {
+            return $"showing {shown} of {total}";
+        }
+
+        /* Nothing left to show. On a populated fleet that is the honest all-clear; with no cards at all it
+           must not report that zero servers are healthy, which is the sort of line that gets screenshotted. */
+        return total switch
+        {
+            <= 0 => "no servers to filter",
+            1 => "the 1 server monitored is healthy",
+            _ => $"all {total} servers are healthy",
+        };
     }
 }

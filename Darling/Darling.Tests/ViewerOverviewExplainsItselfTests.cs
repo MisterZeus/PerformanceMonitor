@@ -1,0 +1,361 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Runtime.CompilerServices;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Viewer;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #2424 / #2422: the Overview stops keeping the answer to itself.
+///
+/// <para><b>What was reported.</b> A card said "Warning" in amber and would not say what about. The reporter's
+/// two questions were "what is it that this text warns me about?" and, of "+52 more need attention", "where do I
+/// find these warnings?". Both are questions the tab could already answer for itself — it computes a per-server
+/// reason and the full problem set, then renders a colour and a count.</para>
+///
+/// <para><b>What is pinned here.</b> The reason on the card comes from <see cref="FleetRollup.BuildReason"/>
+/// rather than from a second derivation — that method's whole value is being built from the card's OWN metric
+/// displays, so a tooltip built any other way could contradict the six rows the reader is looking at. And the
+/// overflow line reaches the servers it counts, through the same banding that counted them, with the filter's
+/// active state visible and clearable.</para>
+///
+/// <para>The wiring half text-scans SOURCE (located by walking up from this file's compile-time path, the
+/// <c>ViewerServerInventoryEnabledTests</c> pattern) because a <c>ToolTip</c> attribute and a click handler live
+/// in XAML, where no assertion about a C# object can reach them. Removing either compiles perfectly.</para>
+/// </summary>
+public sealed class ViewerOverviewExplainsItselfTests
+{
+    private static ServerSummaryItem Healthy(string name = "h1", int id = 1) =>
+        new() { DisplayName = name, ServerId = id, IsOnline = true };
+
+    private static ServerSummaryItem Busy(string name = "b1", int id = 2) =>
+        new()
+        {
+            DisplayName = name,
+            ServerId = id,
+            IsOnline = true,
+            CpuPercent = 96,
+            BlockingCount = 6,
+            MaxBlockingWaitMs = 70000,
+        };
+
+    private static ServerSummaryItem Stale(string name = "s1", int id = 3) =>
+        new() { DisplayName = name, ServerId = id, IsOnline = true, HasCollectorErrors = true };
+
+    private static ServerSummaryItem Offline(string name = "o1", int id = 4) =>
+        new() { DisplayName = name, ServerId = id, IsOnline = false };
+
+    private static ServerSummaryItem Awaiting(string name = "a1", int id = 5) =>
+        new() { DisplayName = name, ServerId = id, IsOnline = null, AwaitingFirstCollection = true };
+
+    // ── The card explains itself ───────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The tooltip is BuildReason's own output, not a paraphrase of it. This is the assertion that matters: it
+    /// is what stops a later edit "improving" the card's wording into something that disagrees with the Needs
+    /// Attention row for the same server, which is the exact drift BuildReason was written to prevent.
+    /// </summary>
+    [Fact]
+    public void TheCardsTooltip_IsTheSameSentenceTheRankingShows()
+    {
+        foreach (var card in new[] { Busy(), Stale(), Offline(), Awaiting() })
+        {
+            Assert.Contains(FleetRollup.BuildReason(card), FleetRollup.BuildStatusTooltip(card), StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>The reporter's first question, answered: the amber word now names the metrics behind it.</summary>
+    [Fact]
+    public void TheCardsTooltip_NamesTheBandAndEveryBadMetric()
+    {
+        var tooltip = FleetRollup.BuildStatusTooltip(Busy());
+
+        Assert.Contains("Critical", tooltip, StringComparison.Ordinal);
+        Assert.Contains("CPU 96%", tooltip, StringComparison.Ordinal);
+        Assert.Contains("Blocking 6", tooltip, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The reporter's card. <c>StatusDisplay</c> renders "Warning" for exactly one condition — an online server
+    /// whose collection has gone stale — and nothing on the card said so. The tooltip has to answer THAT card,
+    /// not just the metric-driven ones.
+    /// </summary>
+    [Fact]
+    public void TheCardsTooltip_ExplainsTheAmberWarningThatMeansStaleCollection()
+    {
+        var stale = Stale();
+
+        Assert.Equal("Warning", stale.StatusDisplay);
+        Assert.Contains("Warning", stale.StatusTooltip, StringComparison.Ordinal);
+        Assert.Contains("collection stale", stale.StatusTooltip, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A green card must not be told it needs attention. BuildReason's fallback is written for a ranking that only
+    /// ever holds problem servers; the card grid shows EVERY server, so reusing the fallback unguarded would put
+    /// "Needs attention" on every healthy card in the fleet — a worse defect than the silence it replaced.
+    /// </summary>
+    [Fact]
+    public void TheCardsTooltip_OnAHealthyCard_DoesNotClaimItNeedsAttention()
+    {
+        var tooltip = FleetRollup.BuildStatusTooltip(Healthy());
+
+        Assert.DoesNotContain("Needs attention", tooltip, StringComparison.Ordinal);
+        Assert.Contains("Healthy", tooltip, StringComparison.Ordinal);
+    }
+
+    /// <summary>Offline and awaiting-first-collection already come back as whole sentences naming themselves, so
+    /// the band label is not stamped in front of them a second time.</summary>
+    [Fact]
+    public void TheCardsTooltip_DoesNotSayOfflineTwice()
+    {
+        var tooltip = FleetRollup.BuildStatusTooltip(Offline());
+
+        Assert.StartsWith("Offline — no recent collection", tooltip, StringComparison.Ordinal);
+        Assert.Equal(1, CountOccurrences(tooltip, "Offline"));
+        Assert.StartsWith("Awaiting first collection", FleetRollup.BuildStatusTooltip(Awaiting()), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The sidebar alert badge's tooltip is the shape being followed — the breakdown, then how to act on it — so
+    /// every card tooltip ends on the gesture that gets the reader to the detail. "How can I resolve this warning"
+    /// was the other half of the report.
+    /// </summary>
+    [Fact]
+    public void TheCardsTooltip_EndsWithHowToActOnIt()
+    {
+        foreach (var card in new[] { Healthy(), Busy(), Stale(), Offline(), Awaiting() })
+        {
+            var tooltip = FleetRollup.BuildStatusTooltip(card);
+
+            Assert.EndsWith("\nDouble-click the card to open this server's tab", tooltip, StringComparison.Ordinal);
+            Assert.False(tooltip.StartsWith('\n'), "the reason must come first, on its own line");
+        }
+    }
+
+    /// <summary>The card view-model exposes it, because a static nothing binds to fixes nothing.</summary>
+    [Fact]
+    public void TheCardViewModel_ExposesTheTooltip_WithoutReimplementingIt()
+    {
+        var card = Busy();
+
+        Assert.Equal(FleetRollup.BuildStatusTooltip(card), card.StatusTooltip);
+    }
+
+    // ── "+N more need attention" reaches the servers it counts ─────────────────────────────────────
+
+    /// <summary>
+    /// The filter and the count are the SAME banding, so "+52 more need attention" lands on a grid holding
+    /// exactly those servers plus the five already listed. Two predicates here would mean a link whose
+    /// destination disagrees with its own label, which is the defect wearing a new hat.
+    /// </summary>
+    [Fact]
+    public void TheFilter_KeepsExactlyTheServersTheRollupCounted()
+    {
+        var fleet = BuildFleet(healthy: 45, critical: 4, warning: 6, offline: 2);
+        var rollup = FleetRollup.Build(fleet, new FleetTotals());
+
+        var filtered = FleetRollup.NeedsAttention(fleet);
+
+        Assert.Equal(12, filtered.Count);
+        Assert.Equal(rollup.WorstServers.Count + rollup.AdditionalProblemCount, filtered.Count);
+        Assert.DoesNotContain(filtered, s => FleetRollup.ClassifyBand(s) == FleetHealthBand.Healthy);
+
+        /* Every server the capped ranking DID list is still in the grid the link lands on — the reader should not
+           have to hold five names in their head while looking at the other seven. */
+        foreach (var ranked in rollup.WorstServers)
+        {
+            Assert.Contains(filtered, s => s.ServerId == ranked.ServerId);
+        }
+    }
+
+    /// <summary>The grid's chosen sort survives the filter — filtering is not a re-order.</summary>
+    [Fact]
+    public void TheFilter_PreservesTheCallersOrder()
+    {
+        var fleet = new List<ServerSummaryItem>
+        {
+            Offline("z-offline", 1),
+            Healthy("m-healthy", 2),
+            Busy("a-busy", 3),
+        };
+
+        Assert.Equal(new[] { "z-offline", "a-busy" }, FleetRollup.NeedsAttention(fleet).Select(s => s.DisplayName));
+    }
+
+    /// <summary>
+    /// The active state carries its own arithmetic. A filtered grid that looks like an unfiltered one is a worse
+    /// bug than the dead-end count it replaced, and the all-clear case — an empty grid with the filter still on —
+    /// is the one that would otherwise read as a broken tab.
+    /// </summary>
+    [Fact]
+    public void TheFilter_SaysWhatItDid_IncludingWhenItLeavesNothing()
+    {
+        Assert.Equal("showing 12 of 57", FleetRollup.AttentionFilterCountText(12, 57));
+        Assert.Equal("all 57 servers are healthy", FleetRollup.AttentionFilterCountText(0, 57));
+        Assert.Equal("the 1 server monitored is healthy", FleetRollup.AttentionFilterCountText(0, 1));
+
+        /* And an Overview with no cards at all does not report that zero servers are healthy. */
+        Assert.Equal("no servers to filter", FleetRollup.AttentionFilterCountText(0, 0));
+    }
+
+    /// <summary>
+    /// The ranking cap stays at five, deliberately, on a fleet where that hides 52. The roll-up panel is docked to
+    /// the top of the Overview and does not scroll — only the card grid beneath it does — so a list that grew with
+    /// the fleet would push the cards it points at off the screen and stop being a shortlist. The overflow is
+    /// answered by giving it a destination, not by making the shortlist long.
+    /// </summary>
+    [Fact]
+    public void TheRankingCap_StaysShort_BecauseTheOverflowNowHasSomewhereToGo()
+    {
+        Assert.Equal(5, FleetRollup.DefaultWorstCount);
+
+        var rollup = FleetRollup.Build(BuildFleet(healthy: 5, critical: 40, warning: 12, offline: 0), new FleetTotals());
+
+        Assert.Equal(5, rollup.WorstServers.Count);
+        Assert.Equal(47, rollup.AdditionalProblemCount);
+        Assert.Equal("+47 more need attention", rollup.AdditionalProblemText);
+    }
+
+    // ── The wiring, which only source can show ─────────────────────────────────────────────────────
+
+    private static string Xaml => ReadRepoFile(Path.Combine(
+        "Darling", "PerformanceMonitor.Darling.Viewer", "MainWindow.xaml"));
+
+    private static string CodeBehind => ReadRepoFile(Path.Combine(
+        "Darling", "PerformanceMonitor.Darling.Viewer", "MainWindow.xaml.cs"));
+
+    /// <summary>
+    /// The card's status actually carries the tooltip. <c>Background="Transparent"</c> is load-bearing rather than
+    /// decorative: a TextBlock with a null Background hit-tests on its rendered glyphs alone, so the tooltip would
+    /// appear over the letters of "Warning" and nowhere in the space around them.
+    /// </summary>
+    [Fact]
+    public void TheCardStatus_IsBoundToTheTooltip_AndIsHoverable()
+    {
+        var at = Xaml.IndexOf("Text=\"{Binding StatusDisplay}\"", StringComparison.Ordinal);
+        Assert.True(at > 0, "the Overview card's status TextBlock is gone — find where it moved before editing this test");
+
+        var element = Xaml[at..(Xaml.IndexOf("/>", at, StringComparison.Ordinal) + 2)];
+
+        Assert.Contains("ToolTip=\"{Binding StatusTooltip}\"", element, StringComparison.Ordinal);
+        Assert.Contains("Background=\"Transparent\"", element, StringComparison.Ordinal);
+    }
+
+    /// <summary>The overflow line navigates, and looks like it does. A dead count that merely reports a number was
+    /// the whole complaint.</summary>
+    [Fact]
+    public void TheOverflowLine_IsAClickableLinkIntoTheFilter()
+    {
+        var at = Xaml.IndexOf("x:Name=\"FleetAdditionalProblems\"", StringComparison.Ordinal);
+        Assert.True(at > 0, "the '+N more need attention' affordance is gone");
+
+        var element = Xaml[at..(Xaml.IndexOf("</Border>", at, StringComparison.Ordinal) + 9)];
+
+        Assert.Contains("MouseLeftButtonUp=\"FleetAdditionalProblems_Click\"", element, StringComparison.Ordinal);
+        Assert.Contains("Cursor=\"Hand\"", element, StringComparison.Ordinal);
+        Assert.Contains("{Binding AdditionalProblemText}", element, StringComparison.Ordinal);
+        Assert.Contains("FleetAdditionalProblems_Click(object sender", CodeBehind, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The filter is clearable and its state is visible: a toggle that reads both ways, wired on BOTH transitions
+    /// so unchecking restores the fleet, sitting in the docked roll-up header that never scrolls away from the grid
+    /// it shrank, with a count beside it.
+    /// </summary>
+    [Fact]
+    public void TheFilter_IsClearable_AndItsActiveStateIsVisible()
+    {
+        Assert.Contains("x:Name=\"OverviewAttentionOnlyCheck\"", Xaml, StringComparison.Ordinal);
+        Assert.Contains("Checked=\"OverviewAttentionOnlyCheck_Changed\"", Xaml, StringComparison.Ordinal);
+        Assert.Contains("Unchecked=\"OverviewAttentionOnlyCheck_Changed\"", Xaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"OverviewAttentionCountText\"", Xaml, StringComparison.Ordinal);
+
+        Assert.Contains("OverviewAttentionOnlyCheck_Changed(object sender", CodeBehind, StringComparison.Ordinal);
+        Assert.Contains("FleetRollup.AttentionFilterCountText(", CodeBehind, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// One projection seam. The grid is set from the full card set through the filter and from nowhere else, so a
+    /// refresh, a re-sort and a tag re-stamp cannot each have their own opinion about whether the filter is on —
+    /// and nothing reads the bound list BACK to answer "what cards exist", which is the mistake
+    /// <see cref="FleetView"/> exists to prevent on the sidebar and would be just as silent here.
+    /// </summary>
+    [Fact]
+    public void TheGrid_IsProjectedThroughTheFilter_AndNothingReadsTheBoundListBack()
+    {
+        Assert.Contains("FleetRollup.NeedsAttention(_overviewCards)", CodeBehind, StringComparison.Ordinal);
+        Assert.Contains("_overviewCards = cards;", CodeBehind, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("OverviewItemsControl.ItemsSource is IEnumerable<ServerSummaryItem>", CodeBehind, StringComparison.Ordinal);
+        Assert.DoesNotContain("OverviewItemsControl.ItemsSource = cards;", CodeBehind, StringComparison.Ordinal);
+
+        /* Exactly two writers: the empty-fleet clear, and the filter projection. */
+        Assert.Equal(2, CountOccurrences(CodeBehind, "OverviewItemsControl.ItemsSource ="));
+    }
+
+    // ── helpers ────────────────────────────────────────────────────────────────────────────────────
+
+    private static List<ServerSummaryItem> BuildFleet(int healthy, int critical, int warning, int offline)
+    {
+        var fleet = new List<ServerSummaryItem>();
+        var id = 0;
+
+        for (var i = 0; i < healthy; i++)
+        {
+            fleet.Add(new ServerSummaryItem { DisplayName = $"h{i:00}", ServerId = ++id, IsOnline = true });
+        }
+        for (var i = 0; i < critical; i++)
+        {
+            fleet.Add(new ServerSummaryItem { DisplayName = $"c{i:00}", ServerId = ++id, IsOnline = true, DeadlockCount = 1 });
+        }
+        for (var i = 0; i < warning; i++)
+        {
+            fleet.Add(new ServerSummaryItem { DisplayName = $"w{i:00}", ServerId = ++id, IsOnline = true, FailedCollectorCount = 1 });
+        }
+        for (var i = 0; i < offline; i++)
+        {
+            fleet.Add(new ServerSummaryItem { DisplayName = $"o{i:00}", ServerId = ++id, IsOnline = false });
+        }
+
+        return fleet;
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        var count = 0;
+        var index = 0;
+        while ((index = haystack.IndexOf(needle, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += needle.Length;
+        }
+        return count;
+    }
+
+    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
+    {
+        for (var dir = new DirectoryInfo(Path.GetDirectoryName(thisFile)!); dir is not null; dir = dir.Parent)
+        {
+            var candidate = Path.Combine(dir.FullName, relative);
+            if (File.Exists(candidate))
+            {
+                return File.ReadAllText(candidate);
+            }
+        }
+
+        throw new FileNotFoundException($"Could not locate {relative} walking up from {thisFile}");
+    }
+}
