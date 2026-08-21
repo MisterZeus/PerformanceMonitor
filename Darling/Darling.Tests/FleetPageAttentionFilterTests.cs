@@ -190,14 +190,18 @@ public sealed class FleetPageAttentionFilterTests
     [Fact]
     public void TheGrid_IsFilteredOnce_AndBothViewsShowTheActiveState()
     {
-        Assert.Contains("cardMatches(c, fleetFilter) && (!attentionOnly || cardNeedsAttention(c))", FleetJs, StringComparison.Ordinal);
+        Assert.Contains("const searched = lastCards.filter((c) => cardMatches(c, fleetFilter));", FleetJs, StringComparison.Ordinal);
+        Assert.Contains("attentionOnly ? searched.filter(cardNeedsAttention) : searched", FleetJs, StringComparison.Ordinal);
 
         /* One call site: the grouped view and the flat view are projected from the SAME filtered list, so a
            tag-grouped fleet cannot end up with its own opinion about what needs attention. */
-        Assert.Equal(1, CountOccurrences(FleetJs, "|| cardNeedsAttention(c))"));
+        Assert.Equal(1, CountOccurrences(FleetJs, "searched.filter(cardNeedsAttention)"));
+
+        /* And the notice's denominator is what the SEARCH left, not the fleet. With a term typed, "showing 4 of
+           57" invites reading 4 as the fleet's problem count; the other 53 were never looked at. */
+        Assert.Contains("attentionNotice(matched.length, searched.length)", FleetJs, StringComparison.Ordinal);
 
         Assert.Contains("mount(gridNode, [notice, renderGrouped(matched)]);", FleetJs, StringComparison.Ordinal);
-        Assert.Contains("const notice = attentionOnly ? attentionNotice(matched.length) : null;", FleetJs, StringComparison.Ordinal);
 
         /* The empty-grid line names whichever filter emptied it: telling a reader whose fleet is simply healthy
            that nothing matches a search term they never typed is the same class of lie in miniature. */

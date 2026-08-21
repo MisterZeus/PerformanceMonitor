@@ -227,8 +227,12 @@ export async function renderFleet(main) {
     (re)fill the grid — no refetch. */
 function redrawCards() {
   if (!gridNode) return;
-  const matched = lastCards
-    .filter((c) => cardMatches(c, fleetFilter) && (!attentionOnly || cardNeedsAttention(c)))
+  /* The two filters compose, and the search's result is the denominator the notice reports against. With a
+     term typed, "showing 4 of 57" invites reading 4 as the fleet's problem count, which it is not — the other
+     53 were not judged healthy, they were never looked at. The label has to mean what the grid holds. */
+  const searched = lastCards.filter((c) => cardMatches(c, fleetFilter));
+  const matched = (attentionOnly ? searched.filter(cardNeedsAttention) : searched)
+    .slice()
     .sort(SORTS[fleetSort] || SORTS.severity);
 
   /* The active state rides with the CARDS, not only with the toggle that set it. The desktop viewer can put
@@ -236,7 +240,7 @@ function redrawCards() {
      page head scrolls away, so a reader who has scrolled down to the grid would see a short fleet and nothing
      saying why. A filtered grid that looks unfiltered is a worse defect than the dead end it replaced, so the
      notice sits on the grid and carries its own way out. */
-  const notice = attentionOnly ? attentionNotice(matched.length) : null;
+  const notice = attentionOnly ? attentionNotice(matched.length, searched.length) : null;
 
   if (fleetGrouped && lastTags.length) {
     mount(gridNode, [notice, renderGrouped(matched)]);
@@ -255,9 +259,11 @@ function redrawCards() {
     The colour follows the SENTENCE, not the filter: this line says either "N servers need attention" or an
     all-clear, and painting the all-clear amber would be a colour contradicting its own text — the same family
     of defect this whole change is about. (Raised in review on #2429 and ported.) */
-function attentionNotice(shown) {
+function attentionNotice(shown, total) {
+  const term = fleetFilter.trim();
+  const label = term ? "Needs attention only, matching “" + term + "”" : "Needs attention only";
   return el("div", { class: "attention-note " + (shown > 0 ? "warn" : "ok") }, [
-    el("span", { text: "Needs attention only — " + attentionCountText(shown, lastCards.length) + "." }),
+    el("span", { text: label + " — " + attentionCountText(shown, total) + "." }),
     el("span", {
       class: "attention-link",
       text: "Show all servers",
