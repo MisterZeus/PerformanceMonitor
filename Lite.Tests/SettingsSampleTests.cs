@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Common;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
@@ -71,10 +72,7 @@ public sealed class SettingsSampleTests
         var read = ReadKeysFromLoaders();
         var documented = SampleKeys();
 
-        var missing = read.Keys
-            .Where(k => !documented.Contains(k) && !LoaderOnlyKeys.Contains(k))
-            .OrderBy(k => k, StringComparer.Ordinal)
-            .ToList();
+        var missing = UndocumentedKeys(read, documented);
 
         Assert.True(
             missing.Count == 0,
@@ -144,16 +142,116 @@ public sealed class SettingsSampleTests
     }
 
     /// <summary>
+    /// Alternation, evaluated left to right in one pass, so the "which file is open" state and the key hits
+    /// stay in source order.
+    /// <para>The <c>TryGetProperty</c> half keys on a METHOD NAME, which is the constraint every refactor of
+    /// the loaders runs into — see <c>TheReadHelpersName_IsWhatThisExtractionKeysOn</c> for why the #2444
+    /// read helper is spelled the way it is.</para>
+    /// </summary>
+    private static readonly Regex Scanner = new(
+        "\"(?<file>[A-Za-z0-9_.\\-]+\\.json)\"|TryGetProperty\\(\"(?<key>[^\"]+)\"",
+        RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// The self-test #2444 owed this guard. The loaders' reads moved onto a helper
+    /// (<see cref="SettingsReader"/>), and the reason they still work is that the helper's method carries the
+    /// same NAME the extraction keys on — which is a fact about a string, held together by nothing the
+    /// compiler checks. So it is checked here, against a source this test writes, in both shapes: the one the
+    /// loaders used before #2444 and the one they use now.
+    ///
+    /// <para>And it does not stop at "the keys are found". A guard that extracts keys but no longer COMPARES
+    /// them is the same vacuous green as one that extracts nothing, so this runs the real
+    /// <see cref="UndocumentedKeys"/> over a sample that is deliberately missing one key and asserts that it
+    /// is named. That is the property the two symmetry tests exist for, proved on a fixture rather than on
+    /// the tree — where it can only ever be proved by breaking the tree.</para>
+    /// </summary>
+    [Fact]
+    public void KeyExtraction_SeesBothReaderShapes_AndStillCatchesAnUndocumentedKey()
+    {
+        const string source = """
+            var settings = SettingsFileGuard.Read(Path.Combine(configDirectory, "settings.json"));
+            if (root.TryGetProperty("old_shape_key", out var a)) A = a.GetBoolean();
+            if (read.TryGetProperty("new_shape_key", out var b)) B = b.Bool(B);
+            if (read.TryGetProperty("undocumented_key", out var c)) C = c.Int(C);
+            """;
+
+        var found = new Dictionary<string, string>(StringComparer.Ordinal);
+        ExtractKeys(source, "synthetic.cs", found);
+
+        Assert.Contains("old_shape_key", found.Keys);
+        Assert.Contains("new_shape_key", found.Keys);
+
+        /* The guard still bites: one key is left out of the "sample", and it is the one named. */
+        var documented = new HashSet<string>(StringComparer.Ordinal) { "old_shape_key", "new_shape_key" };
+        Assert.Equal(new[] { "undocumented_key" }, UndocumentedKeys(found, documented));
+
+        /* ...and stays silent when the sample really does document everything. */
+        documented.Add("undocumented_key");
+        Assert.Empty(UndocumentedKeys(found, documented));
+
+        /* The trap itself, so the paragraph above is a measurement rather than a warning. This is the shape
+           #2428 tried — a read helper that takes the key as an ordinary argument — and every key written that
+           way is invisible here. That is what makes the helper's NAME load-bearing rather than incidental. */
+        const string hidden = """
+            var settings = SettingsFileGuard.Read(Path.Combine(configDirectory, "settings.json"));
+            ReadInt(root, "invisible_key", ref X);
+            """;
+
+        var missed = new Dictionary<string, string>(StringComparer.Ordinal);
+        ExtractKeys(hidden, "synthetic.cs", missed);
+        Assert.Empty(missed);
+    }
+
+    /// <summary>
+    /// The other half of the scoping contract, pinned for the same reason: a read attributed to the WRONG
+    /// file would make the sample look as though it were missing keys it has no business documenting. Each
+    /// hit belongs to the most recent <c>*.json</c> literal above it, which is how App.xaml.cs's
+    /// servers.json and collection_schedule.json loaders stay out of this set without needing an exemption.
+    /// </summary>
+    [Fact]
+    public void KeyExtraction_AttributesEachReadToTheFileOpenedAboveIt()
+    {
+        const string source = """
+            var servers = Path.Combine(dir, "servers.json");
+            if (root.TryGetProperty("not_a_settings_key", out var a)) A = a.GetBoolean();
+            var settings = SettingsFileGuard.Read(Path.Combine(dir, "settings.json"));
+            if (read.TryGetProperty("a_settings_key", out var b)) B = b.Bool(B);
+            """;
+
+        var found = new Dictionary<string, string>(StringComparer.Ordinal);
+        ExtractKeys(source, "synthetic.cs", found);
+
+        Assert.Equal(new[] { "a_settings_key" }, found.Keys.ToArray());
+    }
+
+    /// <summary>
+    /// Names the dependency this guard acquired in #2444 so a rename fails HERE, with the reason, rather
+    /// than as an unexplained collapse of the key count somewhere else.
+    ///
+    /// <para><c>SettingsReader</c>'s read method is called <c>TryGetProperty</c> because that is the literal
+    /// this extraction matches. Spell it <c>TryRead</c> and all eighty-seven of Lite's keys vanish from the
+    /// extracted set, both symmetry tests pass on what is left, and settings.sample.json is free to drift
+    /// exactly the way #2418 was filed about. PR #2428 hit this and had to read back through
+    /// <c>JsonDocument</c>; #2444 kept the name instead, and this is the note that says so out loud.</para>
+    /// </summary>
+    [Fact]
+    public void TheReadHelpersName_IsWhatThisExtractionKeysOn()
+    {
+        Assert.Contains("TryGetProperty", Scanner.ToString(), StringComparison.Ordinal);
+
+        Assert.True(
+            typeof(SettingsReader).GetMethod("TryGetProperty") is not null,
+            "SettingsReader no longer has a public TryGetProperty. That name is what this file's extraction "
+                + "matches on, so renaming it removes every Lite settings key from the extracted set and lets "
+                + "settings.sample.json drift undetected (#2418, #2428, #2444). If it really must be renamed, "
+                + "teach the Scanner regex the new name in the SAME change and prove it here.");
+    }
+
+    /// <summary>
     /// key -> the source file it was found in, for a failure message that names where to look.
     /// </summary>
     private static Dictionary<string, string> ReadKeysFromLoaders()
     {
-        /* Alternation, evaluated left to right in one pass, so the "which file is open" state and the
-           key hits stay in source order. */
-        var scanner = new Regex(
-            "\"(?<file>[A-Za-z0-9_.\\-]+\\.json)\"|TryGetProperty\\(\"(?<key>[^\"]+)\"",
-            RegexOptions.CultureInvariant);
-
         var keys = new Dictionary<string, string>(StringComparer.Ordinal);
 
         foreach (var name in ReaderSources)
@@ -163,22 +261,43 @@ public sealed class SettingsSampleTests
                 File.Exists(path),
                 $"{name} was not copied beside the test binary — check the csproj None/Link item.");
 
-            var openFile = string.Empty;
-            foreach (Match match in scanner.Matches(File.ReadAllText(path)))
-            {
-                if (match.Groups["file"].Success)
-                {
-                    openFile = match.Groups["file"].Value;
-                }
-                else if (openFile == "settings.json")
-                {
-                    keys.TryAdd(match.Groups["key"].Value, name);
-                }
-            }
+            ExtractKeys(File.ReadAllText(path), name, keys);
         }
 
         return keys;
     }
+
+    /// <summary>
+    /// The extraction itself, over TEXT rather than over a path, so the self-tests below can run it against a
+    /// source they control instead of only against whatever the tree happens to contain today. Split out
+    /// during #2444: the loaders' read shape changed, and a guard whose only exercise is the real file cannot
+    /// show that it still SEES the new shape — it can only fail later, obliquely, on a count.
+    /// </summary>
+    private static void ExtractKeys(string source, string sourceName, Dictionary<string, string> into)
+    {
+        var openFile = string.Empty;
+        foreach (Match match in Scanner.Matches(source))
+        {
+            if (match.Groups["file"].Success)
+            {
+                openFile = match.Groups["file"].Value;
+            }
+            else if (openFile == "settings.json")
+            {
+                into.TryAdd(match.Groups["key"].Value, sourceName);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The comparison <see cref="Sample_DocumentsEveryKeyTheLoadersRead"/> makes, so the self-test below
+    /// exercises the REAL check rather than a re-implementation of it that could drift away from it.
+    /// </summary>
+    private static List<string> UndocumentedKeys(Dictionary<string, string> read, HashSet<string> documented) =>
+        read.Keys
+            .Where(k => !documented.Contains(k) && !LoaderOnlyKeys.Contains(k))
+            .OrderBy(k => k, StringComparer.Ordinal)
+            .ToList();
 
     private static HashSet<string> SampleKeys()
     {
