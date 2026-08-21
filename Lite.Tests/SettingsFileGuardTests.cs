@@ -7,7 +7,9 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.RegularExpressions;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -283,53 +285,91 @@ public sealed class SettingsFileGuardTests
 }
 
 /// <summary>
-/// The category guard behind #2425, rather than the instance. The defect was never "WriteSetting is
-/// wrong" — it was that five separate methods each rolled their own read of settings.json in front of a
-/// whole-document rewrite, so the safety of a Save depended on which method you happened to be in. A sixth
-/// written the same way tomorrow would be just as silent, and nothing but this would notice.
+/// The category guard behind #2425 and #2433, rather than the instance. The defect was never "WriteSetting
+/// is wrong" — it was that separate methods each rolled their own read of settings.json in front of their
+/// own whole-document rewrite, so the safety of a Save depended on which method you happened to be in, and
+/// so did whether anyone could find out afterwards that it had failed.
 ///
-/// <para>Source-parsing because the invariant is a wiring one: each write site must take the read that
-/// preserves what it cannot parse. A behavioral test can prove the guard works and still not notice a
-/// caller that never asks it.</para>
+/// <para>#2425 answered the first half by making every one of those reads the quarantining one. #2433
+/// answered the second by removing the reads and the writes: the Settings window opens the document once,
+/// hands it to all ten of its writers, and writes it once. So the invariant this guard pins is now
+/// stronger and simpler than counting reads against writes per file — settings.json has exactly ONE
+/// writer in the whole of Lite, and that writer takes the quarantining read.</para>
+///
+/// <para>Source-parsing because the invariant is a wiring one. A behavioral test can prove the guard works
+/// and still not notice a caller that never asks it.</para>
 /// </summary>
 public sealed class SettingsWriterQuarantineWiringTests
 {
-    public static TheoryData<string> WritingFiles() => new()
+    [Fact]
+    public void SettingsJson_HasExactlyOneWriterInAllOfLite()
     {
-        Path.Combine("Lite", "App.xaml.cs"),
-        Path.Combine("Lite", "Windows", "SettingsWindow.xaml.cs")
-    };
+        var writers = new List<string>();
+        var described = new List<string>();
+        var total = 0;
 
-    [Theory]
-    [MemberData(nameof(WritingFiles))]
-    public void EverySettingsJsonRewrite_TakesTheQuarantiningRead(string relativePath)
+        foreach (var file in LiteSourceFiles())
+        {
+            var rewrites = Regex.Matches(WithoutComments(File.ReadAllText(file)), @"File\.WriteAllText\(\s*settingsPath").Count;
+            if (rewrites == 0)
+            {
+                continue;
+            }
+
+            total += rewrites;
+            writers.Add(file);
+            described.Add($"{Path.GetFileName(file)} ({rewrites})");
+        }
+
+        Assert.True(total > 0,
+            "No settings.json rewrite found anywhere in Lite — this guard's anchor moved and it is testing nothing.");
+        Assert.True(total == 1,
+            $"{total} whole-document rewrite(s) of settings.json across {writers.Count} file(s): " +
+            string.Join(", ", described) + ". A second writer brings back both defects at once — a rewrite " +
+            "that reads the file itself can replace an unparseable settings.json without copying it aside " +
+            "(#2425), and a save split across several writes has no single honest answer to report (#2433).");
+        Assert.EndsWith("App.xaml.cs", writers[0], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheOneWriter_TakesTheQuarantiningRead()
     {
-        var source = File.ReadAllText(FindRepoFile(relativePath));
+        var source = File.ReadAllText(FindRepoFile(Path.Combine("Lite", "App.xaml.cs")));
 
-        var rewrites = Regex.Matches(source, @"File\.WriteAllText\(settingsPath").Count;
-        var guardedReads = Regex.Matches(source, @"[=(,]\s*(?:App\.)?SettingsRootForWrite\(\)").Count;
-
-        Assert.True(rewrites > 0,
-            $"{relativePath}: no settings.json rewrite found — this guard's anchor moved and it is testing nothing.");
-        Assert.True(rewrites == guardedReads,
-            $"{relativePath}: {rewrites} whole-document rewrite(s) of settings.json but {guardedReads} call(s) to " +
-            "App.SettingsRootForWrite(). A rewrite that reads the file itself will replace an unparseable " +
-            "settings.json without copying it aside first, which is #2425 all over again.");
+        Assert.Matches(new Regex(@"[=(,]\s*SettingsRootForWrite\(\)"), source);
     }
 
     /// <summary>
     /// The exact shape that made a non-object root a silent total overwrite: Parse returns null for the JSON
     /// literal null, the null-coalesce reads that as "no file", and the save replaces the document. Banned
-    /// outright so it cannot be reintroduced by copy-paste from a sibling writer.
+    /// across all of Lite so it cannot be reintroduced by copy-paste from a sibling writer.
     /// </summary>
-    [Theory]
-    [MemberData(nameof(WritingFiles))]
-    public void NoWriter_FallsBackToAFreshDocumentOnAFailedParse(string relativePath)
+    [Fact]
+    public void NoWriter_FallsBackToAFreshDocumentOnAFailedParse()
     {
-        var source = File.ReadAllText(FindRepoFile(relativePath));
+        var banned = new Regex(@"JsonNode\.Parse\([^;]*\)\s*\?\?\s*new JsonObject\(\)");
 
-        Assert.DoesNotMatch(new Regex(@"JsonNode\.Parse\([^;]*\)\s*\?\?\s*new JsonObject\(\)"), source);
+        foreach (var file in LiteSourceFiles())
+        {
+            Assert.DoesNotMatch(banned, WithoutComments(File.ReadAllText(file)));
+        }
     }
+
+    /* Both scans run on code with the comments removed, and SettingsFileGuard is why: the one place that
+       explains WHY `JsonNode.Parse(json) ?? new JsonObject()` is banned has to quote it to explain it, and
+       a scanner that cannot tell a comment from code reads the explanation as the offence. Same trap as
+       #2418's key extractor, one file over. */
+    private static string WithoutComments(string source)
+    {
+        var withoutBlocks = Regex.Replace(source, @"/\*.*?\*/", "", RegexOptions.Singleline);
+        return Regex.Replace(withoutBlocks, @"//[^\r\n]*", "");
+    }
+
+    private static IEnumerable<string> LiteSourceFiles() =>
+        Directory.EnumerateFiles(FindRepoDirectory("Lite"), "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                     && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .OrderBy(f => f, StringComparer.Ordinal);
 
     private static string FindRepoFile(string relativePath)
     {
@@ -345,5 +385,21 @@ public sealed class SettingsWriterQuarantineWiringTests
         }
 
         throw new FileNotFoundException($"Could not locate {relativePath} walking up from {AppContext.BaseDirectory}");
+    }
+
+    private static string FindRepoDirectory(string relativePath)
+    {
+        var dir = AppContext.BaseDirectory;
+        for (var i = 0; i < 8 && dir is not null; i++)
+        {
+            var candidate = Path.Combine(dir, relativePath);
+            if (Directory.Exists(candidate) && File.Exists(Path.Combine(dir, "PerformanceMonitor.sln")))
+            {
+                return candidate;
+            }
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        throw new DirectoryNotFoundException($"Could not locate {relativePath} walking up from {AppContext.BaseDirectory}");
     }
 }

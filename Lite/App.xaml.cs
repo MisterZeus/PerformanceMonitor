@@ -1041,20 +1041,49 @@ public partial class App : Application
     }
 
     /// <summary>
+    /// The one place settings.json is written, and the one that answers whether the write happened (#2433).
+    ///
+    /// <para>Before this, five methods each ended in their own <c>File.WriteAllText</c> inside their own
+    /// catch, and not one of them could tell its caller anything. The Settings window said "Settings saved."
+    /// whether or not a single byte reached disk, because the only place the truth existed was the log, and
+    /// nobody reads a log after a dialog says it worked. A bool is the smallest thing that fixes that, and
+    /// having exactly one writer is what makes the bool mean something: there is no longer a save that
+    /// half happened.</para>
+    ///
+    /// <para><paramref name="what"/> names the thing being saved so the log line is about the operator's
+    /// action rather than about a filename.</para>
+    /// </summary>
+    internal static bool WriteSettingsDocument(JsonNode root, string what)
+    {
+        var settingsPath = Path.Combine(ConfigDirectory, "settings.json");
+
+        try
+        {
+            File.WriteAllText(settingsPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            return true;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Settings", $"Failed to save {what}: settings.json could not be written ({ex.Message})");
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Applies <paramref name="mutate"/> to settings.json and writes it back indented; logs and swallows any
-    /// error under <paramref name="what"/>. Shared by the single-value Save* methods (and MainWindow's
-    /// Overview sort selector) so the read/merge/write/catch boilerplate lives in one place. The read is
+    /// error under <paramref name="what"/>. This is the SINGLE-VALUE path — MainWindow's Overview sort
+    /// selector and anything else that changes one knob outside the Settings window's Save button, which
+    /// opens the document once for all of its writers instead (#2433). The read is
     /// <see cref="SettingsRootForWrite"/>, which is what keeps an unparseable file from being replaced
     /// unrecorded.
     /// </summary>
     public static void WriteSetting(string what, Action<JsonNode> mutate)
     {
-        var settingsPath = Path.Combine(ConfigDirectory, "settings.json");
         try
         {
             JsonNode root = SettingsRootForWrite();
             mutate(root);
-            File.WriteAllText(settingsPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            WriteSettingsDocument(root, what);
         }
         catch (Exception ex)
         {
