@@ -31,11 +31,38 @@ public class DuckDbInitializer
     /// If the current thread already owns a read lock (e.g., leaked by an unhandled exception),
     /// returns a no-op disposable to allow the operation to proceed.
     /// </summary>
-    public IDisposable AcquireReadLock()
+    public IDisposable AcquireReadLock() => AcquireReadLock(CancellationToken.None);
+
+    /// <summary>
+    /// The same read lock, abandonable (#2443). <see cref="AcquireWriteLock"/> has taken a timeout
+    /// since it was written and this one took nothing, which left a real hole in the analysis budget:
+    /// every store read on the pass takes this lock BEFORE it opens its connection, so a pass queued
+    /// behind a long archival or a compaction sat in an uninterruptible <c>EnterReadLock()</c> however
+    /// carefully its reads were threaded. Cancellation reached the reads and stopped at the door.
+    ///
+    /// <para>A token rather than a timeout, because a timeout would need a NUMBER and there is no
+    /// honest one to pick — the right budget for waiting on this lock is exactly the caller's remaining
+    /// budget, which the caller already holds. A poll is the only way to say that to
+    /// <see cref="ReaderWriterLockSlim"/>, which has no token-taking overload; the interval is only
+    /// reached under contention, since an uncontended <c>TryEnterReadLock</c> returns immediately.
+    /// <see cref="CancellationToken.None"/> takes the original uninterruptible path, so the fourteen
+    /// callers outside the analysis pass are unchanged rather than quietly re-timed.</para>
+    /// </summary>
+    public IDisposable AcquireReadLock(CancellationToken cancellationToken)
     {
         try
         {
-            s_dbLock.EnterReadLock();
+            if (!cancellationToken.CanBeCanceled)
+            {
+                s_dbLock.EnterReadLock();
+            }
+            else
+            {
+                while (!s_dbLock.TryEnterReadLock(ReadLockPollInterval))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                }
+            }
         }
         catch (LockRecursionException)
         {
@@ -46,6 +73,14 @@ public class DuckDbInitializer
         }
         return new LockReleaser(s_dbLock, write: false);
     }
+
+    /// <summary>
+    /// How long a cancellable read-lock wait blocks before re-checking its token. Only reached under
+    /// contention, so it costs nothing on the normal path; 50 ms keeps the worst-case overshoot far
+    /// below the smallest budget anyone would set while leaving the wait almost entirely in the kernel
+    /// rather than spinning.
+    /// </summary>
+    private static readonly TimeSpan ReadLockPollInterval = TimeSpan.FromMilliseconds(50);
 
     /// <summary>
     /// Acquires an exclusive write lock on the database. Blocks until all readers finish.
