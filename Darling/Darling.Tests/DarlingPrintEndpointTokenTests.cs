@@ -239,8 +239,8 @@ public class DarlingPrintEndpointTokenTests
     /// <summary>Both verbs are dispatched from Program.cs behind the Windows guard the DPAPI material
     /// requires — a verb that is classified but never dispatched is #1581 the other way round.</summary>
     [Theory]
-    [InlineData("IsPrintMcpTokenVerb", "PrintMcpTokenAsync", "--print-mcp-token requires Windows")]
-    [InlineData("IsPrintWebTokenVerb", "PrintWebTokenAsync", "--print-web-token requires Windows")]
+    [InlineData("IsPrintMcpTokenVerb", "PrintMcpToken", "--print-mcp-token requires Windows")]
+    [InlineData("IsPrintWebTokenVerb", "PrintWebToken", "--print-web-token requires Windows")]
     public void ProgramDispatchesBothVerbs_BehindTheWindowsGuard(string classifier, string entryPoint, string guard)
     {
         var source = ReadSource(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Program.cs"));

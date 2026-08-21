@@ -106,7 +106,7 @@ if (args.Length > 0 && DarlingCliCommands.IsPrintMcpTokenVerb(args[0]))
         return 1;
     }
 
-    return DarlingCliCommands.PrintMcpTokenAsync(args.Length > 1 ? args[1] : null, Console.Out, Console.Error);
+    return DarlingCliCommands.PrintMcpToken(args.Length > 1 ? args[1] : null, Console.Out, Console.Error);
 }
 
 if (args.Length > 0 && DarlingCliCommands.IsPrintWebTokenVerb(args[0]))
@@ -117,7 +117,7 @@ if (args.Length > 0 && DarlingCliCommands.IsPrintWebTokenVerb(args[0]))
         return 1;
     }
 
-    return DarlingCliCommands.PrintWebTokenAsync(args.Length > 1 ? args[1] : null, Console.Out, Console.Error);
+    return DarlingCliCommands.PrintWebToken(args.Length > 1 ? args[1] : null, Console.Out, Console.Error);
 }
 
 /* CLI verb: --export-viewer-config (#1953) — write the viewer machine's whole handoff folder (a complete

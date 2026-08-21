@@ -76,11 +76,11 @@ public static class DarlingCliCommands
     public static bool IsPrintViewerConnectionVerb(string arg) =>
         string.Equals(arg, "--print-viewer-connection", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>The verb <see cref="PrintMcpTokenAsync"/> handles — reprint the MCP bearer token (#2479, item 2).</summary>
+    /// <summary>The verb <see cref="PrintMcpToken"/> handles — reprint the MCP bearer token (#2479, item 2).</summary>
     public static bool IsPrintMcpTokenVerb(string arg) =>
         string.Equals(arg, "--print-mcp-token", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>The verb <see cref="PrintWebTokenAsync"/> handles — reprint the web dashboard access token.
+    /// <summary>The verb <see cref="PrintWebToken"/> handles — reprint the web dashboard access token.
     /// The issue asked for the MCP half; both tokens have the identical unrecoverable-loss problem and the
     /// identical DPAPI shape, so shipping one and not the other would leave half a fix behind.</summary>
     public static bool IsPrintWebTokenVerb(string arg) =>
@@ -462,9 +462,14 @@ public static class DarlingCliCommands
        --------------------------------------------------------------------------------------------------- */
 
     /// <summary>Reprints the MCP bearer token from <c>mcp.network</c>. See the block above for the
-    /// disclosure analysis. Returns 0 when a token was printed, 1 otherwise.</summary>
+    /// disclosure analysis. Returns 0 when a token was printed, 1 otherwise.
+    ///
+    /// <para>No <c>Async</c> suffix, deliberately: this reads one file and decrypts one blob, with nothing
+    /// to await. It follows <c>HardenFiles</c> rather than the <c>PrintViewerConnectionAsync</c> directly
+    /// above, which really is async - naming a synchronous method <c>…Async</c> invites a caller to await
+    /// something that never yields (review catch on #2479).</para></summary>
     [SupportedOSPlatform("windows")]
-    public static int PrintMcpTokenAsync(string? configPath, TextWriter output, TextWriter error)
+    public static int PrintMcpToken(string? configPath, TextWriter output, TextWriter error)
     {
         DarlingConfig config;
         try
@@ -493,7 +498,7 @@ public static class DarlingCliCommands
     /// <summary>Reprints the web dashboard access token from <c>web.network</c>. Returns 0 when a token was
     /// printed, 1 otherwise.</summary>
     [SupportedOSPlatform("windows")]
-    public static int PrintWebTokenAsync(string? configPath, TextWriter output, TextWriter error)
+    public static int PrintWebToken(string? configPath, TextWriter output, TextWriter error)
     {
         DarlingConfig config;
         try
