@@ -346,6 +346,23 @@ public class DarlingHttpRefusalLogTests
     }
 
     /// <summary>
+    /// The verb agrees with the status code.
+    ///
+    /// <para>Review catch on #2479: not every gate rejection ends in a 4xx. The web dashboard answers an
+    /// in-CIDR request with a WRONG <c>?token=</c> using a 200 and the login page, deliberately — and
+    /// "refused a request … with 200" is self-contradictory on its face, misleading anyone reading the log
+    /// cold or filtering for denials on status.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(400, "refused")]
+    [InlineData(401, "refused")]
+    [InlineData(403, "refused")]
+    [InlineData(200, "did not authorize")]
+    [InlineData(302, "did not authorize")]
+    public void TheOutcomeVerb_AgreesWithTheStatusCode(int statusCode, string expected) =>
+        Assert.Equal(expected, DarlingHttpRefusalLog.DescribeOutcome(statusCode));
+
+    /// <summary>
     /// Every refusal site on both hosts reports. This is the half that decays: a gate added later is a
     /// gate that refuses silently again, and no behavioural test can see one that does not exist yet.
     /// </summary>

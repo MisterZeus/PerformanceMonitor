@@ -225,6 +225,18 @@ internal sealed class DarlingHttpRefusalLog
         get { lock (_sync) { return _perSource.Count + _perGate.Count; } }
     }
 
+    /// <summary>
+    /// What actually happened, so the verb agrees with the status code (review catch on #2479).
+    ///
+    /// <para>Not every gate rejection ends in a 4xx. The web dashboard answers an in-CIDR request carrying
+    /// a WRONG <c>?token=</c> with a 200 and the login page — deliberately, and it is exactly the state an
+    /// operator asks about when a token they pasted did not work, which is why it is logged at all. But
+    /// "refused a request … with 200" is self-contradictory on its face, and it would mislead anyone
+    /// reading the log cold or filtering it for denials on status.</para>
+    /// </summary>
+    internal static string DescribeOutcome(int statusCode) =>
+        statusCode >= 400 ? "refused" : "did not authorize";
+
     /// <summary>The gate, named the way an operator would have to name it to fix it.</summary>
     internal static string Describe(DarlingRefusalGate gate) => gate switch
     {
@@ -330,8 +342,9 @@ internal sealed class DarlingHttpRefusalLog
             : string.Empty;
 
         logger.LogWarning(
-            "{Surface} refused a request from {Source} with {Status}: the {Gate} gate rejected it — {Reason}.{Suppressed}{Scope}",
+            "{Surface} {Outcome} a request from {Source} (HTTP {Status}): the {Gate} gate rejected it — {Reason}.{Suppressed}{Scope}",
             surface,
+            DescribeOutcome(statusCode),
             source,
             statusCode,
             Describe(gate),
