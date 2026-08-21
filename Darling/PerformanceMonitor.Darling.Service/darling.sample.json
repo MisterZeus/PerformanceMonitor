@@ -242,10 +242,12 @@
   // (loopback-only HTTP, today's behavior). When present with a non-loopback "listen", the web host binds the
   // LAN interface behind an in-app CIDR check and a token gate: a browser presents the token ONCE via
   // ?token=, which is exchanged for an HMAC-signed session cookie (then the token is stripped from the URL).
-  // LOOPBACK stays TOKENLESS even while exposed (the surface is read-only). Fail-closed: any missing
-  // precondition (token / valid allowFrom / managed mode) keeps it loopback-only. There is deliberately NO
-  // TLS (a browser over plain HTTP on a trusted LAN); the MITM control is a TLS REVERSE PROXY in front of the
-  // port, same as MCP -- so this is a trusted-LAN opt-in, NEVER internet-exposed.
+  // LOOPBACK is exempt from the CIDR check ONLY -- while exposed it presents the token like anyone else
+  // (#1649: the Custom Views composer is a write path, so a tokenless local process could mutate views).
+  // A dashboard with NO "network" block registers no auth middleware at all and stays tokenless.
+  // Fail-closed: any missing precondition (token / valid allowFrom / managed mode) keeps it loopback-only.
+  // There is deliberately NO TLS (a browser over plain HTTP on a trusted LAN); the MITM control is a TLS
+  // REVERSE PROXY in front of the port, same as MCP -- a trusted-LAN opt-in, NEVER internet-exposed.
   // "enabled"/"port" here are the SEED; after first start they live in the control plane and the Viewer's
   // Settings toggles them LIVE (the service starts/stops/rebinds the endpoint within seconds - no restart).
   // The "network" exposure block below stays file-defined and restart-only; the Viewer toggle still stops an
