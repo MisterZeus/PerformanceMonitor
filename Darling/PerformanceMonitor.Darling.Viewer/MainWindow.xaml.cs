@@ -173,6 +173,11 @@ public partial class MainWindow : Window
         InitializeComponent();
         _preferences = _preferencesStore.Load();
         NoteUnreadableSettingsFile(_preferencesStore.FilePath, _preferencesStore.LastLoadState, _preferencesStore.LastLoadProblem);
+        /* The registry loads in its own field initializer, which has already run by the time the
+           constructor body does, so its state is available here — and it is the one of the three worth
+           surfacing most: a viewer that opens with no servers because it could not read viewer-servers.json
+           looks exactly like a viewer nobody has configured yet. */
+        NoteUnreadableSettingsFile(_serverStore.FilePath, _serverStore.LastLoadState, _serverStore.LastLoadProblem);
         /* Seed the persisted app settings the viewer honors at runtime BEFORE any tab/chart renders: the CSV
            export separator (grid exports) and the Server/Local/UTC time-display mode (every timestamp render
            routes through ViewerTimeHelper, which reads CurrentDisplayMode). UiTimeContext is deliberately left
