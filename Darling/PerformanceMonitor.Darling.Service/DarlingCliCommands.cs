@@ -2927,13 +2927,6 @@ public static class DarlingCliCommands
         };
 
     /// <summary>
-    /// Creates or removes every scoped Darling firewall rule so the live firewall matches darling.json.
-    /// Requires elevation (that is the entire point of the verb) and is idempotent — safe to re-run on every
-    /// upgrade, which is exactly how install-darling.ps1 uses it. Returns 0 when the firewall ends up matching
-    /// the config, 1 when it could not be made to.
-    /// </summary>
-    [SupportedOSPlatform("windows")]
-    /// <summary>
     /// One target of <see cref="HardenFiles"/>: a path, whether the interactive operator legitimately reads it,
     /// and what it is called in the report. Kept as data so the list is readable as a policy rather than as
     /// control flow — which file gets INTERACTIVE read is the only judgement in this verb, and it should be
