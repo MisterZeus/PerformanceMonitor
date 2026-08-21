@@ -240,16 +240,9 @@ public partial class SettingsWindow : Window
 
         try
         {
-            JsonNode? root;
-            if (File.Exists(settingsPath))
-            {
-                var json = File.ReadAllText(settingsPath);
-                root = JsonNode.Parse(json) ?? new JsonObject();
-            }
-            else
-            {
-                root = new JsonObject();
-            }
+            /* #2425: the shared read, which copies an unparseable settings.json aside before this whole-
+               document rewrite can replace it, and throws into the catch below when it cannot. */
+            JsonNode root = App.SettingsRootForWrite();
 
             var oldEnabled = root["mcp_enabled"]?.GetValue<bool>() ?? false;
             var oldPort = root["mcp_port"]?.GetValue<int>() ?? 5151;
@@ -687,16 +680,9 @@ public partial class SettingsWindow : Window
         var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
         try
         {
-            JsonNode? root;
-            if (File.Exists(settingsPath))
-            {
-                var json = File.ReadAllText(settingsPath);
-                root = JsonNode.Parse(json) ?? new JsonObject();
-            }
-            else
-            {
-                root = new JsonObject();
-            }
+            /* #2425: the shared read, which copies an unparseable settings.json aside before this whole-
+               document rewrite can replace it, and throws into the catch below when it cannot. */
+            JsonNode root = App.SettingsRootForWrite();
 
             root["minimize_to_tray"] = App.MinimizeToTray;
             root["alerts_enabled"] = App.AlertsEnabled;
@@ -946,16 +932,9 @@ public partial class SettingsWindow : Window
         var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
         try
         {
-            JsonNode? root;
-            if (File.Exists(settingsPath))
-            {
-                var json = File.ReadAllText(settingsPath);
-                root = JsonNode.Parse(json) ?? new JsonObject();
-            }
-            else
-            {
-                root = new JsonObject();
-            }
+            /* #2425: the shared read, which copies an unparseable settings.json aside before this whole-
+               document rewrite can replace it, and throws into the catch below when it cannot. */
+            JsonNode root = App.SettingsRootForWrite();
 
             root["smtp_enabled"] = App.SmtpEnabled;
             root["smtp_server"] = App.SmtpServer;
@@ -1154,16 +1133,9 @@ public partial class SettingsWindow : Window
         var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
         try
         {
-            JsonNode? root;
-            if (File.Exists(settingsPath))
-            {
-                var json = File.ReadAllText(settingsPath);
-                root = JsonNode.Parse(json) ?? new JsonObject();
-            }
-            else
-            {
-                root = new JsonObject();
-            }
+            /* #2425: the shared read, which copies an unparseable settings.json aside before this whole-
+               document rewrite can replace it, and throws into the catch below when it cannot. */
+            JsonNode root = App.SettingsRootForWrite();
 
             root["teams_webhook_enabled"] = App.TeamsWebhookEnabled;
             root["teams_proxy_address"] = App.TeamsProxyAddress;

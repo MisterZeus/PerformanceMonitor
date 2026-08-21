@@ -474,6 +474,11 @@ public partial class App : Application
         // Create and show main window (StartupUri removed for Velopack custom Main)
         _mainWindow = new MainWindow();
         _mainWindow.Show();
+
+        /* #2425. The log line for this was written back in LoadDefaultTimeRange/LoadAlertSettings and has
+           been sitting in AppLogger's buffer since; this is the visible half, and it is here rather than
+           beside the loaders so that it has a window behind it and so that startup order is untouched. */
+        ReportUnreadableSettingsToUser();
     }
 
     /// <summary>
@@ -645,20 +650,100 @@ public partial class App : Application
         }
     }
 
+    /// <summary>
+    /// Why settings.json could not be parsed, set by whichever loader hit it first and consumed once by
+    /// <see cref="ReportUnreadableSettingsToUser"/> (#2425).
+    ///
+    /// <para>Both loaders run about thirteen statements BEFORE <c>AppLogger.Initialize</c>, which reads
+    /// like there is nowhere to report this to. There is: <c>AppLogger.Log</c> enqueues unconditionally and
+    /// only <c>Flush</c> is gated on initialization, so a line written from here lands in the log file a
+    /// few statements later — which is exactly how <c>DataRootMigration</c>'s failure lines above already
+    /// reach disk. That is the deferred diagnostic, and it costs no reordering of startup. What cannot be
+    /// deferred to a buffer is the VISIBLE signal, which is what this field carries: someone looking at an
+    /// app that has forgotten its configuration should not have to find a log to learn why.</para>
+    /// </summary>
+    private static string? s_unreadableSettingsProblem;
+
+    /// <summary>
+    /// Records that settings.json is present but unparseable: to the log immediately (buffered until
+    /// <c>AppLogger.Initialize</c>) and to <see cref="s_unreadableSettingsProblem"/> for the single dialog
+    /// shown once the main window is up. First caller wins, because both loaders read the same file and
+    /// would otherwise say the same thing twice.
+    ///
+    /// <para>There is deliberately no counterpart for an ABSENT file. A first run has no settings.json,
+    /// defaults are the correct answer, and a warning there would be pure noise — which is precisely why
+    /// the old bare catch looked reasonable, since it could not tell the two apart.</para>
+    /// </summary>
+    private static void ReportUnreadableSettings(string? problem)
+    {
+        if (s_unreadableSettingsProblem != null)
+        {
+            return;
+        }
+
+        s_unreadableSettingsProblem = problem ?? "the reason could not be determined";
+
+        AppLogger.Error("Settings",
+            $"settings.json could not be parsed ({s_unreadableSettingsProblem}). Every setting it holds is " +
+            "at its default for this session. The file has NOT been changed: fix it and restart to get the " +
+            "settings back, or save from the Settings window, which copies the unreadable file aside first.");
+    }
+
+    /// <summary>
+    /// Shows the one-time modal for an unreadable settings.json. Called after the main window exists so it
+    /// cannot be the app's entire first impression, and so a later startup failure still fails the way it
+    /// did before.
+    ///
+    /// <para>Modal rather than a tray balloon on purpose. The app is running on settings the user did not
+    /// choose, and the likeliest next move is to reconfigure by hand over a file that still holds the real
+    /// answers — a balloon that has already faded does not stop that.</para>
+    /// </summary>
+    private static void ReportUnreadableSettingsToUser()
+    {
+        var problem = s_unreadableSettingsProblem;
+        if (problem == null)
+        {
+            return;
+        }
+
+        MessageBox.Show(
+            "settings.json could not be read, so Performance Monitor Lite started with default settings.\n\n" +
+            $"{Path.Combine(ConfigDirectory, "settings.json")}\n{problem}\n\n" +
+            "Your file has not been changed. Fix it and restart to get your settings back. If you save from " +
+            "the Settings window instead, the unreadable file is copied aside as " +
+            "settings.json.unreadable-<timestamp> first, so it is recoverable either way.",
+            "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+    }
+
     private static void LoadDefaultTimeRange()
     {
+        var settings = SettingsFileGuard.Read(Path.Combine(ConfigDirectory, "settings.json"));
+        if (settings.State == SettingsFileState.Unreadable)
+        {
+            ReportUnreadableSettings(settings.Problem);
+            return;
+        }
+
+        if (settings.Root == null)
+        {
+            return;
+        }
+
         try
         {
-            var path = Path.Combine(ConfigDirectory, "settings.json");
-            if (!File.Exists(path)) return;
-
-            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
-            if (doc.RootElement.TryGetProperty("default_time_range_hours", out var val))
+            if (settings.Root.TryGetPropertyValue("default_time_range_hours", out var val) && val != null)
             {
-                DefaultTimeRangeHours = val.GetInt32();
+                DefaultTimeRangeHours = val.GetValue<int>();
             }
         }
-        catch { /* Use default */ }
+        catch (Exception ex)
+        {
+            /* The document parsed, so anything landing here is ONE bad value rather than a broken file.
+               That distinction is worth keeping: the key it names is the only thing that fell back. */
+            AppLogger.Warn("Settings",
+                $"settings.json key 'default_time_range_hours' could not be read ({ex.Message}); the " +
+                $"default of {DefaultTimeRangeHours} hours is in use.");
+        }
     }
 
     public static void LoadAlertSettings() => LoadAlertSettings(ConfigDirectory, GetWebhookUrl, SaveWebhookUrl);
@@ -687,12 +772,25 @@ public partial class App : Application
         GenericWebhookHeadersJson = readSecret(GenericWebhookHeadersCredentialKey);
         PagerDutyRoutingKey = readSecret(PagerDutyWebhookCredentialKey);
 
+        /* #2425: the PARSE is decided before the reads below, and separately from them. It used to share
+           their single try, so one trailing comma anywhere in the file threw before the first
+           TryGetProperty ran and reverted all eighty-eight settings at once, silently. An unreadable file
+           is now reported; an absent one still is not, because a first run legitimately has no file. */
+        var settings = SettingsFileGuard.Read(Path.Combine(configDirectory, "settings.json"));
+        if (settings.State == SettingsFileState.Unreadable)
+        {
+            ReportUnreadableSettings(settings.Problem);
+            return;
+        }
+
+        if (settings.Text == null)
+        {
+            return;
+        }
+
         try
         {
-            var path = Path.Combine(configDirectory, "settings.json");
-            if (!File.Exists(path)) return;
-
-            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+            using var doc = System.Text.Json.JsonDocument.Parse(settings.Text);
             var root = doc.RootElement;
 
             if (root.TryGetProperty("alerts_enabled", out var v)) AlertsEnabled = v.GetBoolean();
@@ -875,23 +973,73 @@ public partial class App : Application
             if (root.TryGetProperty("analysis_notify_cooldown_minutes", out v)) AnalysisNotifyCooldownMinutes = (int)Math.Clamp(v.GetInt64(), 30, 10080);
             if (root.TryGetProperty("analysis_timeout_seconds", out v)) AnalysisTimeoutSeconds = (int)Math.Clamp(v.GetInt64(), 30, 600);
         }
-        catch { /* Use defaults */ }
+        catch (Exception ex)
+        {
+            /* SettingsFileGuard already parsed this exact text, so nothing reaching here is a document-level
+               fault. It is one key holding a value of the wrong shape — a quoted number, a string where a
+               bool belongs — and every key AFTER it keeps its default too. Which key that was is not known
+               here; isolating each of the eighty-eight behind its own try would name it, and that is filed
+               separately rather than smuggled into this fix. Saying it happened is the part that was
+               missing. */
+            AppLogger.Error("Settings",
+                "settings.json parsed, but a value in it could not be read, so that key and every alert " +
+                "setting after it are at their defaults for this session", ex);
+        }
     }
 
     /// <summary>
-    /// Reads settings.json (or starts fresh), applies <paramref name="mutate"/>, and writes it back
-    /// indented; logs and swallows any error under <paramref name="what"/>. Shared by the single-value
-    /// Save* methods (and MainWindow's Overview sort selector) so the read/merge/write/catch boilerplate
-    /// lives in one place.
+    /// The JSON object every settings.json writer in Lite merges into — this one, the four Save* methods in
+    /// SettingsWindow, and anything added later.
+    ///
+    /// <para>Every Save here rewrites the WHOLE document, so the read in front of it decides whether a Save
+    /// merges or replaces (#2425). When the file is present but unparseable, merging is impossible and
+    /// replacing destroys the only copy of what the user actually configured — including through saves
+    /// nobody thinks of as saves, such as collapsing a sidebar group. So the unreadable file is copied
+    /// aside first and the caller merges into a fresh object.</para>
+    ///
+    /// <para>When even the copy cannot be made this throws rather than handing back an empty object. Every
+    /// call site already wraps its write in a catch that logs, so the file is left exactly as it was and the
+    /// failure is reported — which is the right way round when the alternative is permanent loss.</para>
+    /// </summary>
+    internal static JsonObject SettingsRootForWrite()
+    {
+        var settingsPath = Path.Combine(ConfigDirectory, "settings.json");
+        var forWrite = SettingsFileGuard.RootForWrite(settingsPath, DateTime.Now);
+
+        if (forWrite.Problem == null)
+        {
+            return forWrite.Root;
+        }
+
+        if (forWrite.QuarantinedTo == null)
+        {
+            throw new IOException(
+                $"settings.json cannot be parsed ({forWrite.Problem}) and no copy of it could be made, so it " +
+                "has been left untouched rather than overwritten with defaults. Fix it, or move it aside by " +
+                "hand, and save again.");
+        }
+
+        AppLogger.Warn("Settings",
+            $"settings.json could not be parsed ({forWrite.Problem}), so this save rewrites it from defaults. " +
+            $"The unreadable original was copied to '{Path.GetFileName(forWrite.QuarantinedTo)}' first — the " +
+            "settings it held are recoverable from there.");
+
+        return forWrite.Root;
+    }
+
+    /// <summary>
+    /// Applies <paramref name="mutate"/> to settings.json and writes it back indented; logs and swallows any
+    /// error under <paramref name="what"/>. Shared by the single-value Save* methods (and MainWindow's
+    /// Overview sort selector) so the read/merge/write/catch boilerplate lives in one place. The read is
+    /// <see cref="SettingsRootForWrite"/>, which is what keeps an unparseable file from being replaced
+    /// unrecorded.
     /// </summary>
     public static void WriteSetting(string what, Action<JsonNode> mutate)
     {
         var settingsPath = Path.Combine(ConfigDirectory, "settings.json");
         try
         {
-            JsonNode root = File.Exists(settingsPath)
-                ? JsonNode.Parse(File.ReadAllText(settingsPath)) ?? new JsonObject()
-                : new JsonObject();
+            JsonNode root = SettingsRootForWrite();
             mutate(root);
             File.WriteAllText(settingsPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         }
