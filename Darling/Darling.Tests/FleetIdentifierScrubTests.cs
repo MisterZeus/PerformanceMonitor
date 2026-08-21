@@ -12,12 +12,12 @@ namespace Darling.Tests;
     This repository is PUBLIC. Fixtures reach for realistic-looking instance names, and a real
     fleet's names carry tenant and customer identifiers that must not be published.
 
-    Two scrubs missed the same string before this guard existed. The first substituted the
-    prefix "prod-pos-" WITH a trailing hyphen, so a bare "prod-pos" survived as a peer's match
-    pattern -- and that one was load-bearing, so the rename compiled and quietly changed what
-    the fixture asserted. The second swept case-sensitively, so an upper-case host spelled
-    with a real tenant slug survived in the case-insensitivity test, which is precisely the
-    assertion that has to be spelled in capitals.
+    Two scrubs missed the same string before this guard existed. The first substituted the old
+    service prefix WITH its trailing hyphen, so the bare form survived as a peer's match pattern
+    -- and that one was load-bearing, so the rename compiled and quietly changed what the fixture
+    asserted. The second swept case-sensitively, so an upper-case host spelled with a real tenant
+    slug survived in the case-insensitivity test, which is precisely the assertion that has to be
+    spelled in capitals.
 
     So the guard is DERIVED, not a list: it matches the SHAPE of an instance name anywhere in
     tracked source, case-insensitively, and allows only slugs that are obviously invented.
