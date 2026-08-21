@@ -120,6 +120,14 @@ public partial class App : Application
     /// workload-dependent, and because a legitimate post-resume catch-up spike would otherwise page.</summary>
     public static long AgRedoQueueAlertKb { get; set; }
 
+    /// <summary>#2426: re-announce a replica that is STILL disconnected every N minutes (0 = off, the
+    /// shipped default, so nothing starts re-alerting on upgrade). "AG Replica Disconnected" is otherwise a
+    /// pure edge, which means a replica down for a week announces itself exactly once and a week-long outage
+    /// is indistinguishable from a momentary blip in the alert history. Re-fires deliver under the SAME
+    /// metric name so webhook automation keyed on it re-triggers. Darling's ag_disconnect_refire_minutes,
+    /// same 0-1440 clamp.</summary>
+    public static int AgDisconnectRefireMinutes { get; set; }
+
     public static bool AlertCpuEnabled { get; set; } = true;
     public static int AlertCpuThreshold { get; set; } = 80;
     /// <summary>Which CPU metric the alert evaluates against. Total = sql_server_cpu + other_process_cpu (matches OS user+system). SqlOnly = SQL Server scheduler %.</summary>
@@ -815,6 +823,7 @@ public partial class App : Application
             if (root.TryGetProperty("notify_ag_health", out v)) NotifyAgHealth = v.GetBoolean();
             if (root.TryGetProperty("ag_lag_alert_seconds", out v)) AgLagAlertSeconds = Math.Clamp(v.GetInt32(), 0, 86400);
             if (root.TryGetProperty("ag_redo_queue_alert_kb", out v)) AgRedoQueueAlertKb = Math.Clamp(v.GetInt64(), 0L, 1073741824L);
+            if (root.TryGetProperty("ag_disconnect_refire_minutes", out v)) AgDisconnectRefireMinutes = Math.Clamp(v.GetInt32(), 0, 1440);
             if (root.TryGetProperty("alert_cpu_enabled", out v)) AlertCpuEnabled = v.GetBoolean();
             if (root.TryGetProperty("alert_cpu_threshold", out v)) AlertCpuThreshold = v.GetInt32();
             if (root.TryGetProperty("alert_cpu_mode", out v) && Enum.TryParse<CpuAlertMode>(v.GetString(), out var mode))

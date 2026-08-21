@@ -838,21 +838,28 @@ internal sealed class DarlingSelfAlertEvaluator
             if (!string.IsNullOrEmpty(replica.ConnectedStateDesc))
             {
                 _agReplicaConnectedState.TryGetValue(key, out var previousState);
-                var connection = AgAlertPolicy.DecideConnection(previousState, replica.ConnectedStateDesc);
-                _agReplicaConnectedState[key] = replica.ConnectedStateDesc;
 
                 /* #1696 (V37): "AG Replica Disconnected" was a pure edge, so a replica that stayed
                    disconnected for a week announced it ONCE. The #1659 treatment: re-announce every N
                    minutes while it is still down (0 = off, the shipped default, so nothing starts
                    re-alerting on upgrade). Re-fires deliver under the SAME metric name, because webhook
-                   automation keyed on it is exactly what a re-fire exists to re-trigger. */
-                bool stillDisconnected =
-                    connection == AgConnectionDecision.None
-                    && AgAlertPolicy.IsDisconnected(replica.ConnectedStateDesc)
-                    && _agDisconnectRefireMinutes() is int refire
-                    && refire > 0
-                    && (!_lastAgDisconnectAlert.TryGetValue(key, out var lastDown)
-                        || _utcNow() - lastDown >= TimeSpan.FromMinutes(refire));
+                   automation keyed on it is exactly what a re-fire exists to re-trigger.
+
+                   #2426 moved the combined decision into the shared policy rather than leaving it as an
+                   expression here: Lite grew the same knob, and the parts with sharp corners — a re-fire
+                   must not double up with the edge that just fired, and an unrecognized state string must
+                   not count as down — are precisely the parts that drift when written twice. What stays
+                   here is what is genuinely this app's: the stamp, and the delivery it is stamped on. */
+                int refireMinutes = _agDisconnectRefireMinutes();
+                var connection = AgAlertPolicy.DecideConnection(
+                    previousState,
+                    replica.ConnectedStateDesc,
+                    refireMinutes > 0 ? TimeSpan.FromMinutes(refireMinutes) : null,
+                    _lastAgDisconnectAlert.TryGetValue(key, out var lastDown) ? lastDown : (DateTime?)null,
+                    _utcNow());
+                _agReplicaConnectedState[key] = replica.ConnectedStateDesc;
+
+                bool stillDisconnected = connection == AgConnectionDecision.StillDisconnected;
 
                 if (connection == AgConnectionDecision.Disconnected || stillDisconnected)
                 {

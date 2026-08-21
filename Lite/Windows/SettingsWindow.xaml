@@ -207,6 +207,14 @@
                     <TextBlock Text="KB (0 = off)" VerticalAlignment="Center" Margin="4,0,0,0"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                 </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="36,4,0,0"
+                            ToolTip="0 = off (one alert per outage). Re-alerts use the same 'AG Replica Disconnected' metric name, so webhook automation keyed on it re-triggers.">
+                    <TextBlock Text="Re-alert while a replica is still disconnected every" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AgDisconnectRefireMinutesBox" Width="45" Text="0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="min (0 = off)" VerticalAlignment="Center" Margin="4,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertCpuCheckBox" Content="CPU above" VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>
