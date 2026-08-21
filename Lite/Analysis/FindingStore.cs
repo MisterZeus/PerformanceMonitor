@@ -53,12 +53,14 @@ namespace PerformanceMonitorLite.Analysis;
 /// </para>
 ///
 /// <para>
-/// One thing this store does NOT settle, so a reader who checks the neighbours is not misled twice:
-/// <c>DuckDbAlertHistoryStore</c> and <c>DuckDbMuteRuleStore</c> take the WRITE lock for the same
-/// species of ordinary write, and <c>LocalDataService.OpenWriteConnectionAsync</c> states that as the
-/// house rule in its own doc comment. Two conventions, and this file follows the cheaper one. Which
-/// is right for the other eleven call sites is #2463 — a question about the lock model rather than
-/// about these three methods, and deliberately not answered here.
+/// A reader who checks the neighbours will find <c>DuckDbAlertHistoryStore</c> and
+/// <c>DuckDbMuteRuleStore</c> taking the WRITE lock, and should not conclude that one of the two is
+/// wrong. #2463 settled it: the lock is chosen by what a statement must EXCLUDE, not by whether it
+/// reads or writes, and the rule with its measurements is on <c>DuckDbInitializer.s_dbLock</c>. The
+/// short of it is that these three are on the correct side of it — <see cref="InsertFindingsAsync"/>
+/// and <see cref="MuteStoryAsync"/> APPEND new rows, which DuckDB lets run concurrently, and
+/// <see cref="CleanupOldFindingsAsync"/>'s retention DELETE is disjoint from them. What the write lock
+/// buys is exclusion of another writer of the SAME rows, and nothing else writes these tables.
 /// </para>
 /// </summary>
 public class FindingStore

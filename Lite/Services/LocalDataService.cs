@@ -53,9 +53,23 @@ public partial class LocalDataService
     }
 
     /// <summary>
-    /// Creates and opens a DuckDB connection wrapped in an exclusive write lock.
-    /// Use for UPDATE/DELETE/INSERT operations that must not race with archival or compaction.
-    /// A 5-second timeout prevents UI freeze if archival currently holds the lock.
+    /// Creates and opens a DuckDB connection wrapped in an exclusive write lock, with a 5-second timeout
+    /// so the UI thread cannot freeze behind an in-flight archival.
+    ///
+    /// <para><b>This doc comment used to say "use for UPDATE/DELETE/INSERT operations that must not race
+    /// with archival or compaction", and was read as the house rule for the whole app (#2463).</b> It is
+    /// not, and the INSERT in that sentence is the part that was wrong: excluding archival is what the
+    /// READ lock already does, since a held read lock blocks <c>EnterWriteLock</c>. What this method
+    /// additionally buys is exclusion of OTHER WRITERS, which an UPDATE or a DELETE needs — DuckDB's
+    /// optimistic concurrency fails the loser of a write-write collision rather than queueing it — and
+    /// which an append of new rows does not. The rule, with the measurements behind it, is on
+    /// <c>DuckDbInitializer.s_dbLock</c>; the fourteen callers here are UPDATE, DELETE and #2208's
+    /// multi-statement maintenance block, and all of them sit on the right side of it.</para>
+    ///
+    /// <para>The 5-second timeout is this method's own contribution and is not part of the lock rule:
+    /// every other write-lock caller in the app waits indefinitely, which they can afford and the UI
+    /// thread cannot. See <see cref="LocalDataService.GetDatabaseStateDeviationsAsync"/> for what a
+    /// caller does when it expires.</para>
     /// </summary>
     internal async Task<LockedConnection> OpenWriteConnectionAsync()
     {

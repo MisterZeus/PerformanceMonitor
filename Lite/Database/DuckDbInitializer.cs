@@ -19,9 +19,74 @@ public class DuckDbInitializer
     private readonly ILogger<DuckDbInitializer>? _logger;
 
     /// <summary>
-    /// Coordinates UI readers with maintenance writers (CHECKPOINT, archive DELETEs, compaction).
-    /// Read locks allow unlimited concurrent UI queries. Write locks are exclusive and wait
-    /// for all readers to finish before proceeding.
+    /// Coordinates every DuckDB caller in the process against MAINTENANCE — CHECKPOINT, the archive
+    /// export and its DELETEs, compaction, the in-place parquet swap, schema migration — each of which
+    /// reorganizes the database file, or the paths under it, while other statements are running. Read
+    /// locks allow unlimited concurrent holders. Write locks are exclusive and wait for every reader to
+    /// drain first.
+    ///
+    /// <para>ONE lock for the whole process, deliberately: Lite constructs several
+    /// <see cref="DuckDbInitializer"/> instances over the same file (MainWindow,
+    /// DatabaseStateOverridesWindow, DuckDbAlertHistoryStore), and making it per-instance would trade a
+    /// slow test suite for a real data race.</para>
+    ///
+    /// <para><b>WHICH LOCK A CALLER TAKES IS DECIDED BY WHAT IT MUST EXCLUDE, NOT BY WHETHER IT READS OR
+    /// WRITES (#2463).</b> That one sentence is the rule, and it is written here because the answer had
+    /// drifted into looking like two rival conventions: <c>FindingStore</c>'s three write paths take the
+    /// READ lock (#2455/#2464), while <c>DuckDbAlertHistoryStore</c> (6), <c>DuckDbMuteRuleStore</c> (5)
+    /// and the fourteen callers of <c>LocalDataService.OpenWriteConnectionAsync</c> take the WRITE lock —
+    /// twenty-five sites against three, with no note anywhere saying why either was right. They are not
+    /// two answers to one question. They are answers to two questions, and the axis that separates them
+    /// belongs to DuckDB rather than to anything in this file.</para>
+    ///
+    /// <para><b>Take the READ lock when all you need is "the file must not be reorganized under me."</b>
+    /// That covers every ordinary statement, SELECT and INSERT alike. It is shared, so it costs other
+    /// readers nothing, and a held read lock blocks <c>EnterWriteLock</c> — which means holding one IS how
+    /// a write says "not while I am in flight", and is the whole of the exclusion an append needs.</para>
+    ///
+    /// <para><b>Take the WRITE lock when you need one of two stronger things.</b> (1) <b>You ARE the
+    /// maintenance</b> — you reorganize the file or the paths under it. <c>ArchiveService</c>,
+    /// <c>RemoteCollectorService</c>'s post-collection CHECKPOINT, this class's own re-key, and
+    /// <c>QueryStoreSliceRepairService</c>'s hot collapse and file promotion. Never in question. (2)
+    /// <b>Your statement can COLLIDE with another writer of the same rows.</b> DuckDB's concurrency
+    /// control is optimistic: it does not queue the second writer, it FAILS it. An UPDATE, an upsert, or
+    /// a delete-then-reinsert compound can lose that race; an append of new rows cannot. So the write
+    /// lock buys serialization exactly where DuckDB would otherwise hand somebody an exception.</para>
+    ///
+    /// <para>Measured on DuckDB.NET 1.5.5 with the two transactions strictly interleaved — the second
+    /// statement runs while the first transaction is still open and uncommitted, which is the only
+    /// arrangement that measures anything (let the connections merely start together and one commits
+    /// before the other begins, and every case reads as "both committed"):</para>
+    ///
+    /// <list type="table">
+    /// <item><description>two APPENDS of brand-new rows — <b>both commit</b></description></item>
+    /// <item><description>a retention DELETE overlapping a disjoint append — <b>both commit</b></description></item>
+    /// <item><description>two UPDATEs of the same row — second fails, <c>Conflict on update!</c></description></item>
+    /// <item><description>two upserts of the same key — second fails, <c>Conflict on update!</c></description></item>
+    /// <item><description>two delete-all-then-reinsert compounds — second fails, <c>Conflict on tuple deletion!</c></description></item>
+    /// </list>
+    ///
+    /// <para><b>That rule describes the code as it stands, with two known exceptions</b>, both appends
+    /// holding the write lock: <c>DuckDbAlertHistoryStore.RecordAlertAsync</c> (an INSERT into
+    /// <c>config_alert_log</c>) and <c>DuckDbMuteRuleStore.InsertAsync</c> (an INSERT of a fresh rule id).
+    /// Neither can collide, so by clause (2) neither needs exclusivity. They are left alone on purpose:
+    /// each is one method on a store whose siblings genuinely do need it, both are operator- or
+    /// alert-frequency rather than hot, and making two of eleven different would cost more in legibility
+    /// than it recovers in lock time. Recorded as over-locked so the next reader knows it was seen.</para>
+    ///
+    /// <para>It also answers the pair that made the split look like a contradiction.
+    /// <c>DuckDbMuteRuleStore.InsertAsync</c> writing <c>config_mute_rules</c> under a write lock and
+    /// <c>FindingStore.MuteStoryAsync</c> writing <c>analysis_muted</c> under a read lock are NOT the same
+    /// species: nothing but the analysis pass ever writes <c>analysis_muted</c>, while
+    /// <c>config_mute_rules</c> is UPDATEd by an operator and DELETEd by a timer-driven expiry purge that
+    /// can be running at the same moment.</para>
+    ///
+    /// <para><b>The WAIT is a separate question from the lock.</b> <c>AcquireWriteLock()</c> with no
+    /// timeout waits behind an archival for however long the archival takes. Eleven current callers do
+    /// that, and can: they are alert-sweep and mute-CRUD paths whose failures are caught, logged and
+    /// non-fatal. <c>LocalDataService.OpenWriteConnectionAsync</c> is the one that cannot, because it is on
+    /// the path the UI thread awaits, so it passes 5 seconds and #2208's maintenance block treats the
+    /// timeout as "skip this cycle". If you are adding a caller, decide which of those two you are.</para>
     /// </summary>
     private static readonly ReaderWriterLockSlim s_dbLock = new(LockRecursionPolicy.NoRecursion);
 
@@ -109,6 +174,35 @@ public class DuckDbInitializer
         public void Dispose() { }
     }
 
+    /// <summary>
+    /// Releases the lock entry its constructor was handed.
+    ///
+    /// <para><b>Thread affinity is a LATENT hazard here, and the obvious mitigation is worse than the
+    /// hazard (#2463).</b> <see cref="ReaderWriterLockSlim"/> is thread-affine: <c>ExitReadLock</c> throws
+    /// <see cref="SynchronizationLockException"/> when called from a thread that did not enter. Every one
+    /// of these locks is held across <c>await</c> — <c>AcquireReadLock</c>, then <c>OpenAsync</c>, then the
+    /// reads — and the analysis pass runs under <c>Task.Run</c> with no <c>SynchronizationContext</c>, so a
+    /// continuation is free to resume on a different pool thread. It does not, and the reason is measured
+    /// rather than lucky: <b>DuckDB.NET 1.5.5's async methods complete synchronously</b>, so no await ever
+    /// yields and the entering thread is always the exiting thread. Thread id across <c>OpenAsync</c>, a
+    /// DDL statement, 200 <c>ExecuteNonQueryAsync</c> calls and a reader drain: <c>4, 4, 4, 4, 4</c>.</para>
+    ///
+    /// <para><b>Do not "harden" this with an <c>IsReadLockHeld</c> guard.</b> It looks like the cheap fix
+    /// and it is a bug amplifier, measured: on a thread that did not enter, <c>IsReadLockHeld</c> is
+    /// <c>false</c>, so the guard SKIPS the exit — and the entry the original thread took is then held
+    /// forever. With it still held, <c>TryEnterWriteLock(400 ms)</c> fails. So the guard would convert a
+    /// loud, attributable <see cref="SynchronizationLockException"/> into a silently leaked reader that
+    /// permanently wedges every maintenance operation in the process: no CHECKPOINT, no archival, no
+    /// compaction, for the life of the app. Throwing is the better failure.</para>
+    ///
+    /// <para>A real fix would have to make the releaser not thread-affine at all — replacing
+    /// <see cref="ReaderWriterLockSlim"/> with something like a <c>SemaphoreSlim</c>, which would also
+    /// retire <see cref="AcquireReadLock(CancellationToken)"/>'s poll — and that is a change to the lock
+    /// primitive, not to this class. It is not worth doing while the premise holds. What would break the
+    /// premise is a DuckDB.NET release whose async genuinely yields, so
+    /// <c>DuckDbLockModelTests.DuckDbAsyncStillCompletesOnTheCallingThread</c> is a tripwire on exactly
+    /// that: if it goes red after a driver bump, this paragraph is where to start.</para>
+    /// </summary>
     private sealed class LockReleaser : IDisposable
     {
         private readonly ReaderWriterLockSlim _lock;
