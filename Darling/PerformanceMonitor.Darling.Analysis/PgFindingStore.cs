@@ -271,6 +271,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         }
 
         var row = 0;
+        var everyRowAccepted = false;
 
         try
         {
@@ -286,6 +287,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
                 await InsertFindingAsync(connection, transaction, finding);
             }
 
+            everyRowAccepted = true;
             await transaction.CommitAsync();
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
@@ -293,10 +295,26 @@ VALUES ($1, $2, $3, $4, $5, $6)";
             /* The ONE line the batch is allowed to cost, and it states the loss rather than the
                mechanism: nothing was persisted, and that is the deliberate outcome. Naming the row
                is what turns "how often does this actually happen" into something the log can
-               answer — #2448 asked for that measurement and this is where it comes from. */
-            _logger?.LogError(
-                "[PgFindingStore] InsertFindingsAsync failed at row {Row} of {Count} and the batch was rolled back — this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {Message}",
-                row, findings.Count, ex.Message);
+               answer — #2448 asked for that measurement and this is where it comes from.
+
+               Which is exactly why the commit gets its OWN line rather than sharing this one. After
+               the loop `row` sits at findings.Count, so a fault in CommitAsync — a blip, a
+               deadlock at commit, the store out of disk — would report "failed at row N of N" and
+               name the last finding as the bad one when every row had in fact been accepted and
+               only the commit failed. A diagnostic that exists to be counted must not miscount the
+               one case it cannot see from the row number. */
+            if (everyRowAccepted)
+            {
+                _logger?.LogError(
+                    "[PgFindingStore] InsertFindingsAsync had all {Count} row(s) accepted and then failed to COMMIT them, so the batch was rolled back — this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {Message}",
+                    findings.Count, ex.Message);
+            }
+            else
+            {
+                _logger?.LogError(
+                    "[PgFindingStore] InsertFindingsAsync failed at row {Row} of {Count} and the batch was rolled back — this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {Message}",
+                    row, findings.Count, ex.Message);
+            }
         }
 
         return findings;
