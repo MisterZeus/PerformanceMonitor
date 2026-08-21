@@ -252,7 +252,7 @@ public class AnalysisService
                burying the one line of evidence it left. OperationCanceledException is what the
                checkpoints throw, and what DuckDB's own duckdb_interrupt surfaces, so nothing the
                cancellation actually produces is lost by naming it. This is the Darling twin's
-               AnalysisShutdown.IsShutdownAbandon discipline — signalled token AND a shape the
+               AnalysisShutdown.IsExpectedAbandon discipline — signalled token AND a shape the
                cancellation really produces — narrowed to the one shape that arises here. */
             AppLogger.Info("AnalysisService",
                 $"Analysis abandoned for {context.ServerName} — this pass's findings are lost by design; the next pass recomputes them ({ex.Message})");
