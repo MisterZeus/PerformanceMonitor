@@ -1237,7 +1237,7 @@ public sealed class DarlingWorker : BackgroundService
 
         /* #2022 phase 2: the Query Store backfill worker, on its own tick (see s_queryStoreBackfillInterval).
            Fills the two windows the live path discards by design — the 60-minute first-contact tail and
-           24h-clamped outage holes — newest-first, byte-budgeted, strictly BELOW the live path's floor, and
+           clamp-bounded outage holes — newest-first, byte-budgeted, strictly BELOW the live path's floor, and
            never past the raw tier's horizon. Plan capture reads the same live provider the runner does. */
         var queryStoreBackfill = new QueryStoreBackfill(postgres, runner, deltas, _logger, () => config.CapturePlans,
             () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb));

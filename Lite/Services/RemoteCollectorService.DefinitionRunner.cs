@@ -236,7 +236,7 @@ public partial class RemoteCollectorService
                            documented first-run window, per database. No clamp is applied HERE because
                            this branch also serves the XE ring-buffer collectors (deadlocks / BPR),
                            where flooring a stale watermark would WRONGLY truncate legitimate catch-up
-                           — those sources roll past 24h on their own. query_store also reaches this
+                           — those sources roll past the catch-up horizon on their own. query_store also
                            branch on Azure SQL DB (#1836) and does need the bound, so it applies
                            WatermarkPolicy.ClampCatchup inside its own cutoff computation: the clamp
                            travels with the collector that needs it instead of with the path. */
@@ -556,7 +556,7 @@ public partial class RemoteCollectorService
 
                 var driverResult = await EnumeratedCollectorDriver.RunAsync<TRow>(
                     items,
-                    /* Per-database watermark refresh + the 24h catch-up clamp, computed INSIDE the loop —
+                    /* Per-database watermark refresh + the catch-up clamp, computed INSIDE the loop —
                        this is the per-item cutoff site the plan's LOUD FLAG requires the clamp to live at.
                        Only query_store (the sole enumeration collector with a per-database timestamp
                        watermark) reaches this; the two snapshot collectors are watermark-less. */

@@ -233,7 +233,7 @@ public class CollectionBackgroundService : BackgroundService
     }
 
     /// <summary>#2058: fills the Query Store history the live path never takes — the 60-minute
-    /// first-contact tail and 24h-clamped outage holes — newest-first, strictly behind the live
+    /// first-contact tail and clamp-bounded outage holes — newest-first, strictly behind the live
     /// path's floor, never past the resolved query_store retention. See
     /// RemoteCollectorService.QueryStoreBackfill for the worker itself.</summary>
     private async Task RunQueryStoreBackfillIfDueAsync(CancellationToken stoppingToken)

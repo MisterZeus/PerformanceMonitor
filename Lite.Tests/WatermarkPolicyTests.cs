@@ -7,6 +7,11 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Collectors;
 using Xunit;
 
@@ -130,5 +135,102 @@ public sealed class WatermarkPolicyTests
     public void ReadFloor_OnDefault_IsNull()
     {
         Assert.Null(WatermarkPolicy.ReadFloor(default));
+    }
+
+    /// <summary>
+    /// The horizon's NUMBER lives in <see cref="WatermarkPolicy.MaxCatchup"/> and nowhere else.
+    ///
+    /// <para><b>Why this needed asserting.</b> #2102 moved the horizon from 24 hours to one. The constant
+    /// moved, the behaviour moved, and the operator-facing WARNINGs moved with it because they interpolate
+    /// <c>MaxCatchup.TotalHours</c> instead of restating it. What did not move were nine comments across five
+    /// files, each calling it "the 24h catch-up clamp". Nothing misbehaved, no test went red, and no log line
+    /// disagreed — so there was no instrument in this repo that could see it. It was found the way stale prose
+    /// always is: someone read the source, believed it, and reasoned from a 24-hour lever that had not existed
+    /// for months (#2468, filed on exactly that premise).</para>
+    ///
+    /// <para>So the assertion is not "the comments say 1h" — that is the same defect with a fresher number in
+    /// it, and it would go stale the next time the horizon moves. It is that no source discussing the clamp
+    /// states an hours figure at all. The number has one home, and prose has to point at it.</para>
+    /// </summary>
+    [Fact]
+    public void TheCatchUpHorizon_IsWrittenDownInExactlyOnePlace()
+    {
+        /* The concept, wherever it is named. "clamp fires" / "-clamped" / "clamp-bounded" are in the list
+           because the site in DarlingWorker that carried this defect named the clamp without ever using the
+           words "catch-up" — a trigger list built only from the obvious phrase would have missed it. */
+        const string mentions = @"catch-up|ClampCatchup|MaxCatchup|clamp fires|clamp-bounded|-clamped";
+
+        /* An hours figure in any spelling. Minutes are legitimate and common nearby (the 60-minute
+           first-run window, the 15-minute adaptive floor), so the pattern is deliberately hours-only. */
+        const string hours = @"\b\d+\s*-?\s*(h\b|hr\b|hrs\b|hours?\b|hour-)";
+
+        var offenders = new List<string>();
+
+        foreach (var file in ClampSources())
+        {
+            var text = File.ReadAllText(file).Replace("\r\n", "\n", StringComparison.Ordinal);
+
+            foreach (Match mention in Regex.Matches(text, mentions, RegexOptions.IgnoreCase))
+            {
+                /* A window rather than a line: these are wrapped block comments, and the figure and the
+                   concept routinely land on different lines. */
+                var from = Math.Max(0, mention.Index - 220);
+                var to = Math.Min(text.Length, mention.Index + 220);
+                var figure = Regex.Match(text[from..to], hours, RegexOptions.IgnoreCase);
+
+                if (figure.Success)
+                {
+                    offenders.Add($"{Path.GetFileName(file)}: '{figure.Value}' near '{mention.Value}'");
+                }
+            }
+        }
+
+        Assert.True(
+            offenders.Count == 0,
+            "the catch-up horizon's number belongs to WatermarkPolicy.MaxCatchup and nowhere else — " +
+            "name the concept and let the constant carry the figure: " + string.Join("; ", offenders.Distinct()));
+    }
+
+    /// <summary>Every shipped source that could describe the clamp: the shared collectors, the Darling
+    /// service's runners, and Lite's twin of them. <c>WatermarkPolicy.cs</c> is excluded because it is the
+    /// one place allowed to write the number down — including its own record of what the horizon used to
+    /// be, which is history worth keeping rather than prose that has gone stale.</summary>
+    private static IEnumerable<string> ClampSources([CallerFilePath] string thisFile = "")
+    {
+        var repo = new DirectoryInfo(Path.GetDirectoryName(thisFile)!);
+        while (repo is not null && !Directory.Exists(Path.Combine(repo.FullName, "PerformanceMonitor.Collectors")))
+        {
+            repo = repo.Parent;
+        }
+
+        Assert.True(repo is not null, $"could not locate the repo root walking up from {thisFile}");
+
+        var roots = new[]
+        {
+            Path.Combine(repo!.FullName, "PerformanceMonitor.Collectors"),
+            Path.Combine(repo.FullName, "Darling", "PerformanceMonitor.Darling.Service"),
+            Path.Combine(repo.FullName, "Lite", "Services"),
+        };
+
+        foreach (var root in roots)
+        {
+            Assert.True(Directory.Exists(root), $"{root} is gone — find where it moved before editing this test");
+
+            foreach (var file in Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories))
+            {
+                /* Skip build output. A local build drops generated .cs under obj/, and a scan that reads
+                   them is asserting about artifacts rather than about the source anyone will edit. */
+                if (file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                    || file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (!string.Equals(Path.GetFileName(file), "WatermarkPolicy.cs", StringComparison.Ordinal))
+                {
+                    yield return file;
+                }
+            }
+        }
     }
 }
