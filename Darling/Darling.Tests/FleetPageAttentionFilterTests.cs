@@ -144,12 +144,22 @@ public sealed class FleetPageAttentionFilterTests
     [Fact]
     public void TheActiveState_IsPaintedByWhatItSays_NotByBeingOn()
     {
-        Assert.Contains("\"attention-note \" + (shown > 0 ? \"warn\" : \"ok\")", FleetJs, StringComparison.Ordinal);
+        /* THREE sentences, not two. Review caught the third: a search term that matched nothing leaves the
+           filter with nothing to judge, and the green all-clear arm fired there — a colour asserting that the
+           fleet is fine when its problem servers were never looked at, which is the exact defect in miniature. */
+        Assert.Contains("const searchFoundNothing = term !== \"\" && total === 0;", FleetJs, StringComparison.Ordinal);
+        Assert.Contains("searchFoundNothing ? \"none\" : shown > 0 ? \"warn\" : \"ok\"", FleetJs, StringComparison.Ordinal);
+        Assert.Contains("nothing matches that term, so no server was judged.", FleetJs, StringComparison.Ordinal);
+
+        /* The notice re-words itself with no page load, so it is announced rather than silently swapped —
+           util.js's noticeStrip idiom for the same kind of non-fatal live notice. Also raised in review. */
+        Assert.Contains("role: \"status\"", FleetJs, StringComparison.Ordinal);
 
         var css = ReadRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "app.css"));
         Assert.Contains(".attention-note.warn", css, StringComparison.Ordinal);
         Assert.Contains(".attention-note.ok", css, StringComparison.Ordinal);
+        Assert.Contains(".attention-note.none", css, StringComparison.Ordinal);
 
         /* And the affordances the JS names actually have rules — a class with no stylesheet behind it renders
            as body text, which is precisely the inert muted div this replaces. */

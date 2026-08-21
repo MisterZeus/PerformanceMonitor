@@ -256,14 +256,27 @@ function redrawCards() {
 }
 
 /** Why the grid is short, and how to make it whole again — rendered only while the filter is on.
-    The colour follows the SENTENCE, not the filter: this line says either "N servers need attention" or an
-    all-clear, and painting the all-clear amber would be a colour contradicting its own text — the same family
-    of defect this whole change is about. (Raised in review on #2429 and ported.) */
+
+    The colour follows the SENTENCE, not the filter. Painting an all-clear amber would be a colour
+    contradicting its own text (the #2429 review finding), and there are THREE sentences here, not two: a
+    search term that matched nothing leaves the filter with nothing to judge, and green there would be an
+    all-clear the data does not support — the fleet's problem servers were not found healthy, they were never
+    looked at. That case gets the neutral treatment and says what actually happened.
+
+    role="status" is util.js's noticeStrip idiom for exactly this: a non-fatal notice that appears and
+    re-words itself with no page load, so a screen reader hears the count change instead of the grid silently
+    shrinking. Raised in review. */
 function attentionNotice(shown, total) {
   const term = fleetFilter.trim();
   const label = term ? "Needs attention only, matching “" + term + "”" : "Needs attention only";
-  return el("div", { class: "attention-note " + (shown > 0 ? "warn" : "ok") }, [
-    el("span", { text: label + " — " + attentionCountText(shown, total) + "." }),
+  const searchFoundNothing = term !== "" && total === 0;
+  const kind = searchFoundNothing ? "none" : shown > 0 ? "warn" : "ok";
+  const sentence = searchFoundNothing
+    ? label + " — nothing matches that term, so no server was judged."
+    : label + " — " + attentionCountText(shown, total) + ".";
+
+  return el("div", { class: "attention-note " + kind, role: "status" }, [
+    el("span", { text: sentence }),
     el("span", {
       class: "attention-link",
       text: "Show all servers",

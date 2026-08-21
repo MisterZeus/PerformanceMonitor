@@ -708,6 +708,9 @@ table.data td.sev-Healthy { color: var(--ok); }
 }
 .attention-note.warn { background: rgba(255, 213, 79, 0.10); border: 1px solid rgba(255, 213, 79, 0.35); color: var(--warn); }
 .attention-note.ok { background: rgba(129, 199, 132, 0.10); border: 1px solid rgba(129, 199, 132, 0.35); color: var(--ok); }
+/* Neither: the search matched nothing, so the filter judged nothing. Green would read as an all-clear the
+   data does not support, amber would claim a problem it never looked for. */
+.attention-note.none { background: var(--bg-dark); border: 1px solid var(--border); color: var(--muted); }
 .attention-note .attention-link { margin: 0; }
 
 /* ─────────────────────────── status bar footer ─────────────────────────── */
