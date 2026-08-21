@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
 
@@ -23,17 +24,69 @@ namespace PerformanceMonitorLite.Analysis;
 /// Recommendations reader can render the copy-paste command byte-identically to the Darling viewer.
 /// <see cref="SaveFindingsAsync"/> remains as a single-pass convenience wrapper (no action attached).
 /// </para>
+///
+/// <para>
+/// <b>The read lock around the WRITES is deliberate (#2455).</b> It is the first thing in this file
+/// that looks like a bug, so it is answered here rather than left to cost every reader the same five
+/// minutes. <see cref="InsertFindingsAsync"/> INSERTs, <see cref="MuteStoryAsync"/> INSERTs and
+/// <see cref="CleanupOldFindingsAsync"/> DELETEs, and all three hold
+/// <c>DuckDbInitializer.AcquireReadLock</c>. That lock is not a table lock and does not claim "I am
+/// reading": it coordinates everyone against MAINTENANCE — CHECKPOINT, archive DELETEs, compaction —
+/// which take the exclusive write lock and reorganize the file underneath whatever is running. A held
+/// read lock blocks <c>EnterWriteLock</c>, so holding one IS how a write says "not while I am in
+/// flight", and that is the only exclusion these three need. Concurrency between writers is DuckDB's
+/// own job and it does it: two connections appending to <c>analysis_findings</c> in concurrent
+/// transactions both commit, and the retention DELETE overlaps an insert batch cleanly — both
+/// measured on DuckDB.NET 1.5.5 rather than assumed.
+/// </para>
+///
+/// <para>
+/// Taking the write lock instead would be a real cost for a benefit nobody has shown a need for: it
+/// would serialize every finding batch against every UI read for the length of the batch, and #2443
+/// had just made the read-lock WAIT abandonable so the analysis pass could yield to a long archival.
+/// Turning the pass into the thing archival and the UI queue behind reverses that. What a SHARED lock
+/// genuinely cannot protect is a read-modify-write, because it admits concurrent holders — which is
+/// why the ids below do not use one.
+/// </para>
+///
+/// <para>
+/// One thing this store does NOT settle, so a reader who checks the neighbours is not misled twice:
+/// <c>DuckDbAlertHistoryStore</c> and <c>DuckDbMuteRuleStore</c> take the WRITE lock for the same
+/// species of ordinary write, and <c>LocalDataService.OpenWriteConnectionAsync</c> states that as the
+/// house rule in its own doc comment. Two conventions, and this file follows the cheaper one. Which
+/// is right for the other eleven call sites is #2463 — a question about the lock model rather than
+/// about these three methods, and deliberately not answered here.
+/// </para>
 /// </summary>
 public class FindingStore
 {
     private readonly DuckDbInitializer _duckDb;
-    private long _nextId;
 
     public FindingStore(DuckDbInitializer duckDb)
     {
         _duckDb = duckDb;
-        _nextId = DateTime.UtcNow.Ticks;
     }
+
+    /// <summary>
+    /// #2455: finding and mute ids come from the shared process-wide
+    /// <see cref="CollectionIdGenerator"/> rather than a per-instance counter.
+    ///
+    /// <para>The <c>_nextId++</c> this replaces was seeded from <c>DateTime.UtcNow.Ticks</c> per
+    /// INSTANCE and unprotected twice over. The increment is a read-modify-write under a lock that
+    /// admits concurrent holders, which is the half that was filed — but <c>Interlocked.Increment</c>
+    /// on the field would not have fixed the worse half: Lite constructs TWO of these, one in
+    /// <c>AnalysisService</c> and one in <c>RecommendationsTab</c>, and two instances built inside the
+    /// same timer tick start from the SAME value and then hand out the same ids independently, with no
+    /// shared state to make atomic. <c>finding_id</c> and <c>mute_id</c> are both PRIMARY KEY in
+    /// DuckDB, so a collision is a hard INSERT failure — and since #2448 made the batch atomic, one
+    /// such row costs the whole analysis rather than itself.</para>
+    ///
+    /// <para>The generator is process-wide and <c>Interlocked</c>-incremented, and it is what the
+    /// Darling twin's <c>PgFindingStore</c> has always used — whose own class doc names "the twins'
+    /// per-instance tick counters" as the thing it deliberately moved away from. So this closes a
+    /// stated parity gap rather than inventing a mechanism.</para>
+    /// </summary>
+    private static long NextId() => CollectionIdGenerator.Next();
 
     /// <summary>
     /// Mute-filters the stories and materializes the SURVIVING findings WITHOUT inserting them
@@ -70,7 +123,7 @@ public class FindingStore
 
             survivors.Add(new AnalysisFinding
             {
-                FindingId = _nextId++,
+                FindingId = NextId(),
                 AnalysisTime = analysisTime,
                 ServerId = context.ServerId,
                 ServerName = context.ServerName,
@@ -124,7 +177,9 @@ public class FindingStore
         if (findings.Count == 0)
             return findings;
 
-        /* One read lock + one connection for the whole batch, reused for every insert. */
+        /* One read lock + one connection for the whole batch, reused for every insert. A READ lock
+           around a WRITE is deliberate — it excludes compaction/archival, which is the only exclusion
+           this needs; see the class note (#2455). */
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -296,6 +351,9 @@ ORDER BY severity DESC";
     /// </summary>
     public async Task MuteStoryAsync(int serverId, string storyPathHash, string storyPath, string? reason = null)
     {
+        /* Read lock around an INSERT: deliberate, see the class note (#2455). It admits concurrent
+           holders, which is exactly why the mute_id below comes from the shared generator and not
+           from per-instance state this lock could not have protected. */
         using var readLock = _duckDb.AcquireReadLock();
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync();
@@ -305,7 +363,7 @@ ORDER BY severity DESC";
 INSERT INTO analysis_muted (mute_id, server_id, story_path_hash, story_path, muted_date, reason)
 VALUES ($1, $2, $3, $4, $5, $6)";
 
-        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
+        cmd.Parameters.Add(new DuckDBParameter { Value = NextId() });
         // serverId 0 is the MCP "mute across all servers" sentinel; persist it as NULL, the
         // canonical global marker every reader filters on (legacy 0 rows are still honored).
         cmd.Parameters.Add(new DuckDBParameter { Value = serverId == 0 ? (object)DBNull.Value : serverId });
@@ -327,6 +385,9 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// </summary>
     public async Task CleanupOldFindingsAsync(int retentionDays = 30)
     {
+        /* Read lock around a DELETE: deliberate, see the class note (#2455). The rows it removes are
+           older than the retention cutoff and an insert batch only ever writes rows stamped now, so
+           the sweep and a pass overlap on disjoint rows — measured, not assumed. */
         using var readLock = _duckDb.AcquireReadLock();
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync();
