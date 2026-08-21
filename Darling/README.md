@@ -32,6 +32,8 @@ Nothing is installed on the monitored SQL Servers by either edition beyond two l
 
 ## Quick Start
 
+> **First time, on a box with nothing on it?** [**`docs/uat-onboarding.md`**](../docs/uat-onboarding.md) is the ordered procedure from a downloaded zip to a running service and whichever of the three surfaces you need — the WPF viewer, the web dashboard, or MCP — with a proof point at every step. This section, and the rest of this document, is the reference it links back into.
+
 ### Prerequisites
 
 - **Windows** for the service host (Windows-service lifetime, DPAPI password protection) and for the viewer (WPF). Monitored servers can be SQL Server 2016–2025, Azure SQL Managed Instance, AWS RDS for SQL Server, or Azure SQL Database.
