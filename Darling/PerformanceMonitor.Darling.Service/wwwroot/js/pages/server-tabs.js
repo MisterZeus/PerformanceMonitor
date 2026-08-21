@@ -60,13 +60,50 @@ function xmlDisclosure(text) {
 /* Two panels chain reads or reshape rows, so they are built by hand rather than declared. Both were already on
    the page before the tabs existed; they keep their behaviour and move into the tab that owns them. */
 
-function panelShell(title, subtitle) {
+function panelShell(title, subtitle, span = 2) {
   const body = el("div", { class: "panel-body" }, [loadingStrip()]);
-  const panel = el("div", { class: "panel card span-2" }, [
+  const panel = el("div", { class: "panel card" + (span === 2 ? " span-2" : "") }, [
     el("h3", {}, [title, subtitle ? el("span", { class: "panel-sub", text: " " + subtitle }) : null]),
     body,
   ]);
   return { panel, body };
+}
+
+/**
+ * Several panels over ONE fetch of one read.
+ *
+ * A descriptor owns its own fetch, which is the right default and is what makes the seam composable — but a
+ * read that feeds two or three panels on the SAME tab then runs two or three times, and `readTool`/`apiGet` have
+ * no cache to absorb it. That is a real cost rather than a tidiness point: `get_collection_health` rolls up
+ * seven days of collector logs and computes sweep pressure, and the Collection Health tab renders three slices
+ * of one payload (`sweep_pressure.*`, `collectors`, `sweep_pressure.heaviest_collectors`), so opening it was
+ * running that query three times. Same shape for plan corrections (recommendations + automatic tuning), plan
+ * cache (summary + per-type), sessions (summary + per-application) and system_health (chart + entries).
+ *
+ * Each spec is an ordinary panel descriptor minus `read`/`params` — the same viz registry, the same three-kind
+ * response mapping renderPanel does — so nothing about the seam changes except how many times the wire is used.
+ */
+function fanout(read, params, specs) {
+  for (const spec of specs) {
+    if ((spec.viz === "table" || spec.viz === "line") && !spec.emptyText) {
+      throw new Error("fanout(" + spec.title + "): a data panel must explain its own empty state.");
+    }
+  }
+  const shells = specs.map((s) => panelShell(s.title, s.subtitle, s.span ?? 2));
+  (async () => {
+    const res = await readTool(read, params);
+    specs.forEach((spec, i) => {
+      const body = shells[i].body;
+      if (res.kind === "error") return mount(body, errorStrip(res.message));
+      if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+      try {
+        mount(body, VIZ[spec.viz](res.data, spec));
+      } catch (e) {
+        mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
+      }
+    });
+  })();
+  return shells.map((s) => s.panel);
 }
 
 /**
@@ -138,7 +175,7 @@ async function drawWaitTrend(slot, server, ctx, waitType) {
  * is rendered here instead of being dropped.
  */
 export function perfmonPanel(server, ctx) {
-  const { panel, body } = panelShell("Perfmon Counters", ctx.label);
+  const { panel, body } = panelShell("Perfmon Counters", "latest snapshot, with a trend for the counter you pick");
   (async () => {
     const res = await readTool("get_perfmon_stats", { server });
     if (res.kind === "error") return mount(body, errorStrip(res.message));
@@ -147,9 +184,20 @@ export function perfmonPanel(server, ctx) {
     const names = [...new Set((res.data.counters || []).map((c) => c.counter_name).filter(Boolean))].sort();
     if (!names.length) return mount(body, emptyStrip("The latest snapshot holds no perfmon counters."));
 
+    /* The snapshot table lives HERE rather than in its own descriptor: this composite has already fetched the
+       exact payload it would render, and a second panel would have paid for get_perfmon_stats twice to show the
+       list the picker above it is built from. */
     const chartSlot = el("div", {}, [loadingStrip()]);
     const picker = pickerControl("Counter", names, (name) => drawPerfmonTrend(chartSlot, server, ctx, name));
-    mount(body, [el("div", { class: "picker-row" }, [picker]), chartSlot]);
+    mount(body, [
+      VIZ.table(res.data, {
+        rowsKey: "counters",
+        columns: PERFMON_COLUMNS,
+        emptyText: "No perfmon counters in the latest snapshot.",
+      }),
+      el("div", { class: "picker-row" }, [picker]),
+      chartSlot,
+    ]);
     drawPerfmonTrend(chartSlot, server, ctx, names[0]);
   })();
   return panel;
@@ -448,16 +496,17 @@ export const SERVER_TABS = [
         "No memory pressure events in this window — the healthy state for this read.",
         1
       ),
-      stat("Plan Cache", "get_plan_cache_bloat", { server, hours: ctx.hours }, PLAN_CACHE_STATS, ctx.label, 2),
-      table(
-        "Plan Cache by Type",
-        "get_plan_cache_bloat",
-        { server, hours: ctx.hours },
-        "cache_types",
-        CACHE_TYPE_COLUMNS,
-        ctx.label,
-        "No plan-cache breakdown in this window."
-      ),
+      ...fanout("get_plan_cache_bloat", { server, hours: ctx.hours }, [
+        { title: "Plan Cache", subtitle: ctx.label, viz: "stat", stats: PLAN_CACHE_STATS },
+        {
+          title: "Plan Cache by Type",
+          subtitle: ctx.label,
+          viz: "table",
+          rowsKey: "cache_types",
+          columns: CACHE_TYPE_COLUMNS,
+          emptyText: "No plan-cache breakdown in this window.",
+        },
+      ]),
     ],
   },
 
@@ -637,25 +686,28 @@ export const SERVER_TABS = [
         ctx.label,
         "No long-running completions in this window. This collector is opt-in and off by default."
       ),
-      table(
-        "Plan Corrections",
-        "get_plan_corrections",
-        { server, hours: ctx.hours, limit: 50 },
-        "recommendations",
-        PLAN_CORRECTION_COLUMNS,
-        ctx.label,
-        "No tuning recommendations in this window."
-      ),
-      table(
-        "Automatic Tuning",
-        "get_plan_corrections",
-        { server, hours: ctx.hours, limit: 50 },
-        "automatic_tuning",
-        AUTO_TUNING_COLUMNS,
-        SNAPSHOT,
-        "No per-database FORCE_LAST_GOOD_PLAN state recorded.",
-        1
-      ),
+      /* One read, two panels. get_plan_corrections returns both arrays, and automatic_tuning comes from an
+         unconditional latest-snapshot query that ignores hours/limit entirely — so the second fetch was paying
+         for the recommendations work twice to render a slice that never varied with the window. */
+      ...fanout("get_plan_corrections", { server, hours: ctx.hours, limit: 50 }, [
+        {
+          title: "Plan Corrections",
+          subtitle: ctx.label,
+          viz: "table",
+          rowsKey: "recommendations",
+          columns: PLAN_CORRECTION_COLUMNS,
+          emptyText: "No tuning recommendations in this window.",
+        },
+        {
+          title: "Automatic Tuning",
+          subtitle: SNAPSHOT,
+          span: 1,
+          viz: "table",
+          rowsKey: "automatic_tuning",
+          columns: AUTO_TUNING_COLUMNS,
+          emptyText: "No per-database FORCE_LAST_GOOD_PLAN state recorded.",
+        },
+      ]),
     ],
   },
 
@@ -752,16 +804,17 @@ export const SERVER_TABS = [
     label: "Activity",
     build: (server, ctx) => [
       perfmonPanel(server, ctx),
-      stat("Sessions", "get_session_stats", { server }, SESSION_STATS, SNAPSHOT, 2),
-      table(
-        "Sessions by Application",
-        "get_session_stats",
-        { server },
-        "applications",
-        APPLICATION_COLUMNS,
-        SNAPSHOT,
-        "No application rows in the latest session snapshot."
-      ),
+      ...fanout("get_session_stats", { server }, [
+        { title: "Sessions", subtitle: SNAPSHOT, viz: "stat", stats: SESSION_STATS },
+        {
+          title: "Sessions by Application",
+          subtitle: SNAPSHOT,
+          viz: "table",
+          rowsKey: "applications",
+          columns: APPLICATION_COLUMNS,
+          emptyText: "No application rows in the latest session snapshot.",
+        },
+      ]),
       table(
         "Running Jobs",
         "get_running_jobs",
@@ -770,15 +823,6 @@ export const SERVER_TABS = [
         JOB_COLUMNS,
         SNAPSHOT,
         "No SQL Agent jobs were running at the last collection — the normal state for most servers."
-      ),
-      table(
-        "Perfmon Snapshot",
-        "get_perfmon_stats",
-        { server },
-        "counters",
-        PERFMON_COLUMNS,
-        SNAPSHOT,
-        "No perfmon counters in the latest snapshot."
       ),
       table(
         "Index Usage",
@@ -799,24 +843,27 @@ export const SERVER_TABS = [
       "These are the system_health session and default trace, parsed on read. The desktop viewer additionally " +
       "charts the corruption and contention counters hour-by-hour; here they are the raw parsed rows.",
     build: (server, ctx) => [
-      line(
-        "system_health CPU",
-        "get_health_parser_system_health",
-        { server, hours: ctx.hours, limit: 50 },
-        "entries",
-        "event_time",
-        HEALTH_CPU_SERIES,
-        { subtitle: ctx.label, format: "pct", unit: "%", span: 2, emptyText: "No system_health entries in this window." }
-      ),
-      table(
-        "system_health Entries",
-        "get_health_parser_system_health",
-        { server, hours: ctx.hours, limit: 50 },
-        "entries",
-        HEALTH_ENTRY_COLUMNS,
-        ctx.label,
-        "No system_health entries in this window."
-      ),
+      ...fanout("get_health_parser_system_health", { server, hours: ctx.hours, limit: 50 }, [
+        {
+          title: "system_health CPU",
+          subtitle: ctx.label,
+          viz: "line",
+          rowsKey: "entries",
+          xKey: "event_time",
+          series: HEALTH_CPU_SERIES,
+          format: "pct",
+          unit: "%",
+          emptyText: "No system_health entries in this window.",
+        },
+        {
+          title: "system_health Entries",
+          subtitle: ctx.label,
+          viz: "table",
+          rowsKey: "entries",
+          columns: HEALTH_ENTRY_COLUMNS,
+          emptyText: "No system_health entries in this window.",
+        },
+      ]),
       table(
         "Severe Errors",
         "get_health_parser_severe_errors",
@@ -896,25 +943,28 @@ export const SERVER_TABS = [
     id: "health",
     label: "Collection Health",
     build: (server) => [
-      stat("Sweep Pressure", "get_collection_health", { server }, SWEEP_STATS, "trailing 7 days", 2),
-      table(
-        "Collectors",
-        "get_collection_health",
-        { server },
-        "collectors",
-        COLLECTOR_COLUMNS,
-        "trailing 7 days",
-        "No collection log rows for this server yet."
-      ),
-      table(
-        "Heaviest Collectors",
-        "get_collection_health",
-        { server },
-        "sweep_pressure.heaviest_collectors",
-        HEAVIEST_COLUMNS,
-        "trailing 7 days",
-        "No per-collector timings recorded yet."
-      ),
+      /* One read, three panels. get_collection_health rolls up seven days of collector logs AND computes sweep
+         pressure; these are three slices of that single payload, so three descriptors meant running the tab's
+         heaviest query three times to open it. */
+      ...fanout("get_collection_health", { server }, [
+        { title: "Sweep Pressure", subtitle: "trailing 7 days", viz: "stat", stats: SWEEP_STATS },
+        {
+          title: "Collectors",
+          subtitle: "trailing 7 days",
+          viz: "table",
+          rowsKey: "collectors",
+          columns: COLLECTOR_COLUMNS,
+          emptyText: "No collection log rows for this server yet.",
+        },
+        {
+          title: "Heaviest Collectors",
+          subtitle: "trailing 7 days",
+          viz: "table",
+          rowsKey: "sweep_pressure.heaviest_collectors",
+          columns: HEAVIEST_COLUMNS,
+          emptyText: "No per-collector timings recorded yet.",
+        },
+      ]),
     ],
   },
 ];

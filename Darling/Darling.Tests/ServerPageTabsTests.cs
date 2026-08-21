@@ -275,6 +275,74 @@ public sealed class ServerPageTabsTests
         Assert.Contains("if (!points.length && desc.emptyText) return emptyStrip(desc.emptyText);", panels, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// No tab fetches the same read twice.
+    ///
+    /// <para>A descriptor owning its own fetch is the right default and is what makes the seam composable — but
+    /// <c>readTool</c>/<c>apiGet</c> have no cache, so a read feeding two or three panels on ONE tab ran two or
+    /// three times. Review caught two; there were six, and the worst was <c>get_collection_health</c>, which
+    /// rolls up seven days of collector logs and computes sweep pressure, rendered as three slices of one
+    /// payload — so opening that tab ran the page's heaviest query three times. <c>fanout()</c> is the fix, and
+    /// this is the guard, because "fix the two review named" is how the other four ship.</para>
+    ///
+    /// <para>Composites name their reads inside their own function bodies rather than in a tab, so their reads
+    /// are mapped here explicitly — and the map is asserted against the functions, so it cannot quietly go
+    /// stale and start passing a tab it no longer describes.</para>
+    /// </summary>
+    [Fact]
+    public void NoTab_FetchesTheSameReadTwice()
+    {
+        var js = ServerTabsJs;
+
+        /* The composite -> reads map, verified against the composites themselves before it is trusted. */
+        var composites = new Dictionary<string, string[]>(StringComparer.Ordinal)
+        {
+            ["waitsPanel("] = new[] { "get_wait_stats", "get_wait_trend" },
+            ["fileIoPanel("] = new[] { "get_file_io_trend" },
+            ["perfmonPanel("] = new[] { "get_perfmon_stats", "get_perfmon_trend" },
+        };
+        foreach (var (call, reads) in composites)
+        {
+            var fn = "function " + call.TrimEnd('(');
+            var at = js.IndexOf(fn, StringComparison.Ordinal);
+            Assert.True(at > 0, "composite " + call + " is gone — remap it before editing this test");
+            /* Its reads and its helpers' reads: take everything from the definition to the descriptor section. */
+            var region = js[at..js.IndexOf("/* ─────────────────────────── descriptor helpers", StringComparison.Ordinal)];
+            foreach (var read in reads) Assert.Contains("\"" + read + "\"", region, StringComparison.Ordinal);
+        }
+
+        var problems = new List<string>();
+        var ids = Regex.Matches(js, "^    id: \"([a-z-]+)\",$", RegexOptions.Multiline).ToArray();
+
+        for (var i = 0; i < ids.Length; i++)
+        {
+            var start = ids[i].Index;
+            var end = i + 1 < ids.Length
+                ? ids[i + 1].Index
+                : js.IndexOf("/** The tab for an id", StringComparison.Ordinal);
+            var block = js[start..end];
+
+            var reads = Regex.Matches(block, "\"(get_[a-z0-9_]+|audit_config)\"").Select(m => m.Groups[1].Value).ToList();
+            foreach (var (call, composed) in composites)
+            {
+                if (block.Contains(call, StringComparison.Ordinal)) reads.AddRange(composed);
+            }
+
+            foreach (var dupe in reads.GroupBy(r => r, StringComparer.Ordinal).Where(g => g.Count() > 1))
+            {
+                problems.Add($"tab '{ids[i].Groups[1].Value}' fetches {dupe.Key} {dupe.Count()} times");
+            }
+        }
+
+        Assert.True(problems.Count == 0,
+            string.Join("; ", problems) + " — several panels over one read is what fanout() is for.");
+
+        /* And fanout carries the same empty-state rule the two descriptor helpers do, so routing a panel through
+           it is never the way to lose the sentence. */
+        Assert.Contains("function fanout(read, params, specs)", js, StringComparison.Ordinal);
+        Assert.Contains("a data panel must explain its own empty state.", js, StringComparison.Ordinal);
+    }
+
     // ── helpers ────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>Every read name the module mentions. Read names live in their own <c>get_*</c> namespace plus
