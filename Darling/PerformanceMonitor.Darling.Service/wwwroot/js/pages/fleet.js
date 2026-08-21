@@ -258,7 +258,11 @@ function redrawCards() {
     notice,
     matched.length
       ? el("div", { class: "grid" }, matched.map(serverCard))
-      : el("div", { class: "muted", style: "padding:0.5rem", text: noMatchText(searched.length) }),
+      /* The notice already explains an empty grid whenever it is showing, in more precise words than this
+         line can manage — so this is the case it does NOT cover: no attention filter, and the search term is
+         the only thing that could have emptied the grid. Two boxes saying the same thing in different words
+         is the one-sentence-per-state goal losing to itself, and the desktop viewer shows only its count. */
+      : notice ? null : el("div", { class: "muted", style: "padding:0.5rem", text: noMatchText() }),
   ]);
 }
 
@@ -292,16 +296,13 @@ function attentionNotice(shown, total) {
   ]);
 }
 
-/** The empty-grid line has to name whichever filter emptied it, and with both on it has to name the RIGHT one.
-    Reusing the search wording unguarded tells a reader whose fleet is simply healthy that nothing matches a
-    term they never typed; saying "no servers needing attention match X" when X matched nothing at all is
-    vacuously true and points at the wrong filter. searched is the split: it is the term's result before the
-    toggle sees it. */
-function noMatchText(searchedCount) {
+/** The empty-grid line, reached only with the attention filter OFF (see redrawCards) — so the search term is
+    the only thing that can have emptied the grid, and this says so without guessing. The term-less arm is
+    unreachable today (renderFleet takes the empty-fleet path before the grid exists) and is worded honestly
+    rather than left to fall through to a sentence about a term nobody typed. */
+function noMatchText() {
   const term = fleetFilter.trim();
-  if (!term) return attentionOnly ? "No servers need attention." : "No servers to show.";
-  if (searchedCount === 0) return "No servers match “" + term + "”.";
-  return "No servers matching “" + term + "” need attention.";
+  return term ? "No servers match “" + term + "”." : "No servers to show.";
 }
 
 /** Turns the needs-attention filter on or off from either end — the header toggle or the "+N more" line —

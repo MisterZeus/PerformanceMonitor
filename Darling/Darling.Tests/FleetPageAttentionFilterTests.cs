@@ -222,14 +222,14 @@ public sealed class FleetPageAttentionFilterTests
 
         Assert.Contains("mount(gridNode, [notice, renderGrouped(matched)]);", FleetJs, StringComparison.Ordinal);
 
-        /* The empty-grid line names whichever filter emptied it, and with both on it names the RIGHT one.
-           Telling a reader whose fleet is simply healthy that nothing matches a search term they never typed
-           is the same class of lie in miniature; so is blaming the attention filter for a term that matched
-           nothing at all, which is vacuously true and points at the wrong control (raised in review). */
-        Assert.Contains("if (!term) return attentionOnly ? \"No servers need attention.\"", FleetJs, StringComparison.Ordinal);
-        Assert.Contains("if (searchedCount === 0) return \"No servers match", FleetJs, StringComparison.Ordinal);
-        Assert.Contains("return \"No servers matching \u201C\" + term + \"\u201D need attention.\";", FleetJs, StringComparison.Ordinal);
-        Assert.Contains("noMatchText(searched.length)", FleetJs, StringComparison.Ordinal);
+        /* One sentence per state. The notice already explains an empty grid whenever it is showing, and in
+           more precise words, so the grid-area fallback is suppressed under it rather than stacking a second
+           box that says the same thing differently — which is the PR's own design goal losing to itself, and
+           a deviation from the desktop viewer, which shows only its count (raised in review). What is left is
+           the case the notice does not cover: the filter off, the search term the only thing that emptied it. */
+        Assert.Contains(": notice ? null : el(\"div\", { class: \"muted\"", FleetJs, StringComparison.Ordinal);
+        Assert.Contains("return term ? \"No servers match", FleetJs, StringComparison.Ordinal);
+        Assert.DoesNotContain("need attention.\";", FleetJs, StringComparison.Ordinal);
     }
 
     // ── helpers ────────────────────────────────────────────────────────────────────────────────────
