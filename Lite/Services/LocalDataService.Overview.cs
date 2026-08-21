@@ -406,13 +406,18 @@ public class ServerSummaryItem
         DeadlocksAreElevated ? "#E57373" :
         BlockingIsElevated ? "#FFB74D" :
         CpuIsCritical ? "#FFB74D" :
+        CardStatus == ServerCardStatus.CollectorErrors ? "#FFD54F" :   // amber border when collectors are failing
         /* Collector errors and collector SILENCE are the same class of fault — the monitoring of this server
-           is not working — so they share one arm and one amber. Silence is the harder of the two to notice,
-           which is the whole of #2452: nothing on the card moved when a server went quiet. It stays amber
-           even for a stopped collection, because the red border belongs to a dark server and a red border
-           under a green "Online" word would be the loudest contradiction on the card; the row underneath
-           carries the severity in its own colour and its own word. */
-        CardStatus == ServerCardStatus.CollectorErrors || CollectionIsNotFresh ? "#FFD54F" :
+           is not working — so they get the same amber, on their own arm rather than folded into the one
+           above. Two named causes reading one colour is the honest shape here, and it keeps #2451's pin on
+           the CollectorErrors arm reading the discriminant it was written to pin.
+
+           Silence is the harder of the two to notice, which is the whole of #2452: nothing on this card
+           moved when a server went quiet. It stays amber even for a STOPPED collection, because the red
+           border belongs to a dark server and a red border under a green "Online" word would be the loudest
+           contradiction on the card; the row underneath carries the severity in its own colour and its own
+           word. */
+        CollectionIsNotFresh ? "#FFD54F" :
         "#2a2d35");
 
     /* ── The card explains itself (#2437 / #2422) ────────────────────────────────────────────────────
