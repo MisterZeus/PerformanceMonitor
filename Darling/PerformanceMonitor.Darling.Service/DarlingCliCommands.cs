@@ -3182,21 +3182,23 @@ public static class DarlingCliCommands
             /* Not elevated. When nothing is exposed there is genuinely nothing to do and a hard failure would
                be a lie (and would fail an otherwise fine loopback install); when something IS exposed this is a
                real, actionable failure, so exit non-zero AND print every command to run by hand. */
+            /* #2436: the per-surface notes, for EVERY plan and before either branch below. The elevated path
+               prints them as it works; this path used to print none at all, so the operator who most needs
+               them — the one who cannot act on them yet — was the one who never saw them. They are also the
+               only place a surface says it is fully LAN-configured and switched OFF, which is a state that did
+               not exist here before this change: "no rule is needed" would otherwise read as "your exposure
+               config did not take", and in the mixed case a disabled surface's stale rule would be dropped
+               silently while its exposed sibling got a command. */
+            foreach (var plan in plans.Where(p => p.Note is not null))
+            {
+                output.WriteLine($"{plan.Surface}: {plan.Note}.");
+            }
+
             if (toOpen == 0)
             {
-                /* #2436: "every endpoint is loopback-only" stopped being the only way to get here — a surface
-                   the control plane has switched off is fully configured for the LAN and still wants no rule.
-                   The plans' own notes say which it is, and they are the same lines the elevated path prints;
-                   printing them here as well is what keeps an operator who cannot elevate from reading "no
-                   rule is needed" as "your exposure config did not take". */
                 output.WriteLine(
                     "No endpoint wants an open port, so no rule was opened. (This shell is not elevated, but " +
                     "there was nothing to open.)");
-                foreach (var plan in plans.Where(p => p.Note is not null))
-                {
-                    output.WriteLine($"  {plan.Surface}: {plan.Note}.");
-                }
-
                 return 0;
             }
 
