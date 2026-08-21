@@ -52,6 +52,13 @@ jobs:
 
   # Everything below runs only in a workflow_dispatch run — the scheduled re-dispatch or a
   # manual one — which executes from the dispatched ref (dev for the scheduled path).
+  #
+  # Each checkout resolves that ref EXPLICITLY rather than pinning `ref: dev`. Three of these
+  # were pinned, so a manual dispatch onto any other branch published dev's artifacts while
+  # reporting the dispatched ref as the run's head SHA — the run, the API and the release page
+  # all named a branch that was not what got built. That is worse than simply ignoring the
+  # input, because the mismatch is invisible: it surfaced as a release-candidate build stamping
+  # the PREVIOUS version, which is only noticeable if you happen to read the artifact name.
   check:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -61,7 +68,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: dev
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
           fetch-depth: 0
 
       - name: Check for new commits in last 24 hours
@@ -91,7 +98,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: dev
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
 
       - name: Setup .NET 10.0
         uses: actions/setup-dotnet@v6
@@ -424,7 +431,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: dev
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
 
       - name: Setup .NET 10.0
         uses: actions/setup-dotnet@v6
