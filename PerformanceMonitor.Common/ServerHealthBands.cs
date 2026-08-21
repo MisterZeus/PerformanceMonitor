@@ -648,8 +648,10 @@ namespace PerformanceMonitor.Common
     /// reads OK at 20.4%. So <see cref="SweepPressure.PeakCycleMs"/> adds the collectors' averages WITHOUT
     /// amortizing: the body's cost on the cycle where every cadence comes due together. That cycle is not
     /// a hypothetical worst case — the shipped cadences are strictly nested (1 | 5 | 60 | 1440), so
-    /// alignment is a guaranteed periodic event, and on that server it costs 73,193 ms against a 60,000 ms
-    /// budget.</para>
+    /// alignment is a guaranteed periodic event. Those figures compute a 73,408 ms aligned body against a
+    /// 60,000 ms budget, which is the number the pinned fixture reproduces; a live read of all 41 of that
+    /// server's collectors minutes later came to 73,193 ms, so treat either as the same measurement taken
+    /// twice rather than as two claims.</para>
     ///
     /// <para>It is reported as its own field with its own vocabulary rather than folded into the verdict,
     /// because a once-daily 37-second collector is not saturation and calling it SATURATED would spend the
