@@ -103,6 +103,9 @@ public sealed class DarlingAnalysisBudgetTests
 
         var reported = log.Only("cancelled at its per-pass budget");
         Assert.Equal(LogLevel.Warning, reported.Level);
+
+        /* And the answer leaves the pass, so the scheduler reads it instead of inferring one. */
+        Assert.Equal(AnalysisAbandonKind.Timeout, service.EndedEarlyAs);
     }
 
     /// <summary>
@@ -134,6 +137,7 @@ public sealed class DarlingAnalysisBudgetTests
 
         var reported = log.Only("Analysis abandoned at shutdown");
         Assert.Equal(LogLevel.Information, reported.Level);
+        Assert.Equal(AnalysisAbandonKind.Shutdown, service.EndedEarlyAs);
     }
 
     /// <summary>
@@ -244,6 +248,22 @@ public sealed class DarlingWedgedServerReportingTests
 
         Assert.True(report >= 0, "the skip branch says nothing at all, which is #2430.");
         Assert.True(report < skipReturn, "the report has to happen before the branch returns.");
+    }
+
+    /// <summary>
+    /// Found in review on the first round of #2430. The pass already classifies its own ending and logs
+    /// the one line for it, so the scheduler must READ that answer rather than infer a second one from
+    /// "no findings and the budget token has fired" — which is equally true of a genuine fault that
+    /// landed after the budget expired, and would have buried its ERROR under a Warning saying the pass
+    /// merely ran out of time, then reported it to analyze_now as a timeout.
+    /// </summary>
+    [Fact]
+    public void TheSchedulerReadsThePassesOwnEnding_RatherThanInferringOne()
+    {
+        var body = PassBody();
+
+        Assert.Contains("analysisService.EndedEarlyAs", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("findings.Count == 0 && cts.IsCancellationRequested", body, StringComparison.Ordinal);
     }
 
     /// <summary>

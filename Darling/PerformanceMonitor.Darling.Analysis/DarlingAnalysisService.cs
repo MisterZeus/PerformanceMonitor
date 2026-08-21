@@ -97,6 +97,19 @@ public sealed class DarlingAnalysisService
     /// </summary>
     public string? InsufficientDataMessage { get; private set; }
 
+    /// <summary>
+    /// How the last pass ended EARLY, or null when it ran through (#2430). Set inside the pass's own
+    /// catch, so <see cref="AnalysisAbandonKind.None"/> here means a genuine fault: the pass reached the
+    /// catch and the classifier said it was not an abandonment.
+    ///
+    /// <para>Carried out to the caller because the caller cannot re-derive it. "No findings and the
+    /// budget token has fired" is true of a fault as well as of a timeout, and inferring a timeout from
+    /// it buries the fault's ERROR under a Warning that says the pass merely ran out of time. The pass
+    /// has already classified this once and logged the one line for it; this is how the scheduler reads
+    /// that answer instead of guessing at a second one.</para>
+    /// </summary>
+    public AnalysisAbandonKind? EndedEarlyAs { get; private set; }
+
     public DarlingAnalysisService(NpgsqlDataSource postgres, IPlanFetcher? planFetcher = null, ILogger? logger = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
@@ -153,6 +166,7 @@ public sealed class DarlingAnalysisService
 
         IsAnalyzing = true;
         InsufficientDataMessage = null;
+        EndedEarlyAs = null;
 
         try
         {
@@ -296,7 +310,9 @@ public sealed class DarlingAnalysisService
                Classified ONCE, in the catch body rather than across two exception filters, because the
                three outcomes are one decision and splitting it would mean evaluating it twice and
                letting the halves drift. */
-            switch (AnalysisShutdown.Classify(ex, context.ShutdownToken, context.CancellationToken))
+            EndedEarlyAs = AnalysisShutdown.Classify(ex, context.ShutdownToken, context.CancellationToken);
+
+            switch (EndedEarlyAs)
             {
                 case AnalysisAbandonKind.Shutdown:
                     _logger?.LogInformation(

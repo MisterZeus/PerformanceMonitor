@@ -3184,20 +3184,28 @@ LIMIT 1", connection);
                unconditional, delivery gated). */
             var findings = await analyzeTask;
 
-            /* A pass cut short at its budget unwound as asked and returned nothing, so there is
-               nothing to route — say that, rather than letting a cancelled cycle read as a clean
-               all-clear, which is what the old code did for every timed-out pass that happened to
-               come back before the sweep gave up on it. Gated on the empty result as well as the
-               token, so a pass that genuinely finished in the last instant before the deadline still
-               delivers what it found; the only thing the two conditions can jointly mislabel is a
-               real run that found nothing, whose delivery would have been a no-op anyway. */
-            if (findings.Count == 0 && cts.IsCancellationRequested)
+            /* A pass that ended early unwound as asked and returned nothing, so there is nothing to
+               route — say so, rather than letting it read as a clean all-clear, which is what the old
+               code did for every timed-out pass that came back before the sweep gave up on it.
+
+               READ the pass's own classification rather than re-deriving one here (review, #2430). "No
+               findings and the budget token has fired" is equally true of a genuine fault that landed
+               after the budget expired, and calling that a timeout would bury the pass's ERROR under a
+               Warning saying it merely ran out of time. The pass classified this once and logged the
+               single line for it, so this adds no second line of its own — it only turns the answer
+               into the terminal state analyze_now reports. */
+            if (analysisService.EndedEarlyAs is AnalysisAbandonKind ending)
             {
-                _logger.LogWarning(
-                    "[{Server}] Analysis exceeded {Timeout}s and was cancelled — no findings this cycle; the next cycle recomputes them",
-                    displayName, (int)s_analysisTimeout.TotalSeconds);
-                return new AnalysisPassResult(
-                    AnalysisPassStatus.TimedOut, 0, $"analysis exceeded {(int)s_analysisTimeout.TotalSeconds}s");
+                return ending switch
+                {
+                    AnalysisAbandonKind.Shutdown =>
+                        new AnalysisPassResult(AnalysisPassStatus.Skipped, 0, "service is stopping"),
+                    AnalysisAbandonKind.Timeout =>
+                        new AnalysisPassResult(AnalysisPassStatus.TimedOut, 0,
+                            $"analysis exceeded {(int)s_analysisTimeout.TotalSeconds}s"),
+                    _ => new AnalysisPassResult(AnalysisPassStatus.Error, 0,
+                        "analysis failed — the pass logged the fault"),
+                };
             }
 
             if (notifyFindings)
