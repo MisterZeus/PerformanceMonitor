@@ -129,47 +129,62 @@ public readonly struct SettingsValue
             : Reject(fallback, "true or false");
 
     /// <summary>
-    /// The value as an int, unclamped — for the settings that have never had a range. With no range there is
-    /// nothing to put an unusable number INTO, so one is reported; it is reported as out of range rather than
-    /// as the wrong shape, because "holds a JSON number where a whole number belongs" is a nonsense sentence
-    /// about a number.
+    /// The value as an int, unclamped — for the settings that have never had a range.
+    ///
+    /// <para><b>Where this differs from the clamped reader, and why.</b> A clamped read has somewhere to put
+    /// a number that will not fit — the bound the caller declared — so it puts it there. This one has
+    /// nowhere, so it must not invent a range: <c>90.7</c> for a setting with no declared bounds becomes
+    /// nothing, and is reported. A number that IS exact is still taken however it was written, so
+    /// <c>30.0</c> reads as 30 the same way it does everywhere else in this type.</para>
     /// </summary>
     public int Int(int fallback) =>
         Element.ValueKind != JsonValueKind.Number ? Reject(fallback, "a whole number")
         : Element.TryGetInt32(out var number) ? number
-        : RejectAsOutOfRange(fallback);
+        : Wide(out var wide) && wide == Math.Floor(wide) && wide >= int.MinValue && wide <= int.MaxValue
+            ? (int)wide
+            : RejectAsUnusableNumber(fallback);
 
     /// <summary>
-    /// The value as an int, clamped into <paramref name="min"/>..<paramref name="max"/>. Read as Int64 first
-    /// on purpose: a number too large for an <c>int</c> is a value out of range, which the clamp is there to
-    /// handle, not a value of the wrong shape.
+    /// The value as an int, clamped into <paramref name="min"/>..<paramref name="max"/>.
+    ///
+    /// <para>Every JSON number reaches a bound, which is the promise and it is deliberately absolute (two
+    /// review findings on #2444, in the same place). <c>TryGetInt64</c> answers most of them; it returns
+    /// false for a number beyond Int64 AND for one that is not a pure integer token, so <c>30.0</c> and
+    /// <c>5.5</c> fail it exactly as <c>99999999999999999999</c> does. Reading the remainder as a double
+    /// handles all three: the vast ones land on a bound, and the fractional ones truncate into range.</para>
+    ///
+    /// <para>Truncating is the same species of silent adjustment the clamp already is, and it is confined to
+    /// the readers whose caller declared a range for exactly that purpose. The first cut of the Int64 fix
+    /// chose the bound by SIGN instead, which was right for the vast case and silently turned
+    /// <c>analysis_timeout_seconds: 30.0</c> into 600 — a value the user never asked for, never saw flagged,
+    /// and could not have found, which is the failure #2444 exists to end rather than to relocate.</para>
     /// </summary>
     public int Int(int fallback, int min, int max) =>
         Element.ValueKind != JsonValueKind.Number ? Reject(fallback, "a whole number")
         : Element.TryGetInt64(out var number) ? (int)Math.Clamp(number, min, max)
-        : IsNegative() ? min : max;
+        : Wide(out var wide) ? (wide >= max ? max : wide <= min ? min : (int)wide)
+        : RejectAsUnusableNumber(fallback);
 
-    /// <summary>The value as a long, clamped into <paramref name="min"/>..<paramref name="max"/>.</summary>
+    /// <summary>The value as a long, clamped into <paramref name="min"/>..<paramref name="max"/>. Same three
+    /// cases as <see cref="Int(int,int,int)"/>, compared rather than clamped because a bound near
+    /// <c>long.MaxValue</c> does not survive a round trip through a <see cref="double"/>.</summary>
     public long Long(long fallback, long min, long max) =>
         Element.ValueKind != JsonValueKind.Number ? Reject(fallback, "a whole number")
         : Element.TryGetInt64(out var number) ? Math.Clamp(number, min, max)
-        : IsNegative() ? min : max;
+        : Wide(out var wide) ? (wide >= max ? max : wide <= min ? min : (long)wide)
+        : RejectAsUnusableNumber(fallback);
 
     /// <summary>The value as a double, clamped into <paramref name="min"/>..<paramref name="max"/>.</summary>
     public double Double(double fallback, double min, double max) =>
         Element.ValueKind != JsonValueKind.Number ? Reject(fallback, "a number")
-        : Element.TryGetDouble(out var number) ? Math.Clamp(number, min, max)
-        : IsNegative() ? min : max;
+        : Wide(out var number) ? Math.Clamp(number, min, max)
+        : RejectAsUnusableNumber(fallback);
 
-    /// <summary>
-    /// Which BOUND a number that will not fit in an <see cref="long"/> clamps to (review finding on #2444).
-    /// A value beyond Int64 in either direction cannot be inside any range a caller can express, so the only
-    /// question is which end, and the sign answers it — which keeps the clamped readers' promise absolute
-    /// rather than "up to Int64", and stops a plainly-whole number being reported as not a whole number.
-    /// <para>Read off the raw token rather than through a <see cref="double"/>: <c>long.MaxValue</c> does not
-    /// survive that round trip, so a bound near it would come back wrong in the one case this exists for.</para>
-    /// </summary>
-    private bool IsNegative() => Element.GetRawText().TrimStart().StartsWith('-');
+    /// <summary>The number as a finite double, false when it will not be one. Infinity is excluded because a
+    /// clamp against it is a comparison that means nothing, and NaN cannot come out of a JSON number at
+    /// all — this is the guard, not a claim that either is reachable.</summary>
+    private bool Wide(out double value) =>
+        Element.TryGetDouble(out value) && double.IsFinite(value);
 
     /// <summary>The value as a string, or <paramref name="fallback"/> when it is not one.</summary>
     public string Text(string fallback) =>
@@ -195,17 +210,26 @@ public readonly struct SettingsValue
     /// expression. The message names the kind that WAS there, in the same phrasing the MCP settings loader
     /// already uses, because "it holds a JSON string" is what lets someone find the line in their file.
     /// </summary>
-    private T RejectAsOutOfRange<T>(T fallback)
+    /// <summary>
+    /// Records a value that IS a number and still cannot be used, naming which of the two problems it has —
+    /// "holds a JSON number where a whole number belongs" is a nonsense sentence about a number, and this one
+    /// reaches a dialog. The token is truncated because a hand-edited file is where a thousand-digit number
+    /// comes from.
+    /// </summary>
+    private T RejectAsUnusableNumber<T>(T fallback)
     {
-        /* The token, truncated: a hand-edited file is where a thousand-digit number comes from, and this
-           string goes into a dialog. */
         var token = Element.GetRawText();
+        var reason = Wide(out var wide) && wide != Math.Floor(wide)
+            ? "which is not a whole number"
+            : "which is out of range for this setting";
+
         _reader?.Reject(
             _key,
             string.Format(
                 CultureInfo.InvariantCulture,
-                "holds {0}, which is out of range for this setting",
-                token.Length > 40 ? token[..40] + "…" : token));
+                "holds {0}, {1}",
+                token.Length > 40 ? token[..40] + "…" : token,
+                reason));
 
         return fallback;
     }

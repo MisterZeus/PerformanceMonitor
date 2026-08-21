@@ -218,19 +218,55 @@ public class SettingsValueReadTests
     }
 
     /// <summary>
-    /// The other side of that boundary. An UNCLAMPED read has no range to put an unusable number into, so it
-    /// does report one — but as out of range, naming the value, rather than as the wrong shape.
+    /// The regression the FIRST cut of that fix introduced, and the sharper of the two review findings.
+    /// <c>TryGetInt64</c> returns false for a number that is not a pure integer token as well as for one that
+    /// is too big, so choosing the bound by SIGN turned <c>analysis_timeout_seconds: 30.0</c> into 600 — a
+    /// value the user never asked for, never saw flagged, and could not have found. Reading the remainder as
+    /// a double is what tells the two apart, and 30.0 is plainly 30.
     /// </summary>
     [Fact]
-    public void AnUnclampedReadReportsAnOutOfRangeNumber_AsOutOfRangeRatherThanWrongShape()
+    public void AFractionalNumber_ReadsAsItsValue_RatherThanLandingOnTheMaximum()
     {
-        var read = ReaderOver("""{ "vast": 99999999999999999999 }""");
+        var read = ReaderOver("""{ "whole": 30.0, "fraction": 5.5, "under": -0.5 }""");
 
-        Assert.True(read.TryGetProperty("vast", out var vast));
-        Assert.Equal(7, vast.Int(7));
+        Assert.True(read.TryGetProperty("whole", out var whole));
+        Assert.Equal(30, whole.Int(99, 30, 600));
 
-        var problem = Assert.Single(read.Problems);
-        Assert.Equal("vast", problem.Key);
+        /* Truncated INTO the range, which is the same silent adjustment the clamp already is and is confined
+           to the readers whose caller declared a range for exactly that. It is not 100. */
+        Assert.True(read.TryGetProperty("fraction", out var fraction));
+        Assert.Equal(5, fraction.Int(99, 0, 100));
+
+        Assert.True(read.TryGetProperty("under", out var under));
+        Assert.Equal(0, under.Int(99, 0, 100));
+
+        Assert.Empty(read.Problems);
+    }
+
+    /// <summary>
+    /// The other side of the boundary. An UNCLAMPED read has no range to put an unusable number into, so it
+    /// must not invent one — and it names which of the two problems the value has, because "holds a JSON
+    /// number where a whole number belongs" is a nonsense sentence about a number. A number that IS exact is
+    /// still taken however it was written.
+    /// </summary>
+    [Fact]
+    public void AnUnclampedRead_TakesAnExactNumber_AndNamesWhyItRejectsTheRest()
+    {
+        var exact = ReaderOver("""{ "n": 30.0 }""");
+        Assert.True(exact.TryGetProperty("n", out var n));
+        Assert.Equal(30, n.Int(7));
+        Assert.Empty(exact.Problems);
+
+        var fractional = ReaderOver("""{ "n": 90.7 }""");
+        Assert.True(fractional.TryGetProperty("n", out var f));
+        Assert.Equal(7, f.Int(7));
+        Assert.Contains("not a whole number", Assert.Single(fractional.Problems).Problem, StringComparison.Ordinal);
+
+        var vast = ReaderOver("""{ "n": 99999999999999999999 }""");
+        Assert.True(vast.TryGetProperty("n", out var v));
+        Assert.Equal(7, v.Int(7));
+
+        var problem = Assert.Single(vast.Problems);
         Assert.Contains("out of range", problem.Problem, StringComparison.Ordinal);
         Assert.DoesNotContain("where a whole number belongs", problem.Problem, StringComparison.Ordinal);
     }
