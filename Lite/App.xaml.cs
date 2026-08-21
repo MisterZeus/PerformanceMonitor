@@ -739,9 +739,14 @@ public partial class App : Application
             }
         }
 
+        /* Says "every other key this loader read", not "every other setting in the file": both loaders call
+           this and LoadDefaultTimeRange runs first, so a claim about the whole file would be written before
+           the alert settings had been read at all. The dialog CAN make the whole-file claim, because it is
+           shown once, after both loaders have run. */
         AppLogger.Error("Settings",
-            $"settings.json parsed, but {problems.Count} of its values could not be read and are at their " +
-            "defaults for this session. Every OTHER setting in the file loaded normally.\n  " +
+            $"settings.json parsed, but {problems.Count} value(s) in it could not be read and are at their " +
+            "defaults for this session. Only the keys named here fell back -- every other key this loader " +
+            "read was applied.\n  " +
             string.Join("\n  ", problems));
     }
 
