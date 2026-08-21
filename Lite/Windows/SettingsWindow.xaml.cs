@@ -58,6 +58,7 @@ public partial class SettingsWindow : Window
         LoadCsvSeparator();
         LoadColorTheme();
         LoadTimeDisplayMode();
+        LoadCheckForUpdates();
         LoadAlertSettings();
         LoadSmtpSettings();
         LoadWebhookSettings();
@@ -217,6 +218,7 @@ public partial class SettingsWindow : Window
         SaveCsvSeparator();
         SaveColorTheme();
         SaveTimeDisplayMode();
+        SaveCheckForUpdates();
         bool alertsValid = SaveAlertSettings();
         SaveSmtpSettings();
         bool webhooksValid = SaveWebhookSettings();
@@ -469,6 +471,37 @@ public partial class SettingsWindow : Window
         }
 
         WriteSetting("time display mode", root => root["time_display_mode"] = App.TimeDisplayMode);
+    }
+
+    /// <summary>
+    /// #2413: <c>check_for_updates_on_startup</c> has gated
+    /// <c>MainWindow.CheckForUpdatesOnStartupAsync</c> for as long as the key has existed and defaults
+    /// to on, so out of the box Lite calls github.com five seconds after every launch. The key was
+    /// drawn in no window and shipped in no sample file, which left refusing it to a hand edit nobody
+    /// could discover -- and left a user who WANTS update notifications no way to confirm they are on.
+    /// The switch is the whole change; the default is deliberately untouched.
+    ///
+    /// <para>Wired through its own <see cref="App.WriteSetting"/> call rather than through
+    /// <c>SaveAlertSettings</c>, even though the checkbox sits beside Minimize to tray, which is. This
+    /// is application behavior, not alerting: it must not gray out with the "Enable notifications"
+    /// master switch in <c>UpdateAlertControlStates</c>, and Restore Defaults has no business stomping
+    /// it. The single-value pattern the Dashboard Defaults knobs use is the one that fits, and it
+    /// keeps this out of the scope of the <c>LiteSaveAlertSettings_PersistsEveryStaticItAssigns</c>
+    /// drift guard, which is correct -- that guard's subject is the alert block.</para>
+    ///
+    /// <para>AboutWindow's check stays unconditional on purpose. Opening Help &gt; About IS asking, so
+    /// the setting that governs the unsolicited call has no claim on the one the user requested.</para>
+    /// </summary>
+    private void LoadCheckForUpdates()
+    {
+        CheckForUpdatesOnStartupCheckBox.IsChecked = App.CheckForUpdatesOnStartup;
+    }
+
+    private void SaveCheckForUpdates()
+    {
+        App.CheckForUpdatesOnStartup = CheckForUpdatesOnStartupCheckBox.IsChecked == true;
+
+        WriteSetting("update check on startup", root => root["check_for_updates_on_startup"] = App.CheckForUpdatesOnStartup);
     }
 
     private void LoadAlertSettings()
