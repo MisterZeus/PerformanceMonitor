@@ -565,6 +565,94 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         await cmd.ExecuteNonQueryAsync();
     }
 
+    /// <summary>
+    /// #2448: a finding batch that faults partway through must persist NOTHING, not the rows that
+    /// happened to land first.
+    ///
+    /// <para>The damage this prevents is invisible by construction, which is why it is worth a
+    /// behavioural test against a real DuckDB rather than a source pin. Every row in a batch shares
+    /// one <c>analysis_time</c> and <see cref="FindingStore.GetLatestFindingsAsync"/> reads the
+    /// newest <c>analysis_time</c>, so two committed rows of an intended five do not read as a
+    /// truncated set — they read as a complete analysis that found two problems. The server looks
+    /// HEALTHIER for the store having failed, and nothing anywhere says otherwise.</para>
+    ///
+    /// <para>The fault is a duplicate <c>finding_id</c>, which is the reachable per-row fault on
+    /// this table (<c>finding_id BIGINT PRIMARY KEY</c>) and not a contrivance: the ids come from
+    /// <c>_nextId++</c> seeded off <c>DateTime.UtcNow.Ticks</c>, so two stores in one process can
+    /// genuinely produce one — see #2455.</para>
+    ///
+    /// <para>Reverted, rows 1 and 2 commit before row 3 throws and this fails on
+    /// <c>Assert.Single</c> with three rows present — the truncated set stated exactly.</para>
+    /// </summary>
+    [Fact]
+    public async Task AFaultedBatch_PersistsNothing_RatherThanATruncatedSetThatReadsAsComplete()
+    {
+        const int serverId = -646464;
+        const long earlierPassId = 5_646_464L;
+
+        var store = new FindingStore(_duckDb);
+        var context = new AnalysisContext
+        {
+            ServerId = serverId,
+            ServerName = "partial-batch",
+            TimeRangeStart = DateTime.UtcNow.AddHours(-4),
+            TimeRangeEnd = DateTime.UtcNow
+        };
+
+        /* An earlier pass's row, and the id the doomed batch collides with. */
+        await store.InsertFindingsAsync(
+            [PartialBatchFinding(earlierPassId, serverId, "an earlier pass")], context);
+
+        /* Row 3 of 5 collides, so rows 1-2 have already run by the time it fails. */
+        var doomed = new List<AnalysisFinding>
+        {
+            PartialBatchFinding(earlierPassId + 1, serverId, "row 1"),
+            PartialBatchFinding(earlierPassId + 2, serverId, "row 2"),
+            PartialBatchFinding(earlierPassId, serverId, "row 3 - collides"),
+            PartialBatchFinding(earlierPassId + 3, serverId, "row 4"),
+            PartialBatchFinding(earlierPassId + 4, serverId, "row 5")
+        };
+
+        await Assert.ThrowsAsync<DuckDBException>(() => store.InsertFindingsAsync(doomed, context));
+
+        /* The assertion #2448 exists for: not "fewer rows", NO rows from the doomed batch. Only the
+           earlier pass survives, and it is still stamped with its own analysis_time — stale and
+           saying so, rather than fresh and understating the server. */
+        var persisted = await store.GetRecentFindingsAsync(serverId);
+        Assert.Equal(earlierPassId, Assert.Single(persisted).FindingId);
+
+        /* And the rollback is not the store simply refusing to write: the same five rows without
+           the collision commit in full, through the same code path. */
+        var clean = new List<AnalysisFinding>
+        {
+            PartialBatchFinding(earlierPassId + 10, serverId, "row 1"),
+            PartialBatchFinding(earlierPassId + 11, serverId, "row 2"),
+            PartialBatchFinding(earlierPassId + 12, serverId, "row 3"),
+            PartialBatchFinding(earlierPassId + 13, serverId, "row 4"),
+            PartialBatchFinding(earlierPassId + 14, serverId, "row 5")
+        };
+
+        await store.InsertFindingsAsync(clean, context);
+        Assert.Equal(6, (await store.GetRecentFindingsAsync(serverId)).Count);
+    }
+
+    private static AnalysisFinding PartialBatchFinding(long findingId, int serverId, string storyText) =>
+        new()
+        {
+            FindingId = findingId,
+            AnalysisTime = DateTime.UtcNow,
+            ServerId = serverId,
+            ServerName = "partial-batch",
+            Severity = 1.0,
+            Confidence = 0.9,
+            Category = "waits",
+            StoryPath = "WRITELOG",
+            StoryPathHash = "an1-partial-batch",
+            StoryText = storyText,
+            RootFactKey = "WRITELOG",
+            FactCount = 1
+        };
+
     private static System.Collections.Generic.List<AnalysisStory> CreateTestStories()
     {
         return
