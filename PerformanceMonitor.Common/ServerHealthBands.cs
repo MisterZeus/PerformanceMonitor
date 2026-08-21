@@ -639,6 +639,30 @@ namespace PerformanceMonitor.Common
     /// this signal exists: before it, half-rate collection was only visible by reading service-log
     /// warnings (#2296 measured two servers at ~50 skip-warnings/hour with 40 of 40 collectors green).</para>
     ///
+    /// <para><b>The second dimension (#2446), and why it is not the verdict:</b> amortizing answers "can
+    /// this server's total demand fit inside its cadence on average", and an operator reading a skipped
+    /// relaunch is asking "did THIS sweep overrun". Those diverge exactly when one collector's single run
+    /// approaches the budget while its amortized cost is negligible — the signature of an infrequent heavy
+    /// collector. prod-pos-use2-multi-49 is the measured case: index_object_stats averages 37,207 ms of a
+    /// 60,000 ms body, and at a 1440-minute cadence contributes 26 ms/min to a 12,250 ms/min total that
+    /// reads OK at 20.4%. So <see cref="SweepPressure.PeakCycleMs"/> adds the collectors' averages WITHOUT
+    /// amortizing: the body's cost on the cycle where every cadence comes due together. That cycle is not
+    /// a hypothetical worst case. Any set of positive integer cadences coincides on their LCM, so the
+    /// aligned body is a periodic certainty for ANY schedule, including one hand-edited in Lite's
+    /// schedule editor — the shipped defaults (1 | 5 | 60 | 1440) merely make it frequent, every 1440
+    /// minutes, rather than rare. Those figures compute a 73,408 ms aligned body against a
+    /// 60,000 ms budget, which is the number the pinned fixture reproduces; a live read of all 41 of that
+    /// server's collectors minutes later came to 73,193 ms, so treat either as the same measurement taken
+    /// twice rather than as two claims.</para>
+    ///
+    /// <para>It is reported as its own field with its own vocabulary rather than folded into the verdict,
+    /// because a once-daily 37-second collector is not saturation and calling it SATURATED would spend the
+    /// word on a case where the capacity lever it recommends is the wrong lever. The verdict keeps meaning
+    /// sustained demand; BODY_OVERRUN means one scheduled body does not fit. A fleet scan can filter on
+    /// either, which a prose-only footnote would not allow — measured across the dogfood fleet, the two
+    /// servers that logged skipped relaunches read OK/BODY_OVERRUN (122% and 109% of budget) while a quiet
+    /// one read OK/FITS at 19%, so the dimensions are genuinely orthogonal and the new one discriminates.</para>
+    ///
     /// <para>Pure and static like <see cref="CollectorHealthClassifier"/>: the caller resolves each
     /// collector's cadence (from the shared schedule defaults, matching the banding's parity choice) and
     /// only the DECISION lives here, pinned by the same table in both suites.</para>
@@ -649,6 +673,14 @@ namespace PerformanceMonitor.Common
         public const string Ok = "OK";
         public const string AtRisk = "AT_RISK";
         public const string Saturated = "SATURATED";
+
+        /* #2446, the peak-cycle risk strings. Deliberately a SEPARATE vocabulary from the verdict's,
+           because the two answer different questions and a reader who meets BODY_OVERRUN sitting beside
+           OK must not be able to read it as a fourth saturation band. BODY_OVERRUN is the watchdog's own
+           wording ("collection body has not completed after Ns of execution - skipping relaunch"), so the
+           field an operator filters on and the service-log line they grep for say the same thing. */
+        public const string PeakCycleFits = "FITS";
+        public const string PeakCycleBodyOverrun = "BODY_OVERRUN";
 
         /// <summary>
         /// AT_RISK at 75% of budget: the amortized average leaves no headroom for variance — the slow
@@ -662,17 +694,50 @@ namespace PerformanceMonitor.Common
         public const double SaturatedBusyPercent = 100.0;
 
         /// <summary>
-        /// Amortized execution demand and its verdict. Each scheduled collector contributes its average
-        /// duration divided by its cadence in minutes — milliseconds of work demanded per minute of wall
-        /// time for a body that runs collectors serially. A non-recurring collector
-        /// (<paramref name="collectors"/> entry with frequency &lt;= 0: on-load, unknown) contributes
-        /// nothing — it does not compete for the sweep. Percent is against the 60,000 ms one minute
-        /// holds; the fastest shipped cadence is one minute, which is what makes the minute the budget.
+        /// The sweep budget one body has to finish in: the 60,000 ms the fastest shipped cadence holds.
+        /// Both dimensions are measured against this same minute, which is the point — the amortized
+        /// verdict asks whether the AVERAGE minute's demand fits inside it, and the peak cycle asks
+        /// whether the WORST scheduled minute's does.
+        /// </summary>
+        public const double SweepBudgetMs = 60_000.0;
+
+        /// <summary>
+        /// BODY_OVERRUN at 100% of the budget, with no warning band beneath it. The amortized bands need
+        /// one because an average smooths spikes and 75% is where variance starts pushing a body over; the
+        /// peak cycle is already the worst scheduled case, and a headroom band on top of a worst case
+        /// would be a band on a band.
+        /// </summary>
+        public const double BodyOverrunPercent = 100.0;
+
+        /// <summary>
+        /// Both answers in one pass, over one population of collectors.
+        ///
+        /// <para><b>Amortized execution demand and its verdict.</b> Each scheduled collector contributes
+        /// its average duration divided by its cadence in minutes — milliseconds of work demanded per
+        /// minute of wall time for a body that runs collectors serially. Percent is against the 60,000 ms
+        /// one minute holds; the fastest shipped cadence is one minute, which is what makes the minute the
+        /// budget.</para>
+        ///
+        /// <para><b>The peak cycle and its risk (#2446).</b> The same collectors' averages added WITHOUT
+        /// being divided: what the body costs when every cadence comes due together, which the nested
+        /// shipped cadences make a periodic certainty rather than a hypothetical. Reported separately from
+        /// the verdict, never folded into it — see the type's remarks for why.</para>
+        ///
+        /// <para>A non-recurring collector (<paramref name="collectors"/> entry with frequency &lt;= 0:
+        /// on-load, unknown) contributes to NEITHER — it runs on connect, not in the recurring body, so it
+        /// does not compete for the sweep and is not part of any scheduled cycle. Nor can it become the
+        /// peak collector, which would otherwise name a collector that never shares a body with the ones
+        /// it is being compared against.</para>
         /// </summary>
         public static SweepPressure Compute(IEnumerable<(string CollectorName, double AvgDurationMs, int FrequencyMinutes)> collectors)
         {
             double busyMsPerMinute = 0;
-            foreach (var (_, avgDurationMs, frequencyMinutes) in collectors)
+            double peakCycleMs = 0;
+            string? peakCollectorName = null;
+            double peakCollectorAvgDurationMs = 0;
+            int peakCollectorFrequencyMinutes = 0;
+
+            foreach (var (collectorName, avgDurationMs, frequencyMinutes) in collectors)
             {
                 if (frequencyMinutes <= 0 || avgDurationMs <= 0)
                 {
@@ -680,17 +745,96 @@ namespace PerformanceMonitor.Common
                 }
 
                 busyMsPerMinute += avgDurationMs / frequencyMinutes;
+
+                /* The same population as the amortized sum, added WITHOUT being divided: what the body
+                   costs on the cycle where every cadence comes due together. Excluding the on-load
+                   collectors here is the same choice for the same reason — they run on connect, not in
+                   the recurring body, so they are not part of any scheduled cycle. */
+                peakCycleMs += avgDurationMs;
+
+                /* Strict >, so an exact tie keeps the first collector the caller enumerated rather than
+                   letting the answer wobble with the row order of whatever query produced it. */
+                if (avgDurationMs > peakCollectorAvgDurationMs)
+                {
+                    peakCollectorName = collectorName;
+                    peakCollectorAvgDurationMs = avgDurationMs;
+                    peakCollectorFrequencyMinutes = frequencyMinutes;
+                }
             }
 
-            var busyPercent = busyMsPerMinute / 60_000.0 * 100.0;
+            var busyPercent = busyMsPerMinute / SweepBudgetMs * 100.0;
             var verdict = busyPercent >= SaturatedBusyPercent ? Saturated
                 : busyPercent >= AtRiskBusyPercent ? AtRisk
                 : Ok;
 
-            return new SweepPressure(busyMsPerMinute, busyPercent, verdict);
+            var peakCyclePercent = peakCycleMs / SweepBudgetMs * 100.0;
+            var peakCycleRisk = peakCyclePercent >= BodyOverrunPercent ? PeakCycleBodyOverrun : PeakCycleFits;
+
+            return new SweepPressure(
+                busyMsPerMinute,
+                busyPercent,
+                verdict,
+                peakCycleMs,
+                peakCyclePercent,
+                peakCycleRisk,
+                peakCollectorName,
+                peakCollectorAvgDurationMs,
+                peakCollectorFrequencyMinutes);
+        }
+
+        /// <summary>
+        /// The sentence a BODY_OVERRUN needs, composed HERE rather than at each SKU's tool the way
+        /// <see cref="CollectorHealthClassifier.FormatCollectionNote"/> is, because it interpolates the
+        /// numbers: two hand-copied format strings would drift the moment one of them was tuned, and the
+        /// whole point of this note is that the operator is reading it instead of the amortized figure.
+        /// Empty string when the peak cycle fits — a note that fires on the healthy case is how a signal
+        /// teaches people to ignore it.
+        /// </summary>
+        public static string FormatPeakCycleNote(SweepPressure pressure)
+        {
+            if (pressure is null
+                || !string.Equals(pressure.PeakCycleRisk, PeakCycleBodyOverrun, StringComparison.Ordinal)
+                || string.IsNullOrWhiteSpace(pressure.PeakCollectorName))
+            {
+                return string.Empty;
+            }
+
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "On the cycle where every scheduled cadence comes due together this body costs {0:N0} ms — {1:N1}% of the {2:N0} ms sweep budget — so that body cannot finish inside its cadence and its relaunch is skipped, however much headroom the sustained {3:N1}% reports. Its largest single contributor is {4}, {5:N0} ms per run and {6:N1}% of the budget on its own, every {7} minutes. Amortized over that cadence it is worth {8:N0} ms per minute, so the sustained figure and the heaviest_collectors ranked by it both understate what this collector does to one body. The lever here is the schedule's shape — moving or splitting that collector so it stops sharing a cycle — not the capacity answer a SATURATED verdict calls for.",
+                Math.Round(pressure.PeakCycleMs),
+                pressure.PeakCyclePercent,
+                SweepBudgetMs,
+                pressure.BusyPercent,
+                pressure.PeakCollectorName,
+                Math.Round(pressure.PeakCollectorAvgDurationMs),
+                pressure.PeakCollectorAvgDurationMs / SweepBudgetMs * 100.0,
+                pressure.PeakCollectorFrequencyMinutes,
+                Math.Round(pressure.PeakCollectorAvgDurationMs / pressure.PeakCollectorFrequencyMinutes));
         }
     }
 
-    /// <summary>One server's sweep-pressure answer, as a single value so a caller cannot drop the verdict from its numbers.</summary>
-    public sealed record SweepPressure(double BusyMsPerMinute, double BusyPercent, string Verdict);
+    /// <summary>
+    /// One server's sweep-pressure answer, as a single value so a caller cannot drop the verdict from its
+    /// numbers — or, since #2446, drop the second dimension from the verdict.
+    /// </summary>
+    /// <param name="BusyMsPerMinute">Amortized execution demand: milliseconds of collector work per minute of wall time.</param>
+    /// <param name="BusyPercent"><paramref name="BusyMsPerMinute"/> against <see cref="SweepPressureClassifier.SweepBudgetMs"/>.</param>
+    /// <param name="Verdict">OK / AT_RISK / SATURATED — the SUSTAINED answer, and only that.</param>
+    /// <param name="PeakCycleMs">What the body costs on the cycle where every scheduled cadence coincides.</param>
+    /// <param name="PeakCyclePercent"><paramref name="PeakCycleMs"/> against the same budget.</param>
+    /// <param name="PeakCycleRisk">FITS / BODY_OVERRUN — the SINGLE-SWEEP answer. Never a verdict value.</param>
+    /// <param name="PeakCollectorName">The largest single contributor to that cycle, or null when nothing is scheduled.</param>
+    /// <param name="PeakCollectorAvgDurationMs">That collector's average single-run cost.</param>
+    /// <param name="PeakCollectorFrequencyMinutes">That collector's cadence — the number that makes its amortized share small.</param>
+    public sealed record SweepPressure(
+        double BusyMsPerMinute,
+        double BusyPercent,
+        string Verdict,
+        double PeakCycleMs,
+        double PeakCyclePercent,
+        string PeakCycleRisk,
+        string? PeakCollectorName,
+        double PeakCollectorAvgDurationMs,
+        int PeakCollectorFrequencyMinutes);
 }

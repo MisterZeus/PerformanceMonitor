@@ -106,7 +106,7 @@ internal static class DarlingMcpInstructions
         | `get_top_procedures_by_cpu` | Most expensive stored procedures by total CPU, with the same `cpu_attribution` disclosure | `server_name`, `hours_back` (default 24), `top` (default 20), `database_name` |
         | `get_query_store_top` | Expensive queries from Query Store with query_id / plan_id (survives restarts) | `server_name`, `hours_back` (default 24), `top` (default 20), `database_name` |
         | `list_servers` | All monitored servers with collection-freshness status and last collection time, plus `peer_fleets` — the declared SIBLING Darling stores and what each covers (disclosure only; this server cannot read them) and `peer_note`, which says what an EMPTY `peer_fleets` does and does not prove | none |
-        | `get_collection_health` | Per-collector health (running / failing / stale) over the last 7 days, plus the server's sweep_pressure verdict (a SATURATED body collects at a multiple of its configured cadence with every collector healthy) | `server_name` |
+        | `get_collection_health` | Per-collector health (running / failing / stale) over the last 7 days, plus the server's sweep_pressure block: a `verdict` for SUSTAINED demand (a SATURATED body collects at a multiple of its configured cadence with every collector healthy) and a separate `peak_cycle_risk` for a SINGLE sweep (BODY_OVERRUN means one scheduled body cannot fit the budget even when the verdict reads OK, the signature of one infrequent heavy collector; `peak_collector` names it) | `server_name` |
         | `get_server_properties` | Instance properties: edition, version, CPU count, memory, socket/core topology, HADR | `server_name` |
 
         ### Diagnostic-depth data-read tools
