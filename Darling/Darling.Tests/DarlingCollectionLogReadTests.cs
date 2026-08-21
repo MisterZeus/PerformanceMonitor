@@ -128,7 +128,8 @@ public sealed class DarlingCollectionLogReadTests
 
             /* ── 5. an out-of-range cap is refused, not silently clamped ── */
             var tooBig = await DarlingMcpDataTools.GetCollectionLog(dataSource, ServerName, 24, 5000);
-            Assert.Contains("Must be a positive integer", tooBig, StringComparison.Ordinal);
+            Assert.Contains("exceeds maximum of", tooBig, StringComparison.Ordinal);
+            Assert.Contains("1000", tooBig, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }

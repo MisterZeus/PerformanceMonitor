@@ -124,7 +124,8 @@ public sealed class CollectionLogToolTests : IClassFixture<SharedDuckDbFixture>,
         await SeedLogAsync("query_store", DateTime.UtcNow.AddMinutes(-10));
 
         var tooBig = await McpHealthTools.GetCollectionLog(service, _serverManager, ServerName, 24, 5000);
-        Assert.Contains("Must be a positive integer", tooBig, StringComparison.Ordinal);
+        Assert.Contains("exceeds maximum of", tooBig, StringComparison.Ordinal);
+        Assert.Contains("1000", tooBig, StringComparison.Ordinal);
     }
 
     [Fact]
