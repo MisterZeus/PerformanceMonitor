@@ -206,6 +206,12 @@ if (-not (Test-Path $serviceExe)) {
 # This runs BEFORE the pre-flight, the Event Log source, and service creation, so a doomed location costs
 # nothing and leaves nothing behind.
 $existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+
+# The same fact as a boolean, for the post-start firewall reconcile at 5a (#2436). Captured here with
+# $existing because it stops being observable the moment sc.exe create runs, and named rather than reusing
+# $existing at the far end of the script because what 5a actually depends on is not "a service object was
+# found" but "a STORE already exists to be asked" - which is what an existing service implies.
+$isUpgrade = $null -ne $existing
 # Classify the NORMALIZED spelling, but keep installing to $root exactly as given (#2348). The \\?\ prefix
 # instructs the path parser and is not part of where the install lives, so stripping it for the decision
 # changes which rules see the path and nothing about where files land.
@@ -516,6 +522,12 @@ if ($failed.Count -gt 0) {
 # re-running it is a no-op, and it needs only darling.json - no store, no credentials - so it is safe here,
 # BEFORE the first start.
 #
+# On a FRESH install that is not merely safe, it is the only correct time: config_service does not exist yet
+# and is seeded FROM darling.json, so the file is the control plane's future answer and cannot be wrong.
+# On an UPGRADE it can be: the store already holds a port that may have been moved in the Viewer, and the
+# managed store is a child of the service, so with the service stopped there is nothing here to ask. That is
+# what 5a below exists for - see the reasoning there.
+#
 # Best-effort: a firewall failure warns rather than aborting an otherwise good install. Re-run it by hand.
 function Invoke-FirewallReconcile {
     & $serviceExe --configure-firewall
@@ -535,6 +547,30 @@ Start-Service -Name $serviceName
 (Get-Service -Name $serviceName).WaitForStatus('Running', [TimeSpan]::FromSeconds(60))
 Write-Host "Service is Running. First start does real work (unpack pg-runtime, initdb, store migration, first collection cycle) - give it ~2 minutes." -ForegroundColor Green
 Write-Host "Primary log: %ProgramData%\PerformanceMonitorDarling\logs\darling-service_yyyyMMdd.log"
+
+# -- 5a. Re-reconcile the firewall on an UPGRADE (#2436) -------------------------------------------
+# The 4c call ran with the service stopped, which on a managed install means the store was down too - it is
+# a child of the service. So on an upgrade the verb fell back to darling.json's mcp.port / web.port, and on
+# a box whose port was later moved in the Viewer's Settings that is the WRONG port: the rule lands where
+# nothing listens while the served port stays shut. The verb says so when it falls back, and the running
+# service's own start-up check then WARNs the exact command - so this always did self-heal with one operator
+# action. This removes the need for that action in the case where it was never necessary, because the store
+# is up now and can simply be asked.
+#
+# Only on an upgrade, and that is the point rather than an optimisation. On a fresh install the first start
+# is doing initdb and the first migration for ~2 minutes, so a second call here could not read the store
+# either - it would re-print the same fallback disclosure more loudly about a port that, on a fresh box, is
+# by definition correct. Skipping it by construction beats skipping it by hoping the timing works out.
+#
+# Not a guarantee: the store answers when it answers, and the verb bounds its read to ten seconds. If it
+# still cannot, this run says exactly what the 4c run said and the operator has the same remedy they had
+# before - so the window narrows rather than closing, which is the honest claim. The verb is idempotent, so
+# a redundant run costs nothing but output.
+if ($isUpgrade) {
+    Write-Host ''
+    Write-Host 'Re-applying the firewall rules now that the store can answer (upgrade path)...' -ForegroundColor Cyan
+    Invoke-FirewallReconcile
+}
 
 # -- 5b. Optional guided network setup ------------------------------------------------------------
 # Runs elevated (this whole script is), so the wizard's restart-to-apply works, and its restart is what
