@@ -239,6 +239,52 @@ public sealed class DarlingEndpointToggleCliTests
         }
     }
 
+    /* ---------------- #2414: the toggle write hands back the port the endpoint BINDS ---------------- */
+
+    /// <summary>
+    /// The firewall half of these verbs has to name its rule for the port the endpoint is bound to, which is
+    /// <c>config_service.mcp_port</c>/<c>web_port</c> and not darling.json's first-run seed. Taking it from the
+    /// RETURNING clause of the write these verbs already perform makes the authoritative read free, atomic with
+    /// the toggle, and impossible to skip — and it makes the store-unreachable case impossible too, because a
+    /// store that cannot be written has already failed the verb before any firewall command is built.
+    /// </summary>
+    [Theory]
+    [InlineData("mcp")]
+    [InlineData("web")]
+    public void EveryToggleSql_ReturnsItsOwnEndpointsPort_AndOnlyThatOne(string section)
+    {
+        var (enable, disable) = section == "mcp"
+            ? (DarlingCliCommands.EnableMcpStoreSql, DarlingCliCommands.DisableMcpStoreSql)
+            : (DarlingCliCommands.EnableWebStoreSql, DarlingCliCommands.DisableWebStoreSql);
+
+        var other = section == "mcp" ? "web_port" : "mcp_port";
+
+        foreach (var sql in new[] { enable, disable })
+        {
+            Assert.EndsWith($"RETURNING {section}_port", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain(other, sql, StringComparison.Ordinal);
+
+            /* RETURNING is a read on the row this statement already writes — it must not have turned the
+               targeted single-flag UPDATE into something broader. */
+            Assert.Contains("WHERE id = 1 RETURNING", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("config_version", sql, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>The elevated firewall verb's own read is the same two pairs, read-only, on the same single
+    /// row — it has no write to hang a RETURNING off, and it must never acquire one.</summary>
+    [Fact]
+    public void ReadEndpointTogglesSql_IsAReadOnlySingleRowSelectOfBothEndpoints()
+    {
+        var sql = DarlingCliCommands.ReadEndpointTogglesSql;
+
+        Assert.StartsWith("SELECT ", sql, StringComparison.Ordinal);
+        Assert.Contains("mcp_enabled, mcp_port, web_enabled, web_port", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM config.config_service WHERE id = 1", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("UPDATE", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("INSERT", sql, StringComparison.Ordinal);
+    }
+
     /* ---------------- pure: the shared scoped firewall rule names (CLI + host reconcile the SAME DisplayName) ---------------- */
 
     [Fact]
