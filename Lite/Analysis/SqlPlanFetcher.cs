@@ -59,8 +59,15 @@ FROM sys.dm_exec_query_plan(CONVERT(varbinary(64), @plan_handle, 1))", connectio
 
             return result.ToString();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* #2443: review caught this, and it is a real behaviour gap rather than a tidiness one.
+               Lite arms a genuine per-pass budget (#2412), so the token this method now takes can and
+               does fire mid-fetch on a healthy running app. An unconditional catch would log
+               "Failed to fetch plan for handle …: The operation was canceled." as an ERROR for work
+               we ourselves called off, AND swallow it, so the pass would carry on enriching under a
+               fired token instead of unwinding to AnalysisService's one quiet line. Same arm the
+               Darling twin's PgPlanFetcher carries for the identical call shape. */
             AppLogger.Error("SqlPlanFetcher",
                 $"Failed to fetch plan for handle {planHandle}: {ex.Message}");
             return null;

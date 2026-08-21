@@ -292,7 +292,8 @@ VALUES ($1, $2, $3, $4, $5, $6)";
 
     /// <summary>
     /// Returns the most recent findings for a server within the given time range, newest and
-    /// most severe first, including each finding's persisted remediation action.    ///
+    /// most severe first, including each finding's persisted remediation action.
+    ///
     /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
     /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
     /// its store calls take no pass token. Threading one here would mean inventing a caller that
@@ -328,7 +329,8 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// <summary>
     /// Returns the latest analysis run's findings for a server (most recent analysis_time),
     /// most severe first. Unlike the Dashboard twin this read also returns
-    /// remediation_action_json — both reads share one column list and one reader.    ///
+    /// remediation_action_json — both reads share one column list and one reader.
+    ///
     /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
     /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
     /// its store calls take no pass token. Threading one here would mean inventing a caller that
@@ -359,7 +361,8 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     }
 
     /// <summary>
-    /// Mutes a story pattern so it won't appear in future analysis runs.    ///
+    /// Mutes a story pattern so it won't appear in future analysis runs.
+    ///
     /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
     /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
     /// its store calls take no pass token. Threading one here would mean inventing a caller that
@@ -389,7 +392,8 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     }
 
     /// <summary>
-    /// Unmutes a story pattern (Dashboard-twin surface).    ///
+    /// Unmutes a story pattern (Dashboard-twin surface).
+    ///
     /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
     /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
     /// its store calls take no pass token. Threading one here would mean inventing a caller that
@@ -419,7 +423,8 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// global marker); legacy <c>server_id = 0</c> rows written before that fix are honored as global
     /// too (<see cref="GetMutedStoriesSql"/> filters both), so an all-servers mute is visible to every
     /// server. A NULL/0 (global) row here is flagged muted but left un-unmutable from the per-server
-    /// viewer, since deleting it would unmute the pattern everywhere.    ///
+    /// viewer, since deleting it would unmute the pattern everywhere.
+    ///
     /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
     /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
     /// its store calls take no pass token. Threading one here would mean inventing a caller that
@@ -456,7 +461,8 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     }
 
     /// <summary>
-    /// Cleans up old findings beyond the retention period.    ///
+    /// Cleans up old findings beyond the retention period.
+    ///
     /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
     /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
     /// its store calls take no pass token. Threading one here would mean inventing a caller that
