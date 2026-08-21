@@ -724,16 +724,25 @@ public partial class App : Application
             return;
         }
 
-        if (settings.Root == null)
+        if (settings.Text == null)
         {
             return;
         }
 
         try
         {
-            if (settings.Root.TryGetPropertyValue("default_time_range_hours", out var val) && val != null)
+            /* Reads through JsonDocument.TryGetProperty rather than JsonNode.TryGetPropertyValue, which
+               would be the more natural pairing with the guard's parsed Root. Two reasons: it keeps this
+               loader the same shape as LoadAlertSettings below, and #2418's SettingsSampleTests extracts
+               the documented key list by regexing the TryGetProperty key literals out of this very file.
+               Spelled the other way this key silently drops out of that guard, and settings.sample.json is
+               then free to document a setting nothing reads. (Which is also why the call is not written out
+               in this comment: the extractor cannot tell a comment from code, and would read the example as
+               a real key.) */
+            using var doc = System.Text.Json.JsonDocument.Parse(settings.Text);
+            if (doc.RootElement.TryGetProperty("default_time_range_hours", out var val))
             {
-                DefaultTimeRangeHours = val.GetValue<int>();
+                DefaultTimeRangeHours = val.GetInt32();
             }
         }
         catch (Exception ex)
