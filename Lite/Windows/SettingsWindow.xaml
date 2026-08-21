@@ -414,6 +414,16 @@
                     <TextBlock Text="(0.0 - 2.0)" VerticalAlignment="Center" Margin="4,0,0,0"
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 </StackPanel>
+                <!-- #2393: analysis_notify_cooldown_minutes has been read (and clamped) by App.LoadAlertSettings
+                     since the key existed, and the Darling viewer has offered it since #2107; Lite simply never
+                     drew the box, so the one knob that quiets chatty analysis notifications was hand-edit-only. -->
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <TextBlock Text="Re-notify an unchanged finding after" VerticalAlignment="Center" Margin="0,0,8,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AnalysisNotifyCooldownBox" Width="55" TextAlignment="Center" VerticalAlignment="Center"/>
+                    <TextBlock Text="minutes (30 - 10080)" VerticalAlignment="Center" Margin="4,0,0,0"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                </StackPanel>
                 <TextBlock Text="Requires SMTP or a webhook configured below for delivery; findings are recorded in the Alerts tab either way."
                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                            Margin="20,4,0,0" TextWrapping="Wrap"/>
