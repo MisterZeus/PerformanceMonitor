@@ -738,9 +738,14 @@ Every one of these has cost somebody real time.
     tokenless; the moment a `web.network` block exposes it, the browser on the service host has to present the
     token too, because the Custom Views composer made the surface writable.
     ([3.5](#35-reach-it-from-a-browser-on-another-machine))
-11. **A screen of `Warning` server statuses is not an incident.** Status is *collection freshness*, not health —
-    the viewer never pings your servers. `Warning` means the newest collection is older than twice the fastest
-    collector's cadence, which at fleet scale is routine.
+11. **`Warning` means three different things, and you have to look at the card to tell which.**
+    `ClassifyBand` returns `Warning` for any of: a metric at warning severity (CPU, blocking, deadlocks,
+    memory, threads — a real condition on the server), a server still awaiting its first collection, or a
+    **stale collection** — the viewer re-uses its collector-errors flag to carry staleness. Only the first is
+    an incident. On a fresh install the second is normal for every server at once, and at fleet scale the
+    third is routine, so an opening screen of amber usually is not one — but do not generalise that into
+    ignoring it. Hover the status word: since #2429 the tooltip names the reason, and it is built from the
+    same metric rows shown underneath so it cannot disagree with them.
 12. **The Recommendations tab is empty for the first day.** Analysis runs every 30 minutes per server but only
     once the store holds 24 hours of history for that server. A fresh install has not earned findings yet.
 
