@@ -700,6 +700,52 @@ public partial class App : Application
     }
 
     /// <summary>
+    /// Every settings.json key whose VALUE was the wrong shape, accumulated across both loaders and consumed
+    /// once by <see cref="ReportUnreadableSettingsToUser"/> (#2444).
+    ///
+    /// <para>Separate from <see cref="s_unreadableSettingsProblem"/> because they are different failures with
+    /// different costs, and the difference is the whole of #2444. An unparseable DOCUMENT costs every setting
+    /// and there is nothing to enumerate. A badly-shaped VALUE now costs exactly its own key, so the useful
+    /// thing to say is WHICH keys — the message that used to be shown sent someone to proofread an
+    /// eighty-seven-key file with no idea which line was wrong.</para>
+    ///
+    /// <para>They cannot both be set on one run: a document that will not parse never reaches a value read.
+    /// Kept as two fields anyway rather than one string, because collapsing them would make the loaders
+    /// responsible for deciding which message wins, and that decision belongs where the message is shown.</para>
+    /// </summary>
+    private static readonly List<string> s_badSettingValues = new();
+
+    /// <summary>
+    /// Records the keys a loader could not read (#2444): to the log immediately, and to
+    /// <see cref="s_badSettingValues"/> for the one startup dialog.
+    ///
+    /// <para>Reports the whole SET rather than the first. A user who hand-edited one line probably has one
+    /// mistake, but a user who pasted a block out of settings.sample.json has several — and failing on the
+    /// first means they fix it, restart, and discover the next one, several times over. The old code could
+    /// not have done this even in principle: it threw on the first bad value and never reached the rest.</para>
+    /// </summary>
+    private static void ReportBadSettingValues(IReadOnlyList<SettingsValueProblem> problems)
+    {
+        if (problems.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var problem in problems)
+        {
+            if (!s_badSettingValues.Contains(problem.ToString(), StringComparer.Ordinal))
+            {
+                s_badSettingValues.Add(problem.ToString());
+            }
+        }
+
+        AppLogger.Error("Settings",
+            $"settings.json parsed, but {problems.Count} of its values could not be read and are at their " +
+            "defaults for this session. Every OTHER setting in the file loaded normally.\n  " +
+            string.Join("\n  ", problems));
+    }
+
+    /// <summary>
     /// Shows the one-time modal for an unreadable settings.json. Called after the main window exists so it
     /// cannot be the app's entire first impression, and so a later startup failure still fails the way it
     /// did before.
@@ -713,6 +759,11 @@ public partial class App : Application
         var problem = s_unreadableSettingsProblem;
         if (problem == null)
         {
+            /* #2444: the document parsed, so if anything went wrong it was individual VALUES, and this is the
+               only place that says so where someone will see it. Deliberately a second message rather than a
+               second dialog — the two cannot both happen on one run, and an app that opens two modals before
+               its first window is used is an app people click through. */
+            ReportBadSettingValuesToUser();
             return;
         }
 
@@ -725,6 +776,36 @@ public partial class App : Application
             "Your file has not been changed. Fix it and restart to get your settings back. If you save from " +
             "the Settings window instead, the unreadable file is copied aside as " +
             "settings.json.unreadable-<timestamp> first, so it is recoverable either way.",
+            "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+    }
+
+    /// <summary>
+    /// The visible half of #2444: the keys that fell back, by name, once the main window is up.
+    ///
+    /// <para>Visible at all because a log line is not a startup message. The value half used to log and stop
+    /// there, so a user whose thresholds had silently reverted had no signal unless they went looking — and
+    /// #2425 had already decided, for the document half, that someone looking at an app which has forgotten
+    /// its configuration should not have to find a log to learn why. The same argument applies to a setting
+    /// that reverted; what is new is that the message can now be specific enough to act on, which is what
+    /// makes it worth a dialog rather than noise.</para>
+    ///
+    /// <para>It says what SURVIVED as well as what did not, because "a value could not be read" over an
+    /// eighty-seven-key file reads as "everything is gone" — which is what it used to mean.</para>
+    /// </summary>
+    private static void ReportBadSettingValuesToUser()
+    {
+        if (s_badSettingValues.Count == 0)
+        {
+            return;
+        }
+
+        MessageBox.Show(
+            $"{s_badSettingValues.Count} setting(s) in settings.json could not be read and are at their " +
+            "defaults for this session. Everything else in the file loaded normally.\n\n" +
+            $"{Path.Combine(ConfigDirectory, "settings.json")}\n\n" +
+            string.Join("\n", s_badSettingValues) + "\n\n" +
+            "Your file has not been changed. Fix these values and restart, or save from the Settings window " +
+            "to write the current values back over them.",
             "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
     }
 
@@ -744,24 +825,30 @@ public partial class App : Application
 
         try
         {
-            /* Reads through JsonDocument.TryGetProperty rather than JsonNode.TryGetPropertyValue, which
-               would be the more natural pairing with the guard's parsed Root. Two reasons: it keeps this
-               loader the same shape as LoadAlertSettings below, and #2418's SettingsSampleTests extracts
-               the documented key list by regexing the TryGetProperty key literals out of this very file.
-               Spelled the other way this key silently drops out of that guard, and settings.sample.json is
-               then free to document a setting nothing reads. (Which is also why the call is not written out
-               in this comment: the extractor cannot tell a comment from code, and would read the example as
-               a real key.) */
+            /* Reads through a SettingsReader rather than JsonNode.TryGetPropertyValue, which would be the
+               more natural pairing with the guard's parsed Root. Two reasons: it keeps this loader the same
+               shape as LoadAlertSettings below, and #2418's SettingsSampleTests extracts the documented key
+               list by regexing the TryGetProperty key literals out of this very file. Spelled any other way
+               this key silently drops out of that guard, and settings.sample.json is then free to document a
+               setting nothing reads. (Which is also why the call is not written out in this comment: the
+               extractor cannot tell a comment from code, and would read the example as a real key.) */
             using var doc = System.Text.Json.JsonDocument.Parse(settings.Text);
-            if (doc.RootElement.TryGetProperty("default_time_range_hours", out var val))
+            var read = new SettingsReader(doc.RootElement);
+
+            if (read.TryGetProperty("default_time_range_hours", out var val))
             {
-                DefaultTimeRangeHours = val.GetInt32();
+                DefaultTimeRangeHours = val.Int(DefaultTimeRangeHours);
             }
+
+            /* #2444: this loader already named its one key, which is the behaviour LoadAlertSettings could
+               not manage across eighty-seven. It now says so through the shared reporter instead of its own
+               log line, so the startup dialog can name this key beside the others. */
+            ReportBadSettingValues(read.Problems);
         }
         catch (Exception ex)
         {
-            /* The document parsed, so anything landing here is ONE bad value rather than a broken file.
-               That distinction is worth keeping: the key it names is the only thing that fell back. */
+            /* The document parsed and every value read is shape-checked rather than caught, so nothing
+               EXPECTED lands here any more. Kept because an unexpected throw must not take startup down. */
             AppLogger.Warn("Settings",
                 $"settings.json key 'default_time_range_hours' could not be read ({ex.Message}); the " +
                 $"default of {DefaultTimeRangeHours} hours is in use.");
@@ -813,100 +900,125 @@ public partial class App : Application
         try
         {
             using var doc = System.Text.Json.JsonDocument.Parse(settings.Text);
-            var root = doc.RootElement;
 
-            if (root.TryGetProperty("alerts_enabled", out var v)) AlertsEnabled = v.GetBoolean();
-            if (root.TryGetProperty("notify_connection_changes", out v)) NotifyConnectionChanges = v.GetBoolean();
-            if (root.TryGetProperty("notify_connection_down_at_startup", out v)) NotifyConnectionDownAtStartup = v.GetBoolean();
-            if (root.TryGetProperty("connection_refire_minutes", out v)) ConnectionRefireMinutes = Math.Clamp(v.GetInt32(), 0, 1440);
+            /* #2444: every read below goes through SettingsReader, which checks ValueKind and RECORDS a key
+               it cannot read instead of throwing on it. Before this, all eighty-seven shared one try, so one
+               key of the wrong shape abandoned every read after it and which settings survived depended on
+               where the bad key sat in the file — an implementation detail of this method's line order.
+
+               The reads keep their existing call shape on purpose and not by habit: #2418's
+               SettingsSampleTests regexes the key literals out of this file by the method NAME, and requires
+               every key it finds to be documented in settings.sample.json and vice versa. A helper spelled
+               any other way makes all eighty-seven vanish from that extraction and lets the sample drift
+               exactly the way #2418 was filed about -- which is what PR #2428 hit. So SettingsReader's method
+               carries the same name deliberately, and the extractor needed no change. (The call is not
+               written out here for the reason the sibling loader above gives: the extractor cannot tell a
+               comment from code, and would read the example as a real key.)
+
+               The clamps moved into the reader with the reads. They were repeated inline at every call site,
+               and two of the forms — (int)Math.Max(0, v.GetInt64()) — narrowed AFTER the floor, so a
+               hand-typed value beyond int range wrapped negative. Int(fallback, min, max) clamps first. */
+            var read = new SettingsReader(doc.RootElement);
+
+            if (read.TryGetProperty("alerts_enabled", out var v)) AlertsEnabled = v.Bool(AlertsEnabled);
+            if (read.TryGetProperty("notify_connection_changes", out v)) NotifyConnectionChanges = v.Bool(NotifyConnectionChanges);
+            if (read.TryGetProperty("notify_connection_down_at_startup", out v)) NotifyConnectionDownAtStartup = v.Bool(NotifyConnectionDownAtStartup);
+            if (read.TryGetProperty("connection_refire_minutes", out v)) ConnectionRefireMinutes = v.Int(ConnectionRefireMinutes, 0, 1440);
             /* #1696 AG knobs, clamped on READ to the same ranges Darling clamps, so a hand-edited settings.json
                cannot drive a nonsense threshold in either app. */
-            if (root.TryGetProperty("notify_ag_health", out v)) NotifyAgHealth = v.GetBoolean();
-            if (root.TryGetProperty("ag_lag_alert_seconds", out v)) AgLagAlertSeconds = Math.Clamp(v.GetInt32(), 0, 86400);
-            if (root.TryGetProperty("ag_redo_queue_alert_kb", out v)) AgRedoQueueAlertKb = Math.Clamp(v.GetInt64(), 0L, 1073741824L);
-            if (root.TryGetProperty("ag_disconnect_refire_minutes", out v)) AgDisconnectRefireMinutes = Math.Clamp(v.GetInt32(), 0, 1440);
-            if (root.TryGetProperty("alert_cpu_enabled", out v)) AlertCpuEnabled = v.GetBoolean();
-            if (root.TryGetProperty("alert_cpu_threshold", out v)) AlertCpuThreshold = v.GetInt32();
-            if (root.TryGetProperty("alert_cpu_mode", out v) && Enum.TryParse<CpuAlertMode>(v.GetString(), out var mode))
+            if (read.TryGetProperty("notify_ag_health", out v)) NotifyAgHealth = v.Bool(NotifyAgHealth);
+            if (read.TryGetProperty("ag_lag_alert_seconds", out v)) AgLagAlertSeconds = v.Int(AgLagAlertSeconds, 0, 86400);
+            if (read.TryGetProperty("ag_redo_queue_alert_kb", out v)) AgRedoQueueAlertKb = v.Long(AgRedoQueueAlertKb, 0L, 1073741824L);
+            if (read.TryGetProperty("ag_disconnect_refire_minutes", out v)) AgDisconnectRefireMinutes = v.Int(AgDisconnectRefireMinutes, 0, 1440);
+            if (read.TryGetProperty("alert_cpu_enabled", out v)) AlertCpuEnabled = v.Bool(AlertCpuEnabled);
+            if (read.TryGetProperty("alert_cpu_threshold", out v)) AlertCpuThreshold = v.Int(AlertCpuThreshold);
+            if (read.TryGetProperty("alert_cpu_mode", out v) && Enum.TryParse<CpuAlertMode>(v.TextOrNull(), out var mode))
                 AlertCpuMode = mode;
-            if (root.TryGetProperty("alert_blocking_enabled", out v)) AlertBlockingEnabled = v.GetBoolean();
-            if (root.TryGetProperty("alert_blocking_threshold", out v)) AlertBlockingThreshold = v.GetInt32();
-            if (root.TryGetProperty("alert_blocking_wait_seconds_threshold", out v)) AlertBlockingWaitSecondsThreshold = v.GetInt32();
-            if (root.TryGetProperty("alert_deadlock_enabled", out v)) AlertDeadlockEnabled = v.GetBoolean();
-            if (root.TryGetProperty("alert_deadlock_threshold", out v)) AlertDeadlockThreshold = v.GetInt32();
-            if (root.TryGetProperty("alert_poison_wait_enabled", out v)) AlertPoisonWaitEnabled = v.GetBoolean();
-            if (root.TryGetProperty("alert_poison_wait_threshold_ms", out v)) AlertPoisonWaitThresholdMs = v.GetInt32();
-            if (root.TryGetProperty("alert_long_running_query_enabled", out v)) AlertLongRunningQueryEnabled = v.GetBoolean();
-            if (root.TryGetProperty("alert_long_running_query_threshold_minutes", out v)) AlertLongRunningQueryThresholdMinutes = v.GetInt32();
-            if (root.TryGetProperty("alert_long_running_query_max_results", out v)) AlertLongRunningQueryMaxResults = (int)Math.Clamp(v.GetInt64(), 1, 1000);
-            if (root.TryGetProperty("alert_long_running_query_exclude_sp_server_diagnostics", out v)) AlertLongRunningQueryExcludeSpServerDiagnostics = v.GetBoolean();
-            if (root.TryGetProperty("alert_long_running_query_exclude_waitfor", out v)) AlertLongRunningQueryExcludeWaitFor = v.GetBoolean();
-            if (root.TryGetProperty("alert_long_running_query_exclude_backups", out v)) AlertLongRunningQueryExcludeBackups = v.GetBoolean();
-            if (root.TryGetProperty("alert_long_running_query_exclude_misc_waits", out v)) AlertLongRunningQueryExcludeMiscWaits = v.GetBoolean();
-            if (root.TryGetProperty("alert_long_running_query_exclude_cdc", out v)) AlertLongRunningQueryExcludeCdc = v.GetBoolean();
-            if (root.TryGetProperty("alert_excluded_databases", out v) && v.ValueKind == System.Text.Json.JsonValueKind.Array)
+            if (read.TryGetProperty("alert_blocking_enabled", out v)) AlertBlockingEnabled = v.Bool(AlertBlockingEnabled);
+            if (read.TryGetProperty("alert_blocking_threshold", out v)) AlertBlockingThreshold = v.Int(AlertBlockingThreshold);
+            if (read.TryGetProperty("alert_blocking_wait_seconds_threshold", out v)) AlertBlockingWaitSecondsThreshold = v.Int(AlertBlockingWaitSecondsThreshold);
+            if (read.TryGetProperty("alert_deadlock_enabled", out v)) AlertDeadlockEnabled = v.Bool(AlertDeadlockEnabled);
+            if (read.TryGetProperty("alert_deadlock_threshold", out v)) AlertDeadlockThreshold = v.Int(AlertDeadlockThreshold);
+            if (read.TryGetProperty("alert_poison_wait_enabled", out v)) AlertPoisonWaitEnabled = v.Bool(AlertPoisonWaitEnabled);
+            if (read.TryGetProperty("alert_poison_wait_threshold_ms", out v)) AlertPoisonWaitThresholdMs = v.Int(AlertPoisonWaitThresholdMs);
+            if (read.TryGetProperty("alert_long_running_query_enabled", out v)) AlertLongRunningQueryEnabled = v.Bool(AlertLongRunningQueryEnabled);
+            if (read.TryGetProperty("alert_long_running_query_threshold_minutes", out v)) AlertLongRunningQueryThresholdMinutes = v.Int(AlertLongRunningQueryThresholdMinutes);
+            if (read.TryGetProperty("alert_long_running_query_max_results", out v)) AlertLongRunningQueryMaxResults = v.Int(AlertLongRunningQueryMaxResults, 1, 1000);
+            if (read.TryGetProperty("alert_long_running_query_exclude_sp_server_diagnostics", out v)) AlertLongRunningQueryExcludeSpServerDiagnostics = v.Bool(AlertLongRunningQueryExcludeSpServerDiagnostics);
+            if (read.TryGetProperty("alert_long_running_query_exclude_waitfor", out v)) AlertLongRunningQueryExcludeWaitFor = v.Bool(AlertLongRunningQueryExcludeWaitFor);
+            if (read.TryGetProperty("alert_long_running_query_exclude_backups", out v)) AlertLongRunningQueryExcludeBackups = v.Bool(AlertLongRunningQueryExcludeBackups);
+            if (read.TryGetProperty("alert_long_running_query_exclude_misc_waits", out v)) AlertLongRunningQueryExcludeMiscWaits = v.Bool(AlertLongRunningQueryExcludeMiscWaits);
+            if (read.TryGetProperty("alert_long_running_query_exclude_cdc", out v)) AlertLongRunningQueryExcludeCdc = v.Bool(AlertLongRunningQueryExcludeCdc);
+            if (read.TryGetProperty("alert_excluded_databases", out v) && v.IsArray())
             {
                 AlertExcludedDatabases = new List<string>();
-                foreach (var elem in v.EnumerateArray())
+
+                /* The ELEMENT kind is filtered rather than read, which the fleet-group list below already
+                   did: elem.GetString() throws on a number in the array, and inside the old single try that
+                   one element cost every setting after it. It is skipped rather than reported — an element
+                   has no key to name, and the list itself is not the thing that failed. */
+                foreach (var elem in v.Element.EnumerateArray())
                 {
-                    var db = elem.GetString();
+                    var db = elem.ValueKind == JsonValueKind.String ? elem.GetString() : null;
                     if (!string.IsNullOrWhiteSpace(db)) AlertExcludedDatabases.Add(db);
                 }
             }
-            if (root.TryGetProperty("alert_tempdb_space_enabled", out v)) AlertTempDbSpaceEnabled = v.GetBoolean();
-            if (root.TryGetProperty("alert_tempdb_space_threshold_percent", out v)) AlertTempDbSpaceThresholdPercent = v.GetInt32();
-            if (root.TryGetProperty("alert_low_disk_enabled", out v)) AlertLowDiskEnabled = v.GetBoolean();
-            if (root.TryGetProperty("alert_low_disk_threshold_percent", out v)) AlertLowDiskThresholdPercent = (int)Math.Clamp(v.GetInt64(), 0, 100);
-            if (root.TryGetProperty("alert_low_disk_threshold_gb", out v)) AlertLowDiskThresholdGb = (int)Math.Max(0, v.GetInt64());
+            if (read.TryGetProperty("alert_tempdb_space_enabled", out v)) AlertTempDbSpaceEnabled = v.Bool(AlertTempDbSpaceEnabled);
+            if (read.TryGetProperty("alert_tempdb_space_threshold_percent", out v)) AlertTempDbSpaceThresholdPercent = v.Int(AlertTempDbSpaceThresholdPercent);
+            if (read.TryGetProperty("alert_low_disk_enabled", out v)) AlertLowDiskEnabled = v.Bool(AlertLowDiskEnabled);
+            if (read.TryGetProperty("alert_low_disk_threshold_percent", out v)) AlertLowDiskThresholdPercent = v.Int(AlertLowDiskThresholdPercent, 0, 100);
+            if (read.TryGetProperty("alert_low_disk_threshold_gb", out v)) AlertLowDiskThresholdGb = v.Int(AlertLowDiskThresholdGb, 0, int.MaxValue);
             /* #2107: the CRITICAL tier floors, clamped like the WARNING thresholds above. */
-            if (root.TryGetProperty("alert_disk_critical_free_percent", out v)) AlertDiskCriticalFreePercent = Math.Clamp(v.GetInt32(), 0, 100);
-            if (root.TryGetProperty("alert_disk_critical_free_gb", out v)) AlertDiskCriticalFreeGb = (int)Math.Max(0, v.GetInt64());
-            if (root.TryGetProperty("alert_pvs_enabled", out v)) AlertPvsEnabled = v.GetBoolean();
-            if (root.TryGetProperty("alert_pvs_threshold_percent", out v)) AlertPvsThresholdPercent = (int)Math.Clamp(v.GetInt64(), 0, 100);
-            if (root.TryGetProperty("alert_file_growth_enabled", out v)) AlertFileGrowthEnabled = v.GetBoolean();
-            if (root.TryGetProperty("alert_file_growth_rise_mb", out v)) AlertFileGrowthRiseMb = (int)Math.Max(0, v.GetInt64());
-            if (root.TryGetProperty("alert_file_growth_volume_percent", out v)) AlertFileGrowthVolumePercent = (int)Math.Clamp(v.GetInt64(), 0, 100);
-            if (root.TryGetProperty("alert_file_growth_lookback_minutes", out v)) AlertFileGrowthLookbackMinutes = (int)Math.Clamp(v.GetInt64(), 5, 1440);
-            if (root.TryGetProperty("alert_pvs_floor_gb", out v)) AlertPvsFloorGb = (int)Math.Max(0, v.GetInt64());
-            if (root.TryGetProperty("alert_long_running_job_enabled", out v)) AlertLongRunningJobEnabled = v.GetBoolean();
-            if (root.TryGetProperty("alert_long_running_job_multiplier", out v)) AlertLongRunningJobMultiplier = v.GetInt32();
-            if (root.TryGetProperty("alert_failed_job_enabled", out v)) AlertFailedJobEnabled = v.GetBoolean();
-            if (root.TryGetProperty("alert_failed_job_lookback_minutes", out v)) AlertFailedJobLookbackMinutes = (int)Math.Clamp(v.GetInt64(), 1, 1440);
-            if (root.TryGetProperty("alert_database_state_enabled", out v)) AlertDatabaseStateEnabled = v.GetBoolean();
-            if (root.TryGetProperty("alert_cooldown_minutes", out v)) AlertCooldownMinutes = (int)Math.Clamp(v.GetInt64(), 1, 120);
-            if (root.TryGetProperty("email_cooldown_minutes", out v)) EmailCooldownMinutes = (int)Math.Clamp(v.GetInt64(), 1, 120);
-            if (root.TryGetProperty("alert_delivery_mode", out v) && Enum.TryParse<AlertNotificationMode>(v.GetString(), out var deliveryMode))
+            if (read.TryGetProperty("alert_disk_critical_free_percent", out v)) AlertDiskCriticalFreePercent = v.Int(AlertDiskCriticalFreePercent, 0, 100);
+            if (read.TryGetProperty("alert_disk_critical_free_gb", out v)) AlertDiskCriticalFreeGb = v.Int(AlertDiskCriticalFreeGb, 0, int.MaxValue);
+            if (read.TryGetProperty("alert_pvs_enabled", out v)) AlertPvsEnabled = v.Bool(AlertPvsEnabled);
+            if (read.TryGetProperty("alert_pvs_threshold_percent", out v)) AlertPvsThresholdPercent = v.Int(AlertPvsThresholdPercent, 0, 100);
+            if (read.TryGetProperty("alert_file_growth_enabled", out v)) AlertFileGrowthEnabled = v.Bool(AlertFileGrowthEnabled);
+            if (read.TryGetProperty("alert_file_growth_rise_mb", out v)) AlertFileGrowthRiseMb = v.Int(AlertFileGrowthRiseMb, 0, int.MaxValue);
+            if (read.TryGetProperty("alert_file_growth_volume_percent", out v)) AlertFileGrowthVolumePercent = v.Int(AlertFileGrowthVolumePercent, 0, 100);
+            if (read.TryGetProperty("alert_file_growth_lookback_minutes", out v)) AlertFileGrowthLookbackMinutes = v.Int(AlertFileGrowthLookbackMinutes, 5, 1440);
+            if (read.TryGetProperty("alert_pvs_floor_gb", out v)) AlertPvsFloorGb = v.Int(AlertPvsFloorGb, 0, int.MaxValue);
+            if (read.TryGetProperty("alert_long_running_job_enabled", out v)) AlertLongRunningJobEnabled = v.Bool(AlertLongRunningJobEnabled);
+            if (read.TryGetProperty("alert_long_running_job_multiplier", out v)) AlertLongRunningJobMultiplier = v.Int(AlertLongRunningJobMultiplier);
+            if (read.TryGetProperty("alert_failed_job_enabled", out v)) AlertFailedJobEnabled = v.Bool(AlertFailedJobEnabled);
+            if (read.TryGetProperty("alert_failed_job_lookback_minutes", out v)) AlertFailedJobLookbackMinutes = v.Int(AlertFailedJobLookbackMinutes, 1, 1440);
+            if (read.TryGetProperty("alert_database_state_enabled", out v)) AlertDatabaseStateEnabled = v.Bool(AlertDatabaseStateEnabled);
+            if (read.TryGetProperty("alert_cooldown_minutes", out v)) AlertCooldownMinutes = v.Int(AlertCooldownMinutes, 1, 120);
+            if (read.TryGetProperty("email_cooldown_minutes", out v)) EmailCooldownMinutes = v.Int(EmailCooldownMinutes, 1, 120);
+            if (read.TryGetProperty("alert_delivery_mode", out v) && Enum.TryParse<AlertNotificationMode>(v.TextOrNull(), out var deliveryMode))
                 AlertDeliveryMode = deliveryMode;
-            if (root.TryGetProperty("alert_per_event_max_per_cycle", out v)) AlertPerEventMaxPerCycle = (int)Math.Clamp(v.GetInt64(), 1, 100);
-            if (root.TryGetProperty("mute_rule_default_expiration", out v))
+            if (read.TryGetProperty("alert_per_event_max_per_cycle", out v)) AlertPerEventMaxPerCycle = v.Int(AlertPerEventMaxPerCycle, 1, 100);
+            if (read.TryGetProperty("mute_rule_default_expiration", out v))
             {
-                var exp = v.GetString();
+                var exp = v.TextOrNull();
                 if (exp is "1 hour" or "24 hours" or "7 days" or "Never")
                     MuteRuleDefaultExpiration = exp;
             }
-            if (root.TryGetProperty("log_alert_dismissals", out v)) LogAlertDismissals = v.GetBoolean();
+            if (read.TryGetProperty("log_alert_dismissals", out v)) LogAlertDismissals = v.Bool(LogAlertDismissals);
 
             /* Connection settings */
-            if (root.TryGetProperty("connection_timeout_seconds", out v))
+            if (read.TryGetProperty("connection_timeout_seconds", out v))
             {
-                var timeout = v.GetInt32();
+                /* Rejected rather than clamped, which is why it does not use the reader's clamping overload:
+                   an out-of-range timeout here has always been ignored in favour of the current value. */
+                var timeout = v.Int(ConnectionTimeoutSeconds);
                 if (timeout >= 5 && timeout <= 60) ConnectionTimeoutSeconds = timeout;
             }
 
             /* CSV export settings */
-            if (root.TryGetProperty("csv_separator", out v))
+            if (read.TryGetProperty("csv_separator", out v))
             {
-                var sep = v.GetString();
+                var sep = v.TextOrNull();
                 if (sep == "," || sep == ";" || sep == "\t") CsvSeparator = sep;
             }
 
             /* System tray settings */
-            if (root.TryGetProperty("minimize_to_tray", out v)) MinimizeToTray = v.GetBoolean();
+            if (read.TryGetProperty("minimize_to_tray", out v)) MinimizeToTray = v.Bool(MinimizeToTray);
 
             /* Time display mode */
-            if (root.TryGetProperty("time_display_mode", out v))
+            if (read.TryGetProperty("time_display_mode", out v))
             {
-                var t = v.GetString();
+                var t = v.TextOrNull();
                 if (t == "ServerTime" || t == "LocalTime" || t == "UTC")
                 {
                     TimeDisplayMode = t;
@@ -916,62 +1028,62 @@ public partial class App : Application
             }
 
             /* Color theme */
-            if (root.TryGetProperty("color_theme", out v))
+            if (read.TryGetProperty("color_theme", out v))
             {
-                var t = v.GetString();
+                var t = v.TextOrNull();
                 if (t == "Dark" || t == "Light" || t == "CoolBreeze") ColorTheme = t;
             }
 
             /* NOC Overview tile sort */
-            if (root.TryGetProperty("overview_sort_mode", out v)) OverviewSortMode = ServerOverviewSort.ParseMode(v.GetString());
+            if (read.TryGetProperty("overview_sort_mode", out v)) OverviewSortMode = ServerOverviewSort.ParseMode(v.TextOrNull());
 
             /* Sidebar fleet-tree collapsed groups (#2020 2b-i-b) */
-            if (root.TryGetProperty("collapsed_fleet_groups", out v) && v.ValueKind == JsonValueKind.Array)
+            if (read.TryGetProperty("collapsed_fleet_groups", out v) && v.IsArray())
             {
-                CollapsedFleetGroups = v.EnumerateArray()
+                CollapsedFleetGroups = v.Element.EnumerateArray()
                     .Where(e => e.ValueKind == JsonValueKind.String)
                     .Select(e => e.GetString()!)
                     .ToList();
             }
 
             /* Update check settings */
-            if (root.TryGetProperty("check_for_updates_on_startup", out v)) CheckForUpdatesOnStartup = v.GetBoolean();
+            if (read.TryGetProperty("check_for_updates_on_startup", out v)) CheckForUpdatesOnStartup = v.Bool(CheckForUpdatesOnStartup);
 
             /* Teams webhook settings */
-            if (root.TryGetProperty("teams_webhook_enabled", out v)) TeamsWebhookEnabled = v.GetBoolean();
-            if (root.TryGetProperty("teams_proxy_address", out v)) TeamsProxyAddress = v.GetString() ?? "";
+            if (read.TryGetProperty("teams_webhook_enabled", out v)) TeamsWebhookEnabled = v.Bool(TeamsWebhookEnabled);
+            if (read.TryGetProperty("teams_proxy_address", out v)) TeamsProxyAddress = v.Text(TeamsProxyAddress);
 
             /* Slack webhook settings */
-            if (root.TryGetProperty("slack_webhook_enabled", out v)) SlackWebhookEnabled = v.GetBoolean();
-            if (root.TryGetProperty("slack_proxy_address", out v)) SlackProxyAddress = v.GetString() ?? "";
+            if (read.TryGetProperty("slack_webhook_enabled", out v)) SlackWebhookEnabled = v.Bool(SlackWebhookEnabled);
+            if (read.TryGetProperty("slack_proxy_address", out v)) SlackProxyAddress = v.Text(SlackProxyAddress);
 
             /* Generic webhook settings (#1506). The URL + headers JSON are secrets and load from Credential
                Manager below; only these three are plain prefs. */
-            if (root.TryGetProperty("generic_webhook_enabled", out v)) GenericWebhookEnabled = v.GetBoolean();
-            if (root.TryGetProperty("generic_proxy_address", out v)) GenericWebhookProxyAddress = v.GetString() ?? "";
-            if (root.TryGetProperty("generic_body_template", out v)) GenericWebhookBodyTemplate = v.GetString() ?? "";
+            if (read.TryGetProperty("generic_webhook_enabled", out v)) GenericWebhookEnabled = v.Bool(GenericWebhookEnabled);
+            if (read.TryGetProperty("generic_proxy_address", out v)) GenericWebhookProxyAddress = v.Text(GenericWebhookProxyAddress);
+            if (read.TryGetProperty("generic_body_template", out v)) GenericWebhookBodyTemplate = v.Text(GenericWebhookBodyTemplate);
 
             /* PagerDuty webhook settings. The routing key is a secret and loads from Credential Manager below;
                only the enable flag and EU-region toggle are plain prefs. */
-            if (root.TryGetProperty("pagerduty_webhook_enabled", out v)) PagerDutyWebhookEnabled = v.GetBoolean();
-            if (root.TryGetProperty("pagerduty_use_eu_region", out v)) PagerDutyUseEuRegion = v.GetBoolean();
-            if (root.TryGetProperty("pagerduty_proxy_address", out v)) PagerDutyProxyAddress = v.GetString() ?? "";
+            if (read.TryGetProperty("pagerduty_webhook_enabled", out v)) PagerDutyWebhookEnabled = v.Bool(PagerDutyWebhookEnabled);
+            if (read.TryGetProperty("pagerduty_use_eu_region", out v)) PagerDutyUseEuRegion = v.Bool(PagerDutyUseEuRegion);
+            if (read.TryGetProperty("pagerduty_proxy_address", out v)) PagerDutyProxyAddress = v.Text(PagerDutyProxyAddress);
 
             /* Migrate webhook URLs from plaintext settings.json to Credential Manager. A legacy plaintext
                URL still wins over whatever the store held, matching the old order (save, then read back);
                the live property is set here rather than re-reading, since we just wrote the value. */
-            if (root.TryGetProperty("teams_webhook_url", out v))
+            if (read.TryGetProperty("teams_webhook_url", out v))
             {
-                var legacyUrl = v.GetString() ?? "";
+                var legacyUrl = v.Text("");
                 if (!string.IsNullOrWhiteSpace(legacyUrl))
                 {
                     writeSecret(TeamsWebhookCredentialKey, legacyUrl);
                     TeamsWebhookUrl = legacyUrl;
                 }
             }
-            if (root.TryGetProperty("slack_webhook_url", out v))
+            if (read.TryGetProperty("slack_webhook_url", out v))
             {
-                var legacyUrl = v.GetString() ?? "";
+                var legacyUrl = v.Text("");
                 if (!string.IsNullOrWhiteSpace(legacyUrl))
                 {
                     writeSecret(SlackWebhookCredentialKey, legacyUrl);
@@ -980,33 +1092,37 @@ public partial class App : Application
             }
 
             /* SMTP settings */
-            if (root.TryGetProperty("smtp_enabled", out v)) SmtpEnabled = v.GetBoolean();
-            if (root.TryGetProperty("smtp_server", out v)) SmtpServer = v.GetString() ?? "";
-            if (root.TryGetProperty("smtp_port", out v)) SmtpPort = v.GetInt32();
-            if (root.TryGetProperty("smtp_use_ssl", out v)) SmtpUseSsl = v.GetBoolean();
-            if (root.TryGetProperty("smtp_username", out v)) SmtpUsername = v.GetString() ?? "";
-            if (root.TryGetProperty("smtp_from_address", out v)) SmtpFromAddress = v.GetString() ?? "";
-            if (root.TryGetProperty("smtp_recipients", out v)) SmtpRecipients = v.GetString() ?? "";
+            if (read.TryGetProperty("smtp_enabled", out v)) SmtpEnabled = v.Bool(SmtpEnabled);
+            if (read.TryGetProperty("smtp_server", out v)) SmtpServer = v.Text(SmtpServer);
+            if (read.TryGetProperty("smtp_port", out v)) SmtpPort = v.Int(SmtpPort);
+            if (read.TryGetProperty("smtp_use_ssl", out v)) SmtpUseSsl = v.Bool(SmtpUseSsl);
+            if (read.TryGetProperty("smtp_username", out v)) SmtpUsername = v.Text(SmtpUsername);
+            if (read.TryGetProperty("smtp_from_address", out v)) SmtpFromAddress = v.Text(SmtpFromAddress);
+            if (read.TryGetProperty("smtp_recipients", out v)) SmtpRecipients = v.Text(SmtpRecipients);
 
-            if (root.TryGetProperty("analysis_enabled", out v)) AnalysisEnabled = v.GetBoolean();
-            if (root.TryGetProperty("query_store_backfill_enabled", out v)) QueryStoreBackfillEnabled = v.GetBoolean();
-            if (root.TryGetProperty("analysis_notifications_enabled", out v)) AnalysisNotificationsEnabled = v.GetBoolean();
-            if (root.TryGetProperty("analysis_interval_minutes", out v)) AnalysisIntervalMinutes = (int)Math.Clamp(v.GetInt64(), 5, 360);
-            if (root.TryGetProperty("analysis_notify_severity", out v)) AnalysisNotifySeverity = Math.Clamp(v.GetDouble(), 0.0, 2.0);
-            if (root.TryGetProperty("analysis_notify_cooldown_minutes", out v)) AnalysisNotifyCooldownMinutes = (int)Math.Clamp(v.GetInt64(), 30, 10080);
-            if (root.TryGetProperty("analysis_timeout_seconds", out v)) AnalysisTimeoutSeconds = (int)Math.Clamp(v.GetInt64(), 30, 600);
+            if (read.TryGetProperty("analysis_enabled", out v)) AnalysisEnabled = v.Bool(AnalysisEnabled);
+            if (read.TryGetProperty("query_store_backfill_enabled", out v)) QueryStoreBackfillEnabled = v.Bool(QueryStoreBackfillEnabled);
+            if (read.TryGetProperty("analysis_notifications_enabled", out v)) AnalysisNotificationsEnabled = v.Bool(AnalysisNotificationsEnabled);
+            if (read.TryGetProperty("analysis_interval_minutes", out v)) AnalysisIntervalMinutes = v.Int(AnalysisIntervalMinutes, 5, 360);
+            if (read.TryGetProperty("analysis_notify_severity", out v)) AnalysisNotifySeverity = v.Double(AnalysisNotifySeverity, 0.0, 2.0);
+            if (read.TryGetProperty("analysis_notify_cooldown_minutes", out v)) AnalysisNotifyCooldownMinutes = v.Int(AnalysisNotifyCooldownMinutes, 30, 10080);
+            if (read.TryGetProperty("analysis_timeout_seconds", out v)) AnalysisTimeoutSeconds = v.Int(AnalysisTimeoutSeconds, 30, 600);
+
+            /* #2444: reported AFTER every read, which is the point — the whole set, named, and every key that
+               was fine applied. Empty on a healthy file, so this costs nothing on the normal path. */
+            ReportBadSettingValues(read.Problems);
         }
         catch (Exception ex)
         {
             /* SettingsFileGuard already parsed this exact text, so nothing reaching here is a document-level
-               fault. It is one key holding a value of the wrong shape — a quoted number, a string where a
-               bool belongs — and every key AFTER it keeps its default too. Which key that was is not known
-               here; isolating each of the eighty-eight behind its own try would name it, and that is filed
-               separately rather than smuggled into this fix. Saying it happened is the part that was
-               missing. */
+               fault — and since #2444 nothing reaching here is a badly-shaped VALUE either, because those are
+               checked by kind and recorded rather than thrown. So this catch no longer has a known cause and
+               is kept only so that an unforeseen one cannot take startup down with it. Note what it costs
+               when it does fire: the reads are ordered, so anything after the throw is still lost, which is
+               the residue this fix removes for every case it can name. */
             AppLogger.Error("Settings",
-                "settings.json parsed, but a value in it could not be read, so that key and every alert " +
-                "setting after it are at their defaults for this session", ex);
+                "settings.json parsed, but reading its values failed unexpectedly, so some alert settings " +
+                "are at their defaults for this session", ex);
         }
     }
 
