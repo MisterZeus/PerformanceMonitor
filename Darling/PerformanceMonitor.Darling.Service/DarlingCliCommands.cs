@@ -2927,13 +2927,6 @@ public static class DarlingCliCommands
         };
 
     /// <summary>
-    /// Creates or removes every scoped Darling firewall rule so the live firewall matches darling.json.
-    /// Requires elevation (that is the entire point of the verb) and is idempotent — safe to re-run on every
-    /// upgrade, which is exactly how install-darling.ps1 uses it. Returns 0 when the firewall ends up matching
-    /// the config, 1 when it could not be made to.
-    /// </summary>
-    [SupportedOSPlatform("windows")]
-    /// <summary>
     /// One target of <see cref="HardenFiles"/>: a path, whether the interactive operator legitimately reads it,
     /// and what it is called in the report. Kept as data so the list is readable as a policy rather than as
     /// control flow — which file gets INTERACTIVE read is the only judgement in this verb, and it should be
@@ -3126,6 +3119,119 @@ public static class DarlingCliCommands
         }
     }
 
+    /// <summary>What the NOT-elevated <c>--configure-firewall</c> branch owes the operator for one surface
+    /// (#2445), and therefore whether an elevated shell really has work to do.</summary>
+    public enum FirewallHandoff
+    {
+        /// <summary>Nothing to hand over — the desired state already holds, or this run is not entitled to ask
+        /// for the change. Prints no command and does not make the verb fail.</summary>
+        Nothing,
+
+        /// <summary>A rule has to be CREATED. Prints the enable command and fails the verb, exactly as this
+        /// branch always has for an Open plan.</summary>
+        OpenCommand,
+
+        /// <summary>A rule the desired state forbids was FOUND by the read-only probe. Prints the same sweep
+        /// command the elevated path would have run, and fails the verb — there is measured elevated work.</summary>
+        SweepCommand,
+
+        /// <summary>The probe could not answer, so whether such a rule exists is unknown. Prints the sweep
+        /// command, because it is a no-op when there is nothing to remove and the operator can only act on what
+        /// they are handed — but does NOT fail the verb. An exit code here is a claim about the FIREWALL, and
+        /// "the probe did not answer" is not one.</summary>
+        SweepCommandUnverified,
+    }
+
+    /// <summary>
+    /// PURE: what the not-elevated branch owes ONE plan. <paramref name="rulesFound"/> is the read-only probe's
+    /// answer for this surface's wildcard — null when it could not answer — and is only ever consulted for a
+    /// Remove, because only there does the answer change anything.
+    ///
+    /// <para><b>Why the Remove half is measured and the Open half is not.</b> An Open plan already knows the
+    /// verb's whole job: the rule has to exist with these exact parameters, the enable command is idempotent
+    /// (it removes its own DisplayName first), and a probe could at best say a rule with that name exists —
+    /// not that its port, direction and RemoteAddress are the ones this config asks for. So the probe would buy
+    /// nothing there and this keeps the pre-#2445 behaviour exactly. A Remove is the opposite: the desired
+    /// state is the ABSENCE of a rule, absence is the overwhelmingly common case (every default loopback
+    /// install), and the two things this branch has to decide — whether to print a command at all, and whether
+    /// to report failure — are BOTH answered by "is one actually there". The alternative considered and
+    /// rejected was gating on <c>Note is not null</c>, which is a proxy for "a rule might exist" and is wrong in
+    /// both directions: it prints a sweep for a fail-closed surface that never had a rule, and stays silent
+    /// about a plain-loopback surface holding a stale rule from an exposure someone turned off by hand — the
+    /// exact state <see cref="FirewallRuleVerdict.LoopbackStaleRule"/> exists to name.</para>
+    ///
+    /// <para><b>Why a withheld sweep hands over nothing at all.</b> #2436 withholds
+    /// <see cref="FirewallRulePlan.SweepOtherPorts"/> for a surface darling.json exposes on a run that could not
+    /// read the control plane, because there the file's "switched off" may be years stale and the rule matching
+    /// the wildcard may be the one the endpoint is being served on. Printing that sweep command would hand the
+    /// operator, by copy and paste, the very outage the elevated path just declined to cause — and the operator
+    /// pasting it has no way to see that it was declined. The plan's <see cref="FirewallRulePlan.Note"/> is
+    /// printed above and says why; the remedy is a re-run with the store up, not a command.</para>
+    /// </summary>
+    public static FirewallHandoff ClassifyNotElevatedHandoff(
+        FirewallRuleAction action, bool sweepOtherPorts, bool? rulesFound) =>
+        action == FirewallRuleAction.Open ? FirewallHandoff.OpenCommand
+        : !sweepOtherPorts ? FirewallHandoff.Nothing
+        : rulesFound switch
+        {
+            true => FirewallHandoff.SweepCommand,
+            false => FirewallHandoff.Nothing,
+            _ => FirewallHandoff.SweepCommandUnverified,
+        };
+
+    /// <summary>
+    /// PURE: whether a not-elevated run has to report failure — true only where an elevated shell really has
+    /// work to do, which is what the exit code is supposed to mean.
+    /// <para><see cref="FirewallHandoff.SweepCommandUnverified"/> deliberately does not count. A non-zero exit
+    /// from this verb is a signal other things act on — <c>install-darling.ps1</c> prints a re-run banner on
+    /// it — and turning "the probe did not answer" into that signal would report drift the run never saw.
+    /// Under-reporting there is the safe direction: the running service probes the same rule on every start
+    /// and WARNs a stale one by name (<see cref="DarlingFirewallCheck"/>), so an unmeasured rule is found
+    /// within one service start, whereas a bogus failure teaches operators to ignore the banner.</para>
+    /// </summary>
+    public static bool NotElevatedRunHasWork(IEnumerable<FirewallHandoff> handoffs) =>
+        handoffs.Any(h => h is FirewallHandoff.OpenCommand or FirewallHandoff.SweepCommand);
+
+    /// <summary>
+    /// Read-only "does ANY rule for this surface exist" for the not-elevated branch (#2445). True/false when the
+    /// probe answered, null when it could not. Never writes anything and never throws except on cancellation.
+    ///
+    /// <para>It runs <see cref="DarlingFirewallCheck.BuildProbeCommand"/> — the probe the RUNNING service
+    /// already uses, shaped to exit 0 whether or not a rule matches — against
+    /// <see cref="DarlingFirewallCheck.SurfaceRuleWildcard"/>, which is the same wildcard the elevated sweep
+    /// deletes by. That pairing is the point rather than convenience: a narrower question would report "nothing
+    /// to do" about rules the sweep would still collect, and a wider one would offer a command covering rules
+    /// this product does not own. Probe and remedy share the builders, so they cannot come to disagree.</para>
+    ///
+    /// <para>Affordable precisely HERE, in the one branch that by definition holds no privilege:
+    /// <c>Get-NetFirewallRule</c> needs no elevation — reads succeed under a restricted token where writes
+    /// return PermissionDenied — and this costs at most one bounded PowerShell round trip per surface, only on
+    /// a path <c>install-darling.ps1</c> cannot take, since it refuses to run unelevated at all.</para>
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private static async Task<bool?> ProbeSurfaceRulesAsync(string wildcard, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var (exitCode, psOutput) = await DarlingManagedPostgres.RunPowerShellAsync(
+                DarlingFirewallCheck.BuildProbeCommand(wildcard), cancellationToken);
+
+            /* The probe exits 0 for BOTH answers, so a non-zero exit means the probe itself broke; do not read
+               a count out of a run that failed. Same reasoning as DarlingFirewallCheck.CheckAsync. */
+            return exitCode == 0 ? DarlingFirewallCheck.TryParseProbeOutput(psOutput) : null;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            /* A missing or broken powershell.exe is "could not tell", never "no rule" — guessing absence would
+               manufacture a clean bill of health for a firewall this run never read. */
+            return null;
+        }
+    }
+
     /// <summary>
     /// Creates or removes every scoped Darling firewall rule so the live firewall matches darling.json.
     /// Requires elevation (that is the entire point of the verb) and is idempotent — safe to re-run on every
@@ -3194,21 +3300,86 @@ public static class DarlingCliCommands
                 output.WriteLine($"{plan.Surface}: {plan.Note}.");
             }
 
-            if (toOpen == 0)
+            /* #2445: MEASURE the Remove half instead of guessing at it. This branch used to print a command
+               only for Open plans, so a run whose whole work was a removal said "nothing needs an open port",
+               exited 0, and left a stale inbound allow rule sitting there with nothing offered to close it.
+               #2436 made that shape ordinary rather than exotic — a surface is now a Remove when the control
+               plane has it switched OFF, so it covers an admin who just ran --disable-mcp and re-ran this verb
+               from a normal prompt.
+
+               The read-only probe is what makes all three behaviours honest at once, and it is affordable here
+               for a reason worth stating: Get-NetFirewallRule needs no elevation, so this branch could always
+               have looked and simply never did. Without it the only gate available is a proxy for "a rule might
+               exist", which would print sweep commands on every default loopback install and STILL miss a stale
+               rule on a surface that has no note. With it, a clean box prints nothing extra and exits 0 exactly
+               as before, and a box with a stale rule gets that rule's own sweep command and a non-zero exit.
+               Only the Remove plans that are permitted to sweep are probed, so the cost is at most one bounded
+               PowerShell round trip per such surface, on a path install-darling.ps1 cannot reach — it fails
+               outright when not elevated, so the re-run banner this could have fired is not on that path. */
+            var handoffs = new List<(FirewallRulePlan Plan, FirewallHandoff Handoff)>();
+            foreach (var plan in plans)
+            {
+                bool? rulesFound = null;
+                if (plan.Action == FirewallRuleAction.Remove && plan.SweepOtherPorts)
+                {
+                    rulesFound = await ProbeSurfaceRulesAsync(
+                        DarlingFirewallCheck.SurfaceRuleWildcard(plan.RuleName), cancellationToken);
+                }
+
+                handoffs.Add((plan, ClassifyNotElevatedHandoff(plan.Action, plan.SweepOtherPorts, rulesFound)));
+            }
+
+            if (handoffs.All(h => h.Handoff == FirewallHandoff.Nothing))
             {
                 output.WriteLine(
-                    "No endpoint wants an open port, so no rule was opened. (This shell is not elevated, but " +
-                    "there was nothing to open.)");
+                    "No endpoint wants an open port, and no scoped Darling rule is open that should not be, so " +
+                    "there is nothing for an elevated shell to do. (This shell is not elevated, but reading the " +
+                    "firewall does not need elevation — so that is measured, not assumed.)");
                 return 0;
             }
 
+            var hasWork = NotElevatedRunHasWork(handoffs.Select(h => h.Handoff));
+
             error.WriteLine("This shell is not elevated, so NO firewall rule was changed. Run these in an ELEVATED PowerShell:");
-            foreach (var plan in plans.Where(p => p.Action == FirewallRuleAction.Open))
+            foreach (var (plan, handoff) in handoffs)
             {
-                error.WriteLine("  " + DarlingManagedPostgres.BuildFirewallEnableCommand(plan.RuleName, plan.Port, plan.Cidr!));
+                switch (handoff)
+                {
+                    case FirewallHandoff.OpenCommand:
+                        error.WriteLine("  " + DarlingManagedPostgres.BuildFirewallEnableCommand(plan.RuleName, plan.Port, plan.Cidr!));
+                        break;
+
+                    /* The same builder and the same wildcard the elevated path would have used, so the command
+                       an operator pastes and the command the verb runs cannot drift apart. */
+                    case FirewallHandoff.SweepCommand:
+                        error.WriteLine(
+                            $"  # {plan.Surface}: a scoped rule is open on this surface and none belongs on any port.");
+                        error.WriteLine("  " + DarlingManagedPostgres.BuildFirewallSweepCommand(
+                            DarlingFirewallCheck.SurfaceRuleWildcard(plan.RuleName)));
+                        break;
+
+                    case FirewallHandoff.SweepCommandUnverified:
+                        error.WriteLine(
+                            $"  # {plan.Surface}: the read-only rule probe gave no usable answer, so this may be a no-op.");
+                        error.WriteLine("  " + DarlingManagedPostgres.BuildFirewallSweepCommand(
+                            DarlingFirewallCheck.SurfaceRuleWildcard(plan.RuleName)));
+                        break;
+
+                    case FirewallHandoff.Nothing:
+                    default:
+                        break;
+                }
             }
 
-            return 1;
+            if (!hasWork)
+            {
+                error.WriteLine(
+                    "Returning 0: nothing above is CONFIRMED work. The read-only probe could not answer for at " +
+                    "least one surface, so those commands are offered as a precaution — and a non-zero exit is a " +
+                    "claim about the firewall, which this run has no measurement to support.");
+            }
+
+            return hasWork ? 1 : 0;
         }
 
         var failures = 0;
@@ -3285,8 +3456,11 @@ public static class DarlingCliCommands
             return 1;
         }
 
+        /* Not "every endpoint is loopback-only" any more: since #2436 a surface is also a Remove when it is
+           fully LAN-configured and the control plane has it switched OFF. That is the same misleading summary
+           #2442 fixed one branch up, and the per-surface lines above already carry the real reason. */
         output.WriteLine(toOpen == 0
-            ? "Done. Every endpoint is loopback-only, so no port was opened."
+            ? "Done. No endpoint wants an open port, so no port was opened."
             : $"Done. {toOpen} endpoint(s) exposed on the LAN; their scoped rules are in place.");
         return 0;
     }
