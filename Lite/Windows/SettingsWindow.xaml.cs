@@ -508,6 +508,10 @@ public partial class SettingsWindow : Window
         AlertPvsCheckBox.IsChecked = App.AlertPvsEnabled;
         AlertPvsThresholdPercentBox.Text = App.AlertPvsThresholdPercent.ToString();
         AlertPvsFloorGbBox.Text = App.AlertPvsFloorGb.ToString();
+        AlertFileGrowthCheckBox.IsChecked = App.AlertFileGrowthEnabled;
+        AlertFileGrowthRiseMbBox.Text = App.AlertFileGrowthRiseMb.ToString();
+        AlertFileGrowthVolumePercentBox.Text = App.AlertFileGrowthVolumePercent.ToString();
+        AlertFileGrowthLookbackMinutesBox.Text = App.AlertFileGrowthLookbackMinutes.ToString();
         AlertLongRunningJobCheckBox.IsChecked = App.AlertLongRunningJobEnabled;
         AlertLongRunningJobMultiplierBox.Text = App.AlertLongRunningJobMultiplier.ToString();
         AlertFailedJobCheckBox.IsChecked = App.AlertFailedJobEnabled;
@@ -594,6 +598,13 @@ public partial class SettingsWindow : Window
             App.AlertPvsThresholdPercent = pvsPct;
         if (int.TryParse(AlertPvsFloorGbBox.Text, out var pvsFloor) && pvsFloor >= 0)
             App.AlertPvsFloorGb = pvsFloor;
+        App.AlertFileGrowthEnabled = AlertFileGrowthCheckBox.IsChecked == true;
+        if (int.TryParse(AlertFileGrowthRiseMbBox.Text, out var growthRise) && growthRise >= 0)
+            App.AlertFileGrowthRiseMb = growthRise;
+        if (int.TryParse(AlertFileGrowthVolumePercentBox.Text, out var growthPct) && growthPct >= 0 && growthPct <= 100)
+            App.AlertFileGrowthVolumePercent = growthPct;
+        if (int.TryParse(AlertFileGrowthLookbackMinutesBox.Text, out var growthLookback) && growthLookback >= 5 && growthLookback <= 1440)
+            App.AlertFileGrowthLookbackMinutes = growthLookback;
         App.AlertLongRunningJobEnabled = AlertLongRunningJobCheckBox.IsChecked == true;
         if (int.TryParse(AlertLongRunningJobMultiplierBox.Text, out var jobMult) && jobMult >= 2 && jobMult <= 20)
             App.AlertLongRunningJobMultiplier = jobMult;
@@ -684,6 +695,10 @@ public partial class SettingsWindow : Window
             root["alert_pvs_enabled"] = App.AlertPvsEnabled;
             root["alert_pvs_threshold_percent"] = App.AlertPvsThresholdPercent;
             root["alert_pvs_floor_gb"] = App.AlertPvsFloorGb;
+            root["alert_file_growth_enabled"] = App.AlertFileGrowthEnabled;
+            root["alert_file_growth_rise_mb"] = App.AlertFileGrowthRiseMb;
+            root["alert_file_growth_volume_percent"] = App.AlertFileGrowthVolumePercent;
+            root["alert_file_growth_lookback_minutes"] = App.AlertFileGrowthLookbackMinutes;
             root["alert_long_running_job_enabled"] = App.AlertLongRunningJobEnabled;
             root["alert_long_running_job_multiplier"] = App.AlertLongRunningJobMultiplier;
             root["alert_failed_job_enabled"] = App.AlertFailedJobEnabled;
@@ -740,6 +755,9 @@ public partial class SettingsWindow : Window
         AlertLowDiskThresholdGbBox.Text = "5";
         AlertPvsThresholdPercentBox.Text = "40";
         AlertPvsFloorGbBox.Text = "1";
+        AlertFileGrowthRiseMbBox.Text = "10240";
+        AlertFileGrowthVolumePercentBox.Text = "60";
+        AlertFileGrowthLookbackMinutesBox.Text = "60";
         AlertLongRunningJobMultiplierBox.Text = "3";
         AlertFailedJobLookbackBox.Text = "60";
         AlertCooldownBox.Text = "5";
@@ -794,6 +812,8 @@ public partial class SettingsWindow : Window
             parts.Add($"disk free < {AlertLowDiskThresholdPercentBox.Text}% or {AlertLowDiskThresholdGbBox.Text}GB");
         if (AlertPvsCheckBox.IsChecked == true)
             parts.Add($"PVS >= {AlertPvsThresholdPercentBox.Text}% of database");
+        if (AlertFileGrowthCheckBox.IsChecked == true)
+            parts.Add($"file growth > {AlertFileGrowthRiseMbBox.Text}MB/{AlertFileGrowthLookbackMinutesBox.Text}m or volume > {AlertFileGrowthVolumePercentBox.Text}%");
         if (AlertLongRunningJobCheckBox.IsChecked == true)
             parts.Add($"jobs > {AlertLongRunningJobMultiplierBox.Text}x avg");
         if (AlertFailedJobCheckBox.IsChecked == true)
@@ -829,6 +849,10 @@ public partial class SettingsWindow : Window
         AlertPvsCheckBox.IsEnabled = enabled;
         AlertPvsThresholdPercentBox.IsEnabled = enabled;
         AlertPvsFloorGbBox.IsEnabled = enabled;
+        AlertFileGrowthCheckBox.IsEnabled = enabled;
+        AlertFileGrowthRiseMbBox.IsEnabled = enabled;
+        AlertFileGrowthVolumePercentBox.IsEnabled = enabled;
+        AlertFileGrowthLookbackMinutesBox.IsEnabled = enabled;
         AlertLongRunningJobCheckBox.IsEnabled = enabled;
         AlertLongRunningJobMultiplierBox.IsEnabled = enabled;
         AlertFailedJobCheckBox.IsEnabled = enabled;
