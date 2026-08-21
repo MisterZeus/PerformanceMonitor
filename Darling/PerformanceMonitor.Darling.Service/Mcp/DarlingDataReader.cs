@@ -1177,7 +1177,21 @@ internal static class DarlingDataReader
                      )
                 THEN 1
                 ELSE 0
-            END AS has_user_databases
+            END AS has_user_databases,
+            -- #2472: the per-database fan-out, described for ONE run — the dearest one in the window.
+            -- Five collectors run once per database and the run writes a single blended duration_ms, so
+            -- "eight databases at 10.1s" and "one at 62s beside seven at 2.7s" are the same 80,900 ms and
+            -- want opposite fixes. These four are that one run's parts, and their ratio
+            -- (slowest_item_ms * fanout_items / slowest_run_duration_ms) is 1.0 for an even fan-out and
+            -- 6.1 for the dominated example. All four come from the SAME row via slowest_rank rather than
+            -- four independent aggregates, because a slowest item taken from one run and a width taken
+            -- from another compose into a ratio describing no run that ever happened — the same defect
+            -- PERCENTILE_CONT was rejected for above. NULL throughout for a collector that never fans
+            -- out, which is most of them.
+            MAX(CASE WHEN slowest_rank = 1 THEN fanout_item_count END) AS fanout_items,
+            MAX(CASE WHEN slowest_rank = 1 THEN slowest_item END) AS slowest_item,
+            MAX(CASE WHEN slowest_rank = 1 THEN slowest_item_ms END) AS slowest_item_ms,
+            MAX(CASE WHEN slowest_rank = 1 THEN duration_ms END) AS slowest_run_duration_ms
         FROM
         (
             -- #1855: rank each class of message newest-first so the two exemplar columns above can take
@@ -1206,7 +1220,18 @@ internal static class DarlingDataReader
                     ORDER BY (CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN error_message END) IS NULL,
                              collection_time DESC,
                              error_message DESC
-                ) AS error_rank
+                ) AS error_rank,
+                -- #2472: the window's dearest single ITEM, and with it the run that carried it. Ranked on
+                -- slowest_item_ms rather than duration_ms because the question is which database is
+                -- expensive, not which cycle was: a run whose total is the largest only because every
+                -- database was busy is exactly the shape a per-database override should NOT be aimed at.
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY collector_name
+                    ORDER BY slowest_item_ms IS NULL,
+                             slowest_item_ms DESC,
+                             collection_time DESC
+                ) AS slowest_rank
             FROM v_collection_log
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -1243,6 +1268,11 @@ internal static class DarlingDataReader
                 LastNote = reader.IsDBNull(13) ? null : reader.GetString(13),
                 NoteCount = reader.IsDBNull(14) ? 0 : Convert.ToInt64(reader.GetValue(14)),
                 TargetHasUserDatabases = !reader.IsDBNull(15) && Convert.ToInt64(reader.GetValue(15)) != 0,
+                /* Ordinals are positional and these four were APPENDED (#2472) — never inserted. */
+                FanoutItems = reader.IsDBNull(16) ? null : Convert.ToInt32(reader.GetValue(16)),
+                SlowestItem = reader.IsDBNull(17) ? null : reader.GetString(17),
+                SlowestItemMs = reader.IsDBNull(18) ? null : Convert.ToInt32(reader.GetValue(18)),
+                SlowestRunDurationMs = reader.IsDBNull(19) ? null : Convert.ToInt32(reader.GetValue(19)),
             });
         }
 
@@ -1393,6 +1423,48 @@ internal sealed class CollectorHealth
     /// <see cref="HealthStatus"/> never sees it.
     /// </summary>
     public bool TargetHasUserDatabases { get; set; }
+
+    /* ── The per-database fan-out rollup (#2472) ─────────────────────────────────────────────────────
+       Four parts of ONE run — the window's dearest single item and the run that carried it. NULL on
+       every collector that does not fan out, which is 36 of the 41: the columns are only written by a
+       productive per-database run.
+
+       They exist because the tail statistics above cannot answer this. MaxDurationMs and P95DurationMs
+       aggregate over RUNS, and each run is one blended row, so the two shapes an operator has to tell
+       apart — an even fan-out and one dominated by a single database — produce identical values in
+       both. Worse on this fleet: query_store's runs are 84% empty enumerations on a busy shard and
+       100% on a quiet one, so its p95/avg ratio is already saturated by empty-versus-productive and
+       says nothing at all about which database is expensive. */
+
+    /// <summary>How many items that run fanned out over, or null when it did not fan out. The
+    /// denominator of <see cref="FanoutDominance"/>: without it a slowest-item duration is a number with
+    /// no baseline, because "62 seconds" means something different across 2 databases and across 12.</summary>
+    public int? FanoutItems { get; set; }
+
+    /// <summary>The dearest item in the window — a database name, for every fan-out that exists today.</summary>
+    public string? SlowestItem { get; set; }
+
+    /// <summary>What that item cost, SQL plus storage.</summary>
+    public int? SlowestItemMs { get; set; }
+
+    /// <summary>The whole run that item came from, so the share is against the number the operator sees
+    /// on the collection_log row rather than against a sum of item slices.</summary>
+    public int? SlowestRunDurationMs { get; set; }
+
+    /// <summary>
+    /// The answer, as one number: 1.0 is a perfectly even fan-out and it rises with concentration. Eight
+    /// databases at 10.1s each gives 1.0; one at 62s beside seven at 2.7s gives 6.1 — the same 80,900 ms
+    /// run either way. Roughly 2.0 or above is the shape a per-database schedule override or a stagger
+    /// can actually target; near 1.0 says the cost is the fan-out's WIDTH and bounded parallelism is the
+    /// lever instead (#2468).
+    ///
+    /// <para>Null when the collector does not fan out, and also when the run's duration is zero — a
+    /// ratio against nothing is not a smaller answer, it is a wrong one.</para>
+    /// </summary>
+    public double? FanoutDominance =>
+        FanoutItems is > 0 && SlowestItemMs.HasValue && SlowestRunDurationMs is > 0
+            ? (double)SlowestItemMs.Value * FanoutItems.Value / SlowestRunDurationMs.Value
+            : null;
 
     public double FailureRatePercent => TotalRuns > 0 ? (double)ErrorCount / TotalRuns * 100 : 0;
 

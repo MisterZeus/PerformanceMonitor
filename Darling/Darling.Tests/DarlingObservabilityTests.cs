@@ -625,11 +625,13 @@ public sealed class DarlingObservabilityTests
             Assert.True(secondModified > firstModified, "second upsert did not refresh modified_date");
         }
 
+        /* A collector that does NOT fan out: the three V80 columns must come back NULL rather than zero,
+           which is what tells "this run had no fan-out" apart from "its fan-out was free" (#2472). */
         await DarlingObservability.LogCollectionAsync(
-            postgres, server, "wait_stats", "SUCCESS", 42, 100, 25, null, null, TestContext.Current.CancellationToken);
+            postgres, server, "wait_stats", "SUCCESS", 42, 100, 25, null, fanout: null, null, TestContext.Current.CancellationToken);
 
         using (var read = new NpgsqlCommand(
-            "SELECT collector_name, status, rows_collected, duration_ms, sql_duration_ms, duckdb_duration_ms, error_message FROM collection_log WHERE server_id = $1", connection))
+            "SELECT collector_name, status, rows_collected, duration_ms, sql_duration_ms, duckdb_duration_ms, error_message, fanout_item_count, slowest_item, slowest_item_ms FROM v_collection_log WHERE server_id = $1", connection))
         {
             read.Parameters.AddWithValue(TestServerId);
             using var reader = await read.ExecuteReaderAsync(TestContext.Current.CancellationToken);
@@ -641,7 +643,42 @@ public sealed class DarlingObservabilityTests
             Assert.Equal(100, reader.GetInt32(4));
             Assert.Equal(25, reader.GetInt32(5)); /* the storage (Postgres) phase, under Lite's column name */
             Assert.True(reader.IsDBNull(6));
+            Assert.True(reader.IsDBNull(7));
+            Assert.True(reader.IsDBNull(8));
+            Assert.True(reader.IsDBNull(9));
             Assert.False(await reader.ReadAsync(TestContext.Current.CancellationToken), "expected exactly one collection_log row");
+        }
+
+        await DeleteTestRowsAsync(connection);
+
+        /* And a collector that DID fan out, round-tripped through the same writer. Read back through
+           v_collection_log rather than the table: Postgres freezes a view's SELECT * at CREATE, so a rung
+           that adds columns without refreshing the view leaves the write perfectly correct and every READ
+           blind to it — a failure that only a read through the view can see (#2472, and V14 before it). */
+        await DarlingObservability.LogCollectionAsync(
+            postgres, server, "query_store", "SUCCESS", 900, 70_000, 10_800, null,
+            new FanoutCost(8, "the-busy-one", 61_900), null, TestContext.Current.CancellationToken);
+
+        using (var read = new NpgsqlCommand(
+            "SELECT duration_ms, fanout_item_count, slowest_item, slowest_item_ms FROM v_collection_log WHERE server_id = $1", connection))
+        {
+            read.Parameters.AddWithValue(TestServerId);
+            using var reader = await read.ExecuteReaderAsync(TestContext.Current.CancellationToken);
+            Assert.True(await reader.ReadAsync(TestContext.Current.CancellationToken), "collection_log row missing");
+
+            var durationMs = reader.GetInt32(0);
+            var items = reader.GetInt32(1);
+            var slowestMs = reader.GetInt32(3);
+
+            Assert.Equal(80_800, durationMs);
+            Assert.Equal(8, items);
+            Assert.Equal("the-busy-one", reader.GetString(2));
+            Assert.Equal(61_900, slowestMs);
+
+            /* The number the whole rung exists for, computed off the stored row rather than off the value
+               that was written: 6.13 against the 1.0 an even eight-database fan-out of the same 80,800 ms
+               would give. duration_ms alone cannot tell those apart, and neither can any aggregate of it. */
+            Assert.Equal(6.13, (double)slowestMs * items / durationMs, 2);
         }
 
         await DeleteTestRowsAsync(connection);
