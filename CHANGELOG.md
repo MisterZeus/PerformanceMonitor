@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **`sweep_pressure` answers the single-sweep question as well as the sustained one** ([#2446]) - a server logging six "collection body has not completed after 60-69s of execution - skipping relaunch" warnings in three hours reported `busy_percent: 20.4`, `verdict: OK`, every collector HEALTHY - and both numbers were right about what they measured. [#2296]'s amortized model asks "does this server's total demand fit its cadence on average"; an operator reading a skipped relaunch is asking "did THIS sweep overrun". Those diverge exactly when one collector's single run approaches the budget while its amortized cost is negligible: `index_object_stats` took 37,207 ms of a 60,000 ms body and, at a 1440-minute cadence, contributed 26 ms/min to the verdict. The block now also carries `peak_cycle_ms` / `peak_cycle_percent` - what the body costs on the cycle where every scheduled cadence comes due together, the collectors' averages added WITHOUT being amortized - and `peak_cycle_risk` (FITS / BODY_OVERRUN). That cycle is not a hypothetical worst case: the shipped cadences are strictly nested (1 | 5 | 60 | 1440), so alignment is a guaranteed periodic event, and on that server it costs 73,193 ms against the 60,000 ms budget. `peak_collector` names the collector that owns the most of one sweep and `peak_cycle_note` explains it, because `heaviest_collectors` ranks by amortized contribution and therefore ranks the offending collector out of sight by construction - that list now also carries `amortized_ms_per_minute` and `pct_of_sweep_budget_per_run` per row, so the two costs sit side by side. **The verdict is deliberately unchanged.** A once-daily 37-second collector is not saturation; calling it SATURATED would spend the word on a case whose lever is the schedule's shape rather than the capacity that verdict recommends, and an operator who learns to discount SATURATED loses the signal [#2296] built. Separate field and separate vocabulary, so neither can be read as the other and a fleet scan can filter on either. Measured across the dogfood fleet: the two servers that logged skipped relaunches read OK/BODY_OVERRUN (122% and 109% of budget) while a quiet one read OK/FITS at 19%. The decision stays in the shared SweepPressureClassifier (PerformanceMonitor.Common) with the same table pinned in both suites, and both SKUs' tools serve the identical shape.
+
 ## [3.5.0] - 2026-08-19
 
 ### Added
@@ -2839,6 +2844,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#2312]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2312
 [#2306]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2306
 [#2302]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2302
+[#2446]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2446
 [#2296]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2296
 [#2299]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2299
 [#2294]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2294

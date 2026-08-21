@@ -808,7 +808,7 @@ public sealed class DarlingMcpDataTools
         }, McpHelpers.JsonOptions);
     }
 
-    [McpServerTool(Name = "get_collection_health"), Description("Shows the health status of all data collectors for a server — whether they're running successfully, failing, or stale. Check this before investigating data to ensure collectors are working properly. Each row also carries last_note/note_count: what a NON-failing run reported, e.g. an enumeration that came back with 0 items. note_count equal to total_runs means the collector has been collecting nothing all window — not a fault (the target may be legitimately empty), but the reason a HEALTHY collector can still have no data. target_has_user_databases tells those two apart: true means the target DID have user databases in the same window, so an all-window empty enumeration is worth investigating (a login that cannot enter them, an exclusion filter that matched everything); false means either no user databases or no inventory to go on. The sweep_pressure block is the server-level roll-up: it compares the collectors' combined execution demand (average duration amortized by cadence) against the minute the fastest cadence holds. SATURATED means the collection body cannot fit inside its cadence, so relaunches are skipped and the server collects at a multiple of its configured interval while every collector still reads healthy — heaviest_collectors names where that budget goes.")]
+    [McpServerTool(Name = "get_collection_health"), Description("Shows the health status of all data collectors for a server — whether they're running successfully, failing, or stale. Check this before investigating data to ensure collectors are working properly. Each row also carries last_note/note_count: what a NON-failing run reported, e.g. an enumeration that came back with 0 items. note_count equal to total_runs means the collector has been collecting nothing all window — not a fault (the target may be legitimately empty), but the reason a HEALTHY collector can still have no data. target_has_user_databases tells those two apart: true means the target DID have user databases in the same window, so an all-window empty enumeration is worth investigating (a login that cannot enter them, an exclusion filter that matched everything); false means either no user databases or no inventory to go on. The sweep_pressure block is the server-level roll-up: it compares the collectors' combined execution demand (average duration amortized by cadence) against the minute the fastest cadence holds. SATURATED means the collection body cannot fit inside its cadence, so relaunches are skipped and the server collects at a multiple of its configured interval while every collector still reads healthy — heaviest_collectors names where that budget goes. That verdict is the SUSTAINED answer only. peak_cycle_risk is the separate single-sweep answer: peak_cycle_ms is what the body costs on the cycle where every scheduled cadence comes due together, and BODY_OVERRUN means that one body cannot fit the budget even when the verdict reads OK — the signature of one infrequent heavy collector, which amortization hides and heaviest_collectors therefore ranks out of sight. peak_collector names it, and peak_cycle_note explains it. Read both fields: a server can be OK/BODY_OVERRUN (a schedule-shape problem, fix by moving or splitting that collector) or SATURATED/BODY_OVERRUN (a capacity problem).")]
     public static async Task<string> GetCollectionHealth(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null)
@@ -868,8 +868,28 @@ public sealed class DarlingMcpDataTools
                 {
                     collector = r.CollectorName,
                     avg_duration_ms = Math.Round(r.AvgDurationMs, 0),
-                    frequency_minutes = r.FrequencyMinutes
+                    frequency_minutes = r.FrequencyMinutes,
+                    /* #2446: the ranking key said out loud, beside the single-run cost it is derived from.
+                       The list still ranks by amortized contribution, because that is what explains
+                       busy_percent — but an operator reading it to find the collector that overran a body
+                       was reading the wrong column with nothing on the row to say so. */
+                    amortized_ms_per_minute = Math.Round(r.AvgDurationMs / r.FrequencyMinutes, 0),
+                    pct_of_sweep_budget_per_run = Math.Round(r.AvgDurationMs / SweepPressureClassifier.SweepBudgetMs * 100.0, 1)
                 });
+
+            /* #2446: the collector that owns the most of ONE sweep, which is a different collector from
+               the ones above whenever it is infrequent enough for amortization to hide it. Named on every
+               server, not only on BODY_OVERRUN — knowing where a body's time concentrates is worth having
+               before it is a problem, and this is exactly the row heaviest_collectors ranks out of sight. */
+            var peakCollector = pressure.PeakCollectorName == null ? null : new
+            {
+                collector = pressure.PeakCollectorName,
+                avg_duration_ms = Math.Round(pressure.PeakCollectorAvgDurationMs, 0),
+                frequency_minutes = pressure.PeakCollectorFrequencyMinutes,
+                amortized_ms_per_minute = Math.Round(pressure.PeakCollectorAvgDurationMs / pressure.PeakCollectorFrequencyMinutes, 0),
+                pct_of_sweep_budget_per_run = Math.Round(pressure.PeakCollectorAvgDurationMs / SweepPressureClassifier.SweepBudgetMs * 100.0, 1)
+            };
+            var peakCycleNote = SweepPressureClassifier.FormatPeakCycleNote(pressure);
 
             return JsonSerializer.Serialize(new
             {
@@ -879,6 +899,18 @@ public sealed class DarlingMcpDataTools
                     busy_ms_per_minute = Math.Round(pressure.BusyMsPerMinute, 0),
                     busy_percent = Math.Round(pressure.BusyPercent, 1),
                     verdict = pressure.Verdict,
+                    /* #2446: the second dimension, and deliberately NOT folded into verdict. verdict
+                       answers "does sustained demand fit the cadence on average"; this answers "does one
+                       scheduled body fit at all". They disagree exactly when an infrequent heavy collector
+                       owns most of a single sweep — which an amortized number cannot see by construction,
+                       since dividing by that collector's own long cadence is what makes it small. Its own
+                       vocabulary (FITS / BODY_OVERRUN) so it can never be read as a fourth verdict band,
+                       and its own field so a fleet scan can filter on it. */
+                    peak_cycle_ms = Math.Round(pressure.PeakCycleMs, 0),
+                    peak_cycle_percent = Math.Round(pressure.PeakCyclePercent, 1),
+                    peak_cycle_risk = pressure.PeakCycleRisk,
+                    peak_collector = peakCollector,
+                    peak_cycle_note = string.IsNullOrEmpty(peakCycleNote) ? null : peakCycleNote,
                     heaviest_collectors = heaviest,
                     note = pressure.Verdict switch
                     {
