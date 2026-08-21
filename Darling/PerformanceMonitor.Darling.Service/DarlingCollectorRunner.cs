@@ -553,10 +553,14 @@ public sealed class DarlingCollectorRunner
                                 await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(dbReader, dbToken));
                         }
                     }
-                    sqlMs += sqlSlice.ElapsedMilliseconds;
+                    /* Read ONCE. The stopwatch is still running, so a second read a few statements later
+                       returns a larger number, and the per-item total would then exceed the blended total
+                       it is a ratio against — a dominance a hair above the truth, on every Azure run
+                       (#2472). Small, and wrong in the direction that matters. */
+                    var dbSqlMs = sqlSlice.ElapsedMilliseconds;
+                    sqlMs += dbSqlMs;
 
                     /* Flush this database before reading the next — peak memory is one database's rows. */
-                    var dbSqlMs = sqlSlice.ElapsedMilliseconds;
                     long dbStorageMs = 0;
                     if (batch.Count > 0)
                     {

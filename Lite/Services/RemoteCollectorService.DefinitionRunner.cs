@@ -360,10 +360,13 @@ public partial class RemoteCollectorService
                                 await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(dbReader, dbToken));
                         }
                     }
-                    sqlMs += sqlSlice.ElapsedMilliseconds;
+                    /* Read ONCE: the stopwatch is still running, so a second read a few statements later
+                       returns a larger number and the per-item total would exceed the blended total it is
+                       a ratio against (#2472). */
+                    var dbSqlMs = sqlSlice.ElapsedMilliseconds;
+                    sqlMs += dbSqlMs;
 
                     /* Flush this database before reading the next — peak memory is one database's rows. */
-                    var dbSqlMs = sqlSlice.ElapsedMilliseconds;
                     long dbStorageMs = 0;
                     if (batch.Count > 0)
                     {
