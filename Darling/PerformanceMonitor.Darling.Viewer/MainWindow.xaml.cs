@@ -376,6 +376,9 @@ public partial class MainWindow : Window
             var storeVersion = await _dataService.GetStoreSchemaVersionAsync();
             if (storeVersion is int version && version < ViewerDataService.RequiredStoreSchemaVersion)
             {
+                /* The store answered, so this is not Unreachable — but the seat probe never ran, so the
+                   field stays at "Seat: --" rather than claiming a verdict nothing measured (#2479). */
+                ApplySeatState(ViewerSeatState.Unknown);
                 ShowConnectionFailure(
                     $"The Darling store is at schema v{version}, but this viewer needs v{ViewerDataService.RequiredStoreSchemaVersion}. " +
                     "Update or restart the Darling service so it migrates the store, then reopen the viewer.");
@@ -387,9 +390,18 @@ public partial class MainWindow : Window
                probe fails safe to read-only; the write surfaces gate on ViewerDataService.IsReadOnly and
                the write paths translate a live 42501 into a friendly message as a backstop. */
             await _dataService.DetectReadOnlyAsync();
+
+            /* #2479 items 3+4: publish the verdict ONCE, globally, instead of letting it be discovered a
+               dialog at a time. Same probe, same fail-safe — this only makes the answer visible before a
+               write is attempted, which is the whole of #2400. */
+            ApplySeatState(_dataService.IsReadOnly ? ViewerSeatState.ReadOnly : ViewerSeatState.ReadWrite);
         }
         catch (ViewerStoreUnreachableException ex)
         {
+            /* NOT ReadOnly. #2117 built this arm precisely so an unreachable store stops being misread as
+               a read-only seat, and a status field that collapsed them would undo it in the one place an
+               operator now looks first — sending them to fix a role they never needed to touch. */
+            ApplySeatState(ViewerSeatState.Unreachable);
             ViewerLogger.Error("App", "Darling store unreachable", ex);
             ShowConnectionFailure(ex.Message);
             return;
@@ -398,6 +410,7 @@ public partial class MainWindow : Window
         {
             /* Reachable but the first connection failed for another reason (e.g. authentication, or the
                configured database does not exist) — show it rather than dead-ending on a blank window. */
+            ApplySeatState(ViewerSeatState.Unreachable);
             ViewerLogger.Error("App", "Darling store connection failed", ex);
             ShowConnectionFailure($"Couldn't connect to the Darling store: {ex.Message}");
             return;
@@ -883,6 +896,44 @@ public partial class MainWindow : Window
         ServerCountText.Text = _fleet.IsSearching
             ? $"Servers: {_fleet.VisibleServerCount} of {_fleet.TotalCount}"
             : $"Servers: {_fleet.TotalCount}";
+
+    /// <summary>
+    /// The status bar's "Seat:" field (#2479, items 3 and 4) — text, colour and the tooltip that explains
+    /// WHY, in one place so no caller can set half of it.
+    ///
+    /// <para>The colours are the existing status-bar vocabulary, not a new one:
+    /// <c>ErrorBrush</c> for a store that cannot be reached (the same severity <c>CollectorHealthText</c>
+    /// gives an erroring collector), <c>WarningBrush</c> for a read-only seat — visible, because a tester
+    /// who does not notice it is back to discovering the seat one refusal at a time, but not alarming,
+    /// because on a remote seat it is the correct and expected default — and the muted foreground for
+    /// read-write and for not-yet-probed, which are the unremarkable states.</para>
+    ///
+    /// <para><see cref="ViewerDataService.StoreIsOnThisMachine"/> only ORDERS the two sentences in the
+    /// tooltip by which default is likelier to have decided this seat. It cannot claim which one did: a
+    /// non-loopback store host does not prove a remote seat (#2279), so the tooltip names both.</para>
+    /// </summary>
+    private void ApplySeatState(ViewerSeatState state)
+    {
+        SeatText.Text = ViewerSeatIndicator.Text(state);
+        SeatText.ToolTip = ViewerSeatIndicator.ToolTip(state, _dataService?.StoreIsOnThisMachine ?? true);
+
+        /* TryFindResource rather than the hard FindResource the sibling status fields use, and the reason is
+           the call site rather than doubt about the keys: all three brushes exist in all three shipped
+           themes, but ApplySeatState is called from INSIDE the catch that handles an unreachable store. A
+           ResourceReferenceKeyNotFoundException thrown from a catch block is unhandled, so a missing key in
+           some future theme would turn "the service is down" into "the viewer crashed" - the one moment the
+           viewer most needs to stay up and explain itself. Falling back to the muted foreground costs a
+           colour and nothing else. */
+        SeatText.Foreground =
+            (state switch
+            {
+                ViewerSeatState.Unreachable => TryFindResource("ErrorBrush"),
+                ViewerSeatState.ReadOnly => TryFindResource("WarningBrush"),
+                _ => TryFindResource("ForegroundMutedBrush"),
+            } as System.Windows.Media.Brush)
+            ?? TryFindResource("ForegroundMutedBrush") as System.Windows.Media.Brush
+            ?? SeatText.Foreground;
+    }
 
     private async Task LoadServersAsync(bool preserveSelection = false)
     {
