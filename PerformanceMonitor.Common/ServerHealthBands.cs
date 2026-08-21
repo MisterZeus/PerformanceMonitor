@@ -706,12 +706,24 @@ namespace PerformanceMonitor.Common
         public const double BodyOverrunPercent = 100.0;
 
         /// <summary>
-        /// Amortized execution demand and its verdict. Each scheduled collector contributes its average
-        /// duration divided by its cadence in minutes — milliseconds of work demanded per minute of wall
-        /// time for a body that runs collectors serially. A non-recurring collector
-        /// (<paramref name="collectors"/> entry with frequency &lt;= 0: on-load, unknown) contributes
-        /// nothing — it does not compete for the sweep. Percent is against the 60,000 ms one minute
-        /// holds; the fastest shipped cadence is one minute, which is what makes the minute the budget.
+        /// Both answers in one pass, over one population of collectors.
+        ///
+        /// <para><b>Amortized execution demand and its verdict.</b> Each scheduled collector contributes
+        /// its average duration divided by its cadence in minutes — milliseconds of work demanded per
+        /// minute of wall time for a body that runs collectors serially. Percent is against the 60,000 ms
+        /// one minute holds; the fastest shipped cadence is one minute, which is what makes the minute the
+        /// budget.</para>
+        ///
+        /// <para><b>The peak cycle and its risk (#2446).</b> The same collectors' averages added WITHOUT
+        /// being divided: what the body costs when every cadence comes due together, which the nested
+        /// shipped cadences make a periodic certainty rather than a hypothetical. Reported separately from
+        /// the verdict, never folded into it — see the type's remarks for why.</para>
+        ///
+        /// <para>A non-recurring collector (<paramref name="collectors"/> entry with frequency &lt;= 0:
+        /// on-load, unknown) contributes to NEITHER — it runs on connect, not in the recurring body, so it
+        /// does not compete for the sweep and is not part of any scheduled cycle. Nor can it become the
+        /// peak collector, which would otherwise name a collector that never shares a body with the ones
+        /// it is being compared against.</para>
         /// </summary>
         public static SweepPressure Compute(IEnumerable<(string CollectorName, double AvgDurationMs, int FrequencyMinutes)> collectors)
         {
