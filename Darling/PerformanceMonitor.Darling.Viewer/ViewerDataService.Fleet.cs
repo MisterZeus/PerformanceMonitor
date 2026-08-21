@@ -340,8 +340,8 @@ public sealed class FleetRollup
             s.IsOnline,
             /* Via the card's discriminant, not the raw flag. The shared classifier honours an awaiting marker
                whatever IsOnline says, so an online card carrying a stray marker banded Warning while the card
-               said "Online" and had nothing to report — a third reading of the same pair. See ServerCardStatus. */
-            s.CardStatus == ServerCardStatus.AwaitingFirstCollection,
+               said "Online" and had nothing to report — a third reading of the same pair. See ServerCollectionStatus. */
+            s.CardStatus == ServerCollectionStatus.AwaitingFirstCollection,
             s.HasCollectorErrors,
             s.OverallMetricSeverity);
 
@@ -363,15 +363,17 @@ public sealed class FleetRollup
     {
         /* Keyed on the card's own status discriminant rather than on the flags behind it. Reading
            AwaitingFirstCollection independently of IsOnline is what let an online card claim it was awaiting
-           its first collection — see ServerCardStatus. */
-        if (s.CardStatus == ServerCardStatus.Offline)
+           its first collection — see ServerCollectionStatus. */
+        if (s.CardStatus == ServerCollectionStatus.Offline)
         {
             return "Offline — no recent collection";
         }
 
-        if (s.CardStatus == ServerCardStatus.AwaitingFirstCollection)
+        if (s.CardStatus == ServerCollectionStatus.AwaitingFirstCollection)
         {
-            return "Awaiting first collection";
+            /* The word itself, not a copy of it — this line held the fourth spelling of the phrase, in the
+               fourth file, which is exactly the shape the #2473 pin now forbids. */
+            return s.CardStatus.Word();
         }
 
         var parts = new List<string>();
@@ -456,13 +458,13 @@ public sealed class FleetRollup
             /* Offline and never-reached come back from BuildReason as whole sentences that already name the
                state — the same sentence the status word shows — so a band label in front would only say
                "Offline" twice. */
-            ServerCardStatus.Offline or ServerCardStatus.AwaitingFirstCollection => BuildReason(s),
+            ServerCollectionStatus.Offline or ServerCollectionStatus.AwaitingFirstCollection => BuildReason(s),
 
             /* "Unknown" is the one status word with no band behind it: ClassifyBand goes straight to the
                metrics and, on a clean card, answers Healthy. The word wins, and the metrics are appended when
                they have something to add — not knowing whether a server is reporting is no reason to withhold
                the CPU number that WAS collected. */
-            ServerCardStatus.Unknown => WithReason(UnknownStatus, "; ", s),
+            ServerCollectionStatus.Unknown => WithReason(UnknownStatus, "; ", s),
 
             /* Online and stale: the band is the headline. A healthy card gets an all-clear rather than
                BuildReason's "Needs attention" fallback, which is written for a ranking that only ever holds
@@ -481,7 +483,7 @@ public sealed class FleetRollup
     /// event count, for one. Appending unguarded produces "Warning — Needs attention", which tells the reader
     /// exactly what they already knew and is how the ranking-only fallback reaches a card at all. Two arms had
     /// their own copy of the append and only one of them was guarded, which is the same lesson as
-    /// <see cref="ServerCardStatus"/> one level down.</para>
+    /// <see cref="ServerCollectionStatus"/> one level down.</para>
     /// </summary>
     private static string WithReason(string headline, string separator, ServerSummaryItem s)
     {
