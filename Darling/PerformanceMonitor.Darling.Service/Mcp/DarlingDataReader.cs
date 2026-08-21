@@ -65,6 +65,25 @@ internal static class DarlingDataReader
     /// <summary>One memory clerk's footprint at the latest snapshot.</summary>
     public sealed record MemoryClerkRow(string ClerkType, double MemoryMb);
 
+    /*
+        One row of the RAW per-run collection log, as opposed to the CollectorHealth rollup above.
+        The rollup answers "is this collector healthy over seven days"; this answers "what happened
+        on each run", which is the question an operator actually has when collection looks wrong and
+        the rollup says HEALTHY. Durations are split the way the collectors report them -- total, the
+        part spent on the monitored server, and the part spent writing to the store -- because a
+        collector that is slow because the target is slow needs a different fix from one that is slow
+        because the store is.
+    */
+    public sealed record CollectionLogEntry(
+        string CollectorName,
+        DateTime CollectionTime,
+        double? DurationMs,
+        double? SqlDurationMs,
+        double? StoreDurationMs,
+        long? RowsCollected,
+        string? Status,
+        string? ErrorMessage);
+
     /// <summary>One database file's latest I/O snapshot; avg latency is computed by the tool.</summary>
     public sealed record FileIoRow(
         string DatabaseName, string FileName, string FileType, string PhysicalName, double SizeMb,
@@ -1350,6 +1369,88 @@ internal static class DarlingDataReader
         AddInt(command, serverId);
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
+    }
+
+    /// <summary>
+    /// The raw per-run collection log for one server inside an explicit window, newest first, capped.
+    /// <para>Bounded on BOTH sides rather than by a single now-relative lower bound, matching how the
+    /// viewer's Collection Log tab windows this read: a caller asking about a past incident wants the
+    /// rows from THEN, and an hours-back-from-now span cannot express that.</para>
+    /// <para>Reads <c>v_collection_log</c>, the same view the viewer uses, so the web dashboard and the
+    /// MCP surface cannot drift from what the desktop shows. $1 server_id, $2 window start, $3 window
+    /// end (naive UTC), $4 row cap.</para>
+    /// </summary>
+    public const string CollectionLogSql = """
+        SELECT
+            collector_name,
+            collection_time,
+            duration_ms,
+            sql_duration_ms,
+            duckdb_duration_ms,
+            rows_collected,
+            status,
+            error_message
+        FROM v_collection_log
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        ORDER BY collection_time DESC
+        LIMIT $4
+        """;
+
+    /// <summary>
+    /// Whether this server has EVER recorded a collector run, ignoring any window.
+    /// <para>Exists so an empty log read can say which kind of nothing it found. "No runs in the last
+    /// 24 hours" is true both of a quiet window and of a server that has never collected, and those
+    /// need opposite responses from the caller -- widen the window, versus go find out why collection
+    /// is not running. LIMIT 1 with no ordering, so it stops at the first row rather than scanning.</para>
+    /// </summary>
+    public const string HasAnyCollectionLogSql = """
+        SELECT 1
+        FROM v_collection_log
+        WHERE server_id = $1
+        LIMIT 1
+        """;
+
+    /// <summary>Runs <see cref="HasAnyCollectionLogSql"/>.</summary>
+    public static async Task<bool> HasAnyCollectionLogAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(HasAnyCollectionLogSql);
+        AddInt(command, serverId);
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
+    }
+
+    /// <summary>Runs <see cref="CollectionLogSql"/>. See it for the window semantics.</summary>
+    public static async Task<List<CollectionLogEntry>> GetCollectionLogAsync(
+        NpgsqlDataSource postgres,
+        int serverId,
+        DateTime windowStartUtc,
+        DateTime windowEndUtc,
+        int maxRows,
+        CancellationToken cancellationToken = default)
+    {
+        var rows = new List<CollectionLogEntry>();
+        await using var command = postgres.CreateCommand(CollectionLogSql);
+        AddInt(command, serverId);
+        AddTimestamp(command, windowStartUtc);
+        AddTimestamp(command, windowEndUtc);
+        AddInt(command, maxRows);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new CollectionLogEntry(
+                reader.GetString(0),
+                reader.GetDateTime(1),
+                reader.IsDBNull(2) ? null : Convert.ToDouble(reader.GetValue(2)),
+                reader.IsDBNull(3) ? null : Convert.ToDouble(reader.GetValue(3)),
+                reader.IsDBNull(4) ? null : Convert.ToDouble(reader.GetValue(4)),
+                reader.IsDBNull(5) ? null : Convert.ToInt64(reader.GetValue(5)),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7)));
+        }
+
+        return rows;
     }
 
     private static void AddInt(NpgsqlCommand command, int value) =>

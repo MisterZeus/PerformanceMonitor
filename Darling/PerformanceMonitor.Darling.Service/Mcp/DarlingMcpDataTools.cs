@@ -1045,4 +1045,79 @@ public sealed class DarlingMcpDataTools
         17 => "SQL Server 2025",
         _ => $"SQL Server v{sqlMajorVersion}",
     };
+
+    [McpServerTool(Name = "get_collection_log"), Description("Gets the RAW per-run collection log for a server, newest first: one row per collector run with its total duration, the part spent querying the monitored server, the part spent writing to the store, rows collected, status and any error. get_collection_health rolls seven days of these into a per-collector verdict; this is the underlying runs, which is what you need when the rollup says healthy and collection still looks wrong, or when you want to see what a collector was doing during a specific incident window.")]
+    public static async Task<string> GetCollectionLog(
+        NpgsqlDataSource postgres,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description("Maximum rows to return, newest first. Default 200.")] int limit = 200)
+    {
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        if (error != null) return error;
+
+        try
+        {
+            var end = DateTime.UtcNow;
+            var start = end.AddHours(-Math.Abs(hours_back));
+            var rows = await DarlingDataReader.GetCollectionLogAsync(
+                postgres, resolved.ServerId, start, end, Math.Clamp(limit, 1, 5000));
+
+            if (rows.Count == 0)
+            {
+                /*
+                    Zero rows is two completely different facts and they need different answers.
+                    A server that has collected before and simply did nothing in THIS window is a
+                    true negative -- the caller narrowed to a quiet period, and widening the window
+                    is the move. A server with no log rows at all has never collected, which is a
+                    fault, and telling that caller "nothing in the last 24 hours" would send them
+                    off widening a window that will never fill. So we ask which one it is rather
+                    than emitting one sentence that is true of both.
+                */
+                var everCollected = await DarlingDataReader.HasAnyCollectionLogAsync(postgres, resolved.ServerId);
+                return everCollected
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"No collector runs recorded for {resolved.ServerName} in the last {Math.Abs(hours_back)} hour(s). This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.")
+                    : McpHelpers.Status(
+                        "unavailable",
+                        $"No collector runs have EVER been recorded for {resolved.ServerName}. This is not an empty window — collection has not run at all for this server. Check that the service is running and that the server is enabled for collection; get_collection_health will be equally empty until it does.");
+            }
+
+            var result = rows.Select(r => new
+            {
+                collector = r.CollectorName,
+                collection_time = r.CollectionTime.ToString("o"),
+                duration_ms = r.DurationMs is null ? (double?)null : Math.Round(r.DurationMs.Value, 0),
+                /*
+                    The split matters more than the total. A collector slow because the monitored
+                    server is slow needs work on that server; one slow because the store is slow
+                    needs work here. The total alone cannot tell those apart, and it is the
+                    question people actually ask of this log.
+                */
+                sql_duration_ms = r.SqlDurationMs is null ? (double?)null : Math.Round(r.SqlDurationMs.Value, 0),
+                store_duration_ms = r.StoreDurationMs is null ? (double?)null : Math.Round(r.StoreDurationMs.Value, 0),
+                rows_collected = r.RowsCollected,
+                status = r.Status,
+                error_message = r.ErrorMessage,
+            });
+
+            return JsonSerializer.Serialize(new
+            {
+                server = resolved.ServerName,
+                hours_back = Math.Abs(hours_back),
+                run_count = rows.Count,
+                /*
+                    Says outright that the cap bit, rather than leaving a caller to infer it by
+                    counting rows against a limit they may not have set themselves.
+                */
+                truncated = rows.Count >= Math.Clamp(limit, 1, 5000),
+                runs = result,
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("get_collection_log", ex);
+        }
+    }
 }
