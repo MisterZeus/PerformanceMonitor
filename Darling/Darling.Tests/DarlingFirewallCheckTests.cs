@@ -922,6 +922,153 @@ public class DarlingFirewallCheckTests
         Assert.Contains("--configure-firewall", DarlingCliCommands.UsageText(), StringComparison.Ordinal);
     }
 
+    /* ---- #2445: what the NOT-elevated branch hands over ---- */
+
+    /// <summary>
+    /// The whole policy table, because the interesting cases are the two that print nothing and the one that
+    /// prints a command WITHOUT failing the verb — none of which any single scenario test would show together.
+    /// </summary>
+    [Theory]
+    /* An Open plan is unchanged by #2445: the rule has to exist with these exact parameters, which no probe
+       could confirm, so it prints and fails exactly as it always has whatever the probe would have said. */
+    [InlineData(DarlingCliCommands.FirewallRuleAction.Open, true, null, DarlingCliCommands.FirewallHandoff.OpenCommand)]
+    [InlineData(DarlingCliCommands.FirewallRuleAction.Open, true, true, DarlingCliCommands.FirewallHandoff.OpenCommand)]
+    [InlineData(DarlingCliCommands.FirewallRuleAction.Open, false, false, DarlingCliCommands.FirewallHandoff.OpenCommand)]
+    /* The defect this issue is about: a Remove with a rule really sitting there now gets its own command. */
+    [InlineData(DarlingCliCommands.FirewallRuleAction.Remove, true, true, DarlingCliCommands.FirewallHandoff.SweepCommand)]
+    /* ...and the common case stays exactly as quiet as it was, because the probe MEASURED that. */
+    [InlineData(DarlingCliCommands.FirewallRuleAction.Remove, true, false, DarlingCliCommands.FirewallHandoff.Nothing)]
+    /* A probe that could not answer offers the command but is not evidence of drift. */
+    [InlineData(DarlingCliCommands.FirewallRuleAction.Remove, true, null, DarlingCliCommands.FirewallHandoff.SweepCommandUnverified)]
+    /* #2436's withheld sweep: nothing is handed over on any probe answer, including "a rule is there" — that
+       rule may be the one the endpoint is being served on. */
+    [InlineData(DarlingCliCommands.FirewallRuleAction.Remove, false, true, DarlingCliCommands.FirewallHandoff.Nothing)]
+    [InlineData(DarlingCliCommands.FirewallRuleAction.Remove, false, false, DarlingCliCommands.FirewallHandoff.Nothing)]
+    [InlineData(DarlingCliCommands.FirewallRuleAction.Remove, false, null, DarlingCliCommands.FirewallHandoff.Nothing)]
+    public void ClassifyNotElevatedHandoff_IsTheWholeTable(
+        DarlingCliCommands.FirewallRuleAction action,
+        bool sweepOtherPorts,
+        bool? rulesFound,
+        DarlingCliCommands.FirewallHandoff expected)
+    {
+        Assert.Equal(expected, DarlingCliCommands.ClassifyNotElevatedHandoff(action, sweepOtherPorts, rulesFound));
+    }
+
+    /// <summary>
+    /// The exit code is a claim about the FIREWALL. install-darling.ps1 prints a re-run banner on a non-zero
+    /// from this verb, so an unverified sweep must not raise one: "the probe did not answer" is not drift, and
+    /// a banner that fires without cause is how operators learn to ignore the one that has cause. Under-
+    /// reporting is the safe direction here because the running service re-probes the same rule on every start.
+    /// </summary>
+    [Fact]
+    public void NotElevatedRunHasWork_CountsMeasuredWorkOnly()
+    {
+        Assert.False(DarlingCliCommands.NotElevatedRunHasWork([]));
+        Assert.False(DarlingCliCommands.NotElevatedRunHasWork([DarlingCliCommands.FirewallHandoff.Nothing]));
+        Assert.False(DarlingCliCommands.NotElevatedRunHasWork([DarlingCliCommands.FirewallHandoff.SweepCommandUnverified]));
+
+        Assert.True(DarlingCliCommands.NotElevatedRunHasWork([DarlingCliCommands.FirewallHandoff.SweepCommand]));
+        Assert.True(DarlingCliCommands.NotElevatedRunHasWork([DarlingCliCommands.FirewallHandoff.OpenCommand]));
+
+        /* Mixed: one measured removal among unverifiable siblings still means an elevated shell has work. */
+        Assert.True(DarlingCliCommands.NotElevatedRunHasWork(
+        [
+            DarlingCliCommands.FirewallHandoff.Nothing,
+            DarlingCliCommands.FirewallHandoff.SweepCommandUnverified,
+            DarlingCliCommands.FirewallHandoff.SweepCommand,
+        ]));
+    }
+
+    /// <summary>
+    /// The wiring, against plans the real planner produced rather than against hand-built flags — this is the
+    /// pairing that matters and the one an enum table alone cannot show. An admin who ran <c>--disable-mcp</c>
+    /// and re-ran this verb unelevated gets the sweep command; the surface #2436 declines to sweep gets
+    /// nothing, on the SAME probe answer.
+    /// </summary>
+    [Fact]
+    public void TheHandoff_FollowsThePlannersSweepPermission_NotJustTheAction()
+    {
+        /* Control plane answered "off" for a fully LAN-configured MCP: a Remove that IS allowed to sweep. */
+        var disabled = ManagedConfig();
+        disabled.Mcp.Enabled = true;
+        disabled.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
+        var disabledPlan = Assert.Single(
+            DarlingCliCommands.PlanFirewallRules(disabled, mcpStore: (false, 5152)).Where(p => p.Surface == "MCP"));
+
+        Assert.Equal(DarlingCliCommands.FirewallRuleAction.Remove, disabledPlan.Action);
+        Assert.True(disabledPlan.SweepOtherPorts);
+        Assert.Equal(
+            DarlingCliCommands.FirewallHandoff.SweepCommand,
+            DarlingCliCommands.ClassifyNotElevatedHandoff(disabledPlan.Action, disabledPlan.SweepOtherPorts, rulesFound: true));
+
+        /* Same shape, but the store could not be read, so the file's "off" may be years stale and the rule
+           may be the live one. Handing that sweep to an operator would hand them the outage by copy-paste. */
+        var unreadable = ManagedConfig();
+        unreadable.Mcp.Enabled = false;
+        unreadable.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
+        var withheldPlan = Assert.Single(
+            DarlingCliCommands.PlanFirewallRules(unreadable, storeUnavailableReason: "the store did not answer within 10 seconds")
+                .Where(p => p.Surface == "MCP"));
+
+        Assert.Equal(DarlingCliCommands.FirewallRuleAction.Remove, withheldPlan.Action);
+        Assert.False(withheldPlan.SweepOtherPorts);
+        Assert.Equal(
+            DarlingCliCommands.FirewallHandoff.Nothing,
+            DarlingCliCommands.ClassifyNotElevatedHandoff(withheldPlan.Action, withheldPlan.SweepOtherPorts, rulesFound: true));
+    }
+
+    /// <summary>
+    /// The probe has to ask EXACTLY what the sweep would act on. A narrower question reports "nothing to do"
+    /// about rules the sweep would still collect; a wider one offers a command covering rules this product does
+    /// not own. Both go through the same wildcard builder, which is what makes that true by construction — this
+    /// pins that they still do.
+    /// </summary>
+    [Fact]
+    public void TheProbeAsksExactlyWhatTheSweepWouldDelete()
+    {
+        var wildcard = DarlingFirewallCheck.SurfaceRuleWildcard(DarlingMcpHostService.McpFirewallRuleName(5152));
+        Assert.Equal("PerformanceMonitor Darling MCP (port *)", wildcard);
+
+        var probe = DarlingFirewallCheck.BuildProbeCommand(wildcard);
+        var sweep = DarlingManagedPostgres.BuildFirewallSweepCommand(wildcard);
+
+        Assert.Contains("-DisplayName 'PerformanceMonitor Darling MCP (port *)'", probe, StringComparison.Ordinal);
+        Assert.Contains("-DisplayName 'PerformanceMonitor Darling MCP (port *)'", sweep, StringComparison.Ordinal);
+
+        /* Still read-only with a wildcard in it — this is the branch that holds no privilege. */
+        Assert.Contains("Get-NetFirewallRule", probe, StringComparison.Ordinal);
+        Assert.DoesNotContain("Remove-NetFirewallRule", probe, StringComparison.Ordinal);
+        Assert.DoesNotContain("New-NetFirewallRule", probe, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Source pins on the not-elevated branch itself, because the policy above is only worth anything if that
+    /// branch actually consults it. All three are expressible against dev and all three are red there, which
+    /// is the statement the enum tests cannot make.
+    /// </summary>
+    [Fact]
+    public void TheNotElevatedBranch_MeasuresAndOffersARemedyForARemoval()
+    {
+        var branch = NotElevatedBranch();
+
+        /* It offers BOTH remedies now. Before #2445 only the enable command appeared here, so a run whose
+           whole work was a removal handed the operator nothing at all. */
+        Assert.Contains("BuildFirewallEnableCommand", branch, StringComparison.Ordinal);
+        Assert.Contains("BuildFirewallSweepCommand", branch, StringComparison.Ordinal);
+
+        /* And it MEASURES rather than assuming. The old unconditional "toOpen == 0 means nothing to do" early
+           return is what said 0 over a stale rule; it must not come back. */
+        Assert.Contains("ProbeSurfaceRulesAsync(", branch, StringComparison.Ordinal);
+        Assert.Contains("NotElevatedRunHasWork(", branch, StringComparison.Ordinal);
+        Assert.DoesNotContain("if (toOpen == 0)", branch, StringComparison.Ordinal);
+
+        /* The probe is spent ONLY where its answer can change something — a Remove this run is allowed to
+           sweep. Probing an Open plan buys nothing, and probing a withheld sweep would invite printing it. */
+        Assert.Contains(
+            "plan.Action == FirewallRuleAction.Remove && plan.SweepOtherPorts",
+            branch, StringComparison.Ordinal);
+    }
+
     /* ---- helpers ---- */
 
     /// <summary>A managed, fully loopback-only config — the default install, and the baseline every exposure
@@ -935,6 +1082,38 @@ public class DarlingFirewallCheckTests
 
     private static System.Collections.Generic.IEnumerable<DarlingCliCommands.FirewallRulePlan> PlansFor(DarlingConfig config, string surface)
         => DarlingCliCommands.PlanFirewallRules(config).Where(p => p.Surface == surface);
+
+    /// <summary>
+    /// The <c>--configure-firewall</c> not-elevated branch as text, for the source pins above. Sliced rather
+    /// than searched whole-file because both remedy builders appear in the ELEVATED path a few lines below, so
+    /// a whole-file <c>Contains</c> would stay green with this branch deleted entirely.
+    /// <para>Anchored from the VERB's signature first, which is load-bearing rather than tidy:
+    /// <c>if (!IsElevated())</c> also appears in <c>--configure-network</c> several hundred lines above, and a
+    /// slice starting there swallowed the whole file — every assertion below passed against dev, where the
+    /// thing they pin does not exist. Every anchor is asserted, and so is the slice's SIZE, because the way
+    /// this pin fails is by quietly widening rather than by not matching.</para>
+    /// </summary>
+    private static string NotElevatedBranch()
+    {
+        var source = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs"));
+
+        var verb = source.IndexOf("public static async Task<int> ConfigureFirewallAsync(", StringComparison.Ordinal);
+        Assert.True(verb >= 0, "ConfigureFirewallAsync was renamed; this pin is not reading what it thinks it is");
+
+        var start = source.IndexOf("        if (!IsElevated())", verb, StringComparison.Ordinal);
+        Assert.True(start > verb, "the not-elevated branch anchor is stale; this pin is not reading what it thinks it is");
+
+        var end = source.IndexOf("        var failures = 0;", start, StringComparison.Ordinal);
+        Assert.True(end > start, "the end-of-branch anchor is stale; this pin is not reading what it thinks it is");
+
+        var branch = source[start..end];
+        Assert.True(
+            branch.Length < 8000,
+            $"the sliced not-elevated branch is {branch.Length} characters, which is far more than one branch — "
+                + "an anchor has drifted and these pins would pass on text they are not about.");
+
+        return branch;
+    }
 
     private static string ReadRepoFile(string relativePath)
     {
