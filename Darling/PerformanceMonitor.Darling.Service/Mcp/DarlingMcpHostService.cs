@@ -137,9 +137,6 @@ public sealed class DarlingMcpHostService : BackgroundService
            network exposure block is restart-only by design). */
         DarlingConfig? config = null;
         var lastFailedStartUtc = DateTime.MinValue;
-        /* #2389: the last control-plane-override report emitted, so a steady disagreement is stated once per
-           distinct state instead of on every 5s poll tick. */
-        string? lastOverrideReport = null;
         while (!stoppingToken.IsCancellationRequested)
         {
             if (config is null && DateTime.UtcNow - lastFailedStartUtc >= FailedStartBackoff)
@@ -172,29 +169,13 @@ public sealed class DarlingMcpHostService : BackgroundService
             }
 
             var published = _state.Read();
+            var enabled = published?.Enabled ?? config.Mcp.Enabled;
+            var desiredPort = published?.Port ?? config.Mcp.Port;
 
-            /* #2389: the store still wins whenever the worker has published (unchanged), but the resolution
-               now carries WHICH plane supplied each value, so neither the start line nor a disagreement has to
-               be inferred from two INFO lines five seconds apart. */
-            var toggle = DarlingHostBinding.ResolveEndpointToggle(
-                published is null ? null : (published.Enabled, published.Port), config.Mcp.Enabled, config.Mcp.Port);
-
-            /* Report the DISAGREEMENT at the point of override, not the outcome. Once per distinct state (the
-               last-reported string, the same shape as the firewall check's ShouldReport) so a steady mismatch
-               says its piece once per service start rather than every poll tick, while a LATER re-divergence —
-               someone toggling the store after boot — is still reported. */
-            var overrideReport = DarlingHostBinding.DescribeToggleOverride(toggle, "mcp", "MCP", config.Mcp.Enabled, config.Mcp.Port);
-            if (overrideReport is not null && !string.Equals(overrideReport, lastOverrideReport, StringComparison.Ordinal))
-            {
-                _logger.LogWarning("{Report}", overrideReport);
-            }
-
-            lastOverrideReport = overrideReport;
-
-            switch (DecideMcpAction(_app is not null, _runningPort, toggle.Enabled, toggle.Port))
+            switch (DecideMcpAction(_app is not null, _runningPort, enabled, desiredPort))
             {
                 case McpSupervisorAction.Start when DateTime.UtcNow - lastFailedStartUtc >= FailedStartBackoff:
-                    if (!await TryStartServerAsync(config, toggle, stoppingToken))
+                    if (!await TryStartServerAsync(config, desiredPort, stoppingToken))
                     {
                         lastFailedStartUtc = DateTime.UtcNow;
                     }
@@ -207,9 +188,9 @@ public sealed class DarlingMcpHostService : BackgroundService
 
                 case McpSupervisorAction.Restart:
                     _logger.LogInformation(
-                        "MCP port changed via the control plane ({Old} -> {New}) — rebinding", _runningPort, toggle.Port);
+                        "MCP port changed via the control plane ({Old} -> {New}) — rebinding", _runningPort, desiredPort);
                     await StopServerAsync(stoppingToken);
-                    if (!await TryStartServerAsync(config, toggle, stoppingToken))
+                    if (!await TryStartServerAsync(config, desiredPort, stoppingToken))
                     {
                         lastFailedStartUtc = DateTime.UtcNow;
                     }
@@ -277,20 +258,15 @@ public sealed class DarlingMcpHostService : BackgroundService
     }
 
     /// <summary>
-    /// One start ATTEMPT of the inner MCP web app at <paramref name="toggle"/>'s port (#1560): the whole
+    /// One start ATTEMPT of the inner MCP web app at <paramref name="effectivePort"/> (#1560): the whole
     /// pre-supervisor startup body, with two changes — the port comes from the live control-plane value
     /// rather than the file, and every bail path returns false so the supervisor can retry with backoff
     /// instead of standing down for the process lifetime. The bind/network/token decisions still come from
     /// the FILE-loaded config (network exposure is deliberately restart-only); returns true when the app
     /// is started and listening.
-    /// <para>#2389: the toggle carries the enable/port PROVENANCE, not just the port, so the start line names
-    /// the plane each half of the bind came from — the operator greps that line and stops reading, so it has
-    /// to admit when it is starting on file values the control plane may be about to contradict.</para>
     /// </summary>
-    private async Task<bool> TryStartServerAsync(
-        DarlingConfig config, DarlingHostBinding.EndpointToggle toggle, CancellationToken stoppingToken)
+    private async Task<bool> TryStartServerAsync(DarlingConfig config, int effectivePort, CancellationToken stoppingToken)
     {
-        var effectivePort = toggle.Port;
         /* Decide the effective bind PURELY, then map the reason -> severity here (Round-4 #7: the caller,
            not the pure fn, chooses LogCritical vs LogWarning; tests assert (Mode, Reason) without a logger). */
         var bind = ResolveMcpBind(config.Mcp, config.Postgres.Managed);
@@ -730,21 +706,15 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             _app.MapMcp();
 
-            /* #2389: name the authority for each half of what is being started. enabled/port come from
-               whichever plane the supervisor resolved; listen/allowFrom/token are always darling.json. */
-            var origin = DarlingHostBinding.DescribeToggleOrigin(toggle);
             if (networkMode)
             {
                 _logger.LogInformation(
-                    "Starting MCP server on http://{Listen}:{Port} (LAN-exposed to {Cidr} behind a bearer token + in-app CIDR; loopback also bound) — "
-                    + "enabled/port from {Origin}; listen/allowFrom/token from darling.json mcp.network (file-only, restart-only)",
-                    primaryBind, effectivePort, allowedCidr, origin);
+                    "Starting MCP server on http://{Listen}:{Port} (LAN-exposed to {Cidr} behind a bearer token + in-app CIDR; loopback also bound)",
+                    primaryBind, effectivePort, allowedCidr);
             }
             else
             {
-                _logger.LogInformation(
-                    "Starting MCP server on http://localhost:{Port} (loopback only) — enabled/port from {Origin}",
-                    effectivePort, origin);
+                _logger.LogInformation("Starting MCP server on http://localhost:{Port} (loopback only)", effectivePort);
             }
 
             /* StartAsync, not RunAsync (#1560): the supervisor loop owns the wait — the app keeps

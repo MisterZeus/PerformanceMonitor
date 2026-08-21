@@ -123,7 +123,7 @@ internal static class McpInstructions
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
         | `get_alert_history` | Recent alert history: what fired, when, email status | `hours_back` (default 24), `limit` (default 50) |
-        | `get_alert_settings` | Every alert group's enable flag and thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, PVS, file growth, failed jobs, database state), plus cooldown, excluded databases, delivery mode, analysis cadence and SMTP configuration | none |
+        | `get_alert_settings` | Current alert thresholds and SMTP configuration | none |
         | `get_mute_rules` | Configured mute rules that suppress specific recurring alerts (still logged) | `enabled_only` (default true) |
 
         ### Job Tools

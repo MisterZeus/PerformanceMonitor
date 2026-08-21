@@ -76,7 +76,7 @@ public sealed class McpAlertTools
         }
     }
 
-    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration this instance is running on: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries and jobs, tempdb space, low disk, PVS, file growth, failed jobs, database state), the cooldown, the excluded databases, the deadlock/blocking delivery mode, the scheduled-analysis cadence, and the SMTP email configuration. The same nested shape Darling's get_alert_settings returns, minus its self_alerts group (the headless service's own store-volume and collection-health thresholds, which a single-instance Lite install has no equivalent for) and plus smtp, which Lite delivers itself. Read-only: Lite has no update_alert_settings, so these change in the Settings window.")]
+    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert and SMTP email configuration settings.")]
     public static Task<string> GetAlertSettings()
     {
         try
@@ -118,105 +118,6 @@ public sealed class McpAlertTools
                     /* Same alignment: Darling reports this as count_threshold too. */
                     count_threshold = App.AlertDeadlockThreshold
                 },
-                /* #2394: everything from here down to analysis was already wired end to end on Lite —
-                   AppAlertEngineSettings has projected each of these statics onto the SHARED engine's
-                   IAlertEngineSettings since the Phase-5 forwarding, so the alerts evaluate here exactly as
-                   they do on Darling. Only the MCP surface was narrow, which meant an agent triaging a Lite
-                   instance could not read whether tempdb-space, low-disk, PVS, file-growth,
-                   long-running-query/job, failed-job, database-state or analysis alerting was even switched
-                   on. Group and key spellings are Darling's verbatim, because one MCP schema across both SKUs
-                   is the whole point of the #1839/#1911 alignments above — and note McpHelpers.JsonOptions
-                   sets no naming policy, so the C# identifier IS the wire key. */
-                poison_wait = new
-                {
-                    enabled = App.AlertPoisonWaitEnabled,
-                    threshold_ms = App.AlertPoisonWaitThresholdMs
-                },
-                long_running_query = new
-                {
-                    enabled = App.AlertLongRunningQueryEnabled,
-                    threshold_minutes = App.AlertLongRunningQueryThresholdMinutes,
-                    max_results = App.AlertLongRunningQueryMaxResults,
-                    exclude_sp_server_diagnostics = App.AlertLongRunningQueryExcludeSpServerDiagnostics,
-                    exclude_wait_for = App.AlertLongRunningQueryExcludeWaitFor,
-                    exclude_backups = App.AlertLongRunningQueryExcludeBackups,
-                    exclude_misc_waits = App.AlertLongRunningQueryExcludeMiscWaits,
-                    exclude_cdc = App.AlertLongRunningQueryExcludeCdc
-                },
-                tempdb_space = new
-                {
-                    enabled = App.AlertTempDbSpaceEnabled,
-                    threshold_percent = App.AlertTempDbSpaceThresholdPercent
-                },
-                low_disk = new
-                {
-                    enabled = App.AlertLowDiskEnabled,
-                    threshold_percent = App.AlertLowDiskThresholdPercent,
-                    threshold_gb = App.AlertLowDiskThresholdGb,
-                    /* Darling nests the #1136 CRITICAL-tier floors INSIDE low_disk and drops the "disk"
-                       prefix the statics carry, so these are critical_free_*, not disk_critical_free_*.
-                       Naming them after the App members would have read as correct and been a fifth
-                       key-level mismatch. */
-                    critical_free_percent = App.AlertDiskCriticalFreePercent,
-                    critical_free_gb = App.AlertDiskCriticalFreeGb
-                },
-                /* Darling reports a self_alerts group in this position — its own store volume, collection
-                   staleness/failure counts, and store-job cadence. Deliberately NOT emitted here.
-                   AppAlertEngineSettings returns shipped constants for three of those members precisely
-                   because Lite has no headless store volume and no fleet collection loop to self-monitor,
-                   and Lite has no concept whatsoever of the fourth (store_job_cadence_warn_percent).
-                   Reporting constants under names that read as knobs would tell an agent it can tune
-                   something Lite cannot, and an admitted gap beats an overstated capability. */
-                pvs = new
-                {
-                    enabled = App.AlertPvsEnabled,
-                    threshold_percent = App.AlertPvsThresholdPercent,
-                    floor_gb = App.AlertPvsFloorGb
-                },
-                file_growth = new
-                {
-                    enabled = App.AlertFileGrowthEnabled,
-                    rise_mb = App.AlertFileGrowthRiseMb,
-                    volume_percent = App.AlertFileGrowthVolumePercent,
-                    lookback_minutes = App.AlertFileGrowthLookbackMinutes
-                },
-                long_running_job = new
-                {
-                    enabled = App.AlertLongRunningJobEnabled,
-                    multiplier = App.AlertLongRunningJobMultiplier
-                },
-                failed_job = new
-                {
-                    enabled = App.AlertFailedJobEnabled,
-                    lookback_minutes = App.AlertFailedJobLookbackMinutes
-                },
-                database_state = new { enabled = App.AlertDatabaseStateEnabled },
-                cooldown_minutes = App.AlertCooldownMinutes,
-                excluded_databases = App.AlertExcludedDatabases,
-                delivery = new
-                {
-                    /* The second value-level alignment after cpu.mode — and the one place ToString() is the
-                       right answer rather than a mapping. AlertNotificationMode is the SHARED enum both SKUs
-                       run on, and Darling's store holds literally a.DeliveryMode.ToString(), so the two apps
-                       cannot drift the way Lite's app-local CpuAlertMode could. Darling's
-                       update_alert_settings validates delivery.mode against "Summary"/"PerEvent", which are
-                       those same member names. */
-                    mode = App.AlertDeliveryMode.ToString(),
-                    per_event_max = App.AlertPerEventMaxPerCycle
-                },
-                analysis = new
-                {
-                    enabled = App.AnalysisEnabled,
-                    interval_minutes = App.AnalysisIntervalMinutes,
-                    /* Darling's own note applies here too: this is the ANALYSIS section's delivery gate, and
-                       is why the master switch above had to be renamed off notifications_enabled. */
-                    notifications_enabled = App.AnalysisNotificationsEnabled,
-                    notify_severity = App.AnalysisNotifySeverity,
-                    notify_cooldown_minutes = App.AnalysisNotifyCooldownMinutes
-                },
-                /* Lite-only, and left last so the shared groups above stay in Darling's order: Lite delivers
-                   its own email, where Darling manages delivery credentials outside the settings row and
-                   reports no smtp group at all. The password is reported as a boolean, never a value. */
                 smtp = new
                 {
                     enabled = App.SmtpEnabled,

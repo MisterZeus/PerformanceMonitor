@@ -534,6 +534,7 @@ public partial class SettingsWindow : Window
         AnalysisNotificationsCheckBox.IsChecked = App.AnalysisNotificationsEnabled;
         AnalysisIntervalBox.Text = App.AnalysisIntervalMinutes.ToString();
         AnalysisNotifySeverityBox.Text = App.AnalysisNotifySeverity.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture);
+        AnalysisNotifyCooldownBox.Text = App.AnalysisNotifyCooldownMinutes.ToString();
         UpdateAlertControlStates();
     }
 
@@ -640,6 +641,13 @@ public partial class SettingsWindow : Window
             App.AnalysisNotifySeverity = analysisSeverity;
         else
             validationErrors.Add("Analysis notify severity must be between 0.0 and 2.0.");
+        /* Same range App.LoadAlertSettings clamps this key to on read, so the value the box accepts and the
+           value the next launch honors can never disagree -- Lite's settings adapter passes the static
+           straight through to AnalysisNotificationService without a second clamp. */
+        if (int.TryParse(AnalysisNotifyCooldownBox.Text, out var analysisCooldown) && analysisCooldown >= 30 && analysisCooldown <= 10080)
+            App.AnalysisNotifyCooldownMinutes = analysisCooldown;
+        else
+            validationErrors.Add("Analysis re-notify cooldown must be between 30 and 10080 minutes.");
 
         var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
         try
@@ -714,6 +722,7 @@ public partial class SettingsWindow : Window
             root["analysis_notifications_enabled"] = App.AnalysisNotificationsEnabled;
             root["analysis_interval_minutes"] = App.AnalysisIntervalMinutes;
             root["analysis_notify_severity"] = App.AnalysisNotifySeverity;
+            root["analysis_notify_cooldown_minutes"] = App.AnalysisNotifyCooldownMinutes;
 
             var options = new JsonSerializerOptions { WriteIndented = true };
             File.WriteAllText(settingsPath, root.ToJsonString(options));
@@ -766,6 +775,7 @@ public partial class SettingsWindow : Window
         AlertPerEventMaxBox.Text = "10";
         AnalysisIntervalBox.Text = "30";
         AnalysisNotifySeverityBox.Text = "1.5";
+        AnalysisNotifyCooldownBox.Text = "360";
         AlertExcludedDatabasesBox.Text = "";
         MuteRuleDefaultExpirationCombo.SelectedIndex = 1; // 24 hours
         UpdateAlertPreviewText();
