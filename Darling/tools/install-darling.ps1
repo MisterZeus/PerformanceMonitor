@@ -15,6 +15,10 @@ C:\PerformanceMonitorDarling). What it does, in order:
      that is neither you nor an administrator, and a profile folder grants nothing to it, so the
      service installs cleanly and then dies at the bundled PostgreSQL's first step (#2185, #2187).
      Extract to a machine-scoped local path such as C:\PerformanceMonitorDarling instead.
+  1c. REFUSES an install when the ASP.NET Core Runtime 10 is missing, and WARNS when the .NET Desktop
+     Runtime 10 is (#2479). Both shipped binaries are framework-dependent; a stock Windows Server image
+     has neither runtime, and the failure is the .NET host's own "You must install .NET" error with
+     nothing of ours on it. Part of the pre-flight, so -SkipPreflight skips it.
   2. Optional pre-flight: runs `--test-connection` and shows the per-server PASS/FAIL lines
      (continue-or-abort prompt on failure; -SkipPreflight to skip).
   3. Registers the Windows Event Log source 'PerformanceMonitor Darling' (requires elevation —
@@ -38,7 +42,8 @@ C:\PerformanceMonitorDarling). What it does, in order:
 Uninstall with uninstall-darling.ps1 (same folder).
 
 .PARAMETER SkipPreflight
-Skip the --test-connection pre-flight gate.
+Skip BOTH pre-flight gates: the .NET runtime check (1c) and the --test-connection probe (2). The runtime
+check is the escape hatch for a private or xcopy runtime layout this script cannot see.
 
 .PARAMETER NoShortcuts
 Do not create the viewer shortcuts.
@@ -63,6 +68,12 @@ $serviceExe = Join-Path $root 'PerformanceMonitor.Darling.Service.exe'
 $viewerExe = Join-Path $root 'viewer\PerformanceMonitor.Darling.Viewer.exe'
 $configPath = Join-Path $root 'darling.json'
 $samplePath = Join-Path $root 'darling.sample.json'
+
+# The .NET major both shipped binaries are built against, and the one page that offers every installer
+# for it. Kept beside the other script-scope facts so a framework bump is one edit, and deliberately the
+# SAME url the UAT onboarding prints - a tester who reads both should not be sent to two places.
+$dotnetMajor = 10
+$dotnetDownloadUrl = 'https://dotnet.microsoft.com/download/dotnet/10.0'
 
 function Fail([string]$message) { Write-Host "ERROR: $message" -ForegroundColor Red; exit 1 }
 
@@ -164,6 +175,96 @@ function Get-NetworkPathKind([string]$path) {
     if ($psDrive -and -not [string]::IsNullOrWhiteSpace($psDrive.DisplayRoot)) { return 'mapped drive' }
 
     return $null
+}
+
+# Every place the .NET host looks for a shared framework, in the order it looks. Used by the runtime gate
+# at 1c, which has to answer "can these binaries start at all" on a box where dotnet.exe may not exist.
+function Get-DotnetRootCandidates {
+    $roots = New-Object 'System.Collections.Generic.List[string]'
+
+    # DOTNET_ROOT wins here because it wins for the host: an operator who redirected the runtime is not
+    # someone whose install should be refused for looking in the wrong place.
+    foreach ($fromEnv in @($env:DOTNET_ROOT, ${env:DOTNET_ROOT_X64})) {
+        if (-not [string]::IsNullOrWhiteSpace($fromEnv)) { $roots.Add($fromEnv) }
+    }
+
+    # Where the official installers record themselves. The key is HKLM:\SOFTWARE\dotnet - NOT under
+    # Microsoft\ - and reading it is what finds an install that was pointed somewhere other than
+    # Program Files. Its absence proves nothing, so the default location below is checked regardless.
+    try {
+        $recorded = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\dotnet\Setup\InstalledVersions\x64' -Name 'InstallLocation' -ErrorAction Stop).InstallLocation
+        if (-not [string]::IsNullOrWhiteSpace($recorded)) { $roots.Add($recorded) }
+    }
+    catch {
+        # No registry entry, or an unreadable one. Fall through.
+    }
+
+    foreach ($programFiles in @($env:ProgramW6432, $env:ProgramFiles)) {
+        if (-not [string]::IsNullOrWhiteSpace($programFiles)) { $roots.Add((Join-Path $programFiles 'dotnet')) }
+    }
+
+    return $roots
+}
+
+# The version folder names present for one shared framework, e.g. '10.0.11' for Microsoft.AspNetCore.App.
+# Returns an empty list when the framework is not installed anywhere this can see.
+function Get-InstalledFrameworkVersions([string]$frameworkName) {
+    $versions = New-Object 'System.Collections.Generic.List[string]'
+
+    foreach ($dotnetRoot in (Get-DotnetRootCandidates)) {
+        $frameworkDir = Join-Path (Join-Path $dotnetRoot 'shared') $frameworkName
+        if (-not (Test-Path -LiteralPath $frameworkDir)) { continue }
+        foreach ($child in @(Get-ChildItem -LiteralPath $frameworkDir -Directory -ErrorAction SilentlyContinue)) {
+            $versions.Add($child.Name)
+        }
+    }
+
+    # `dotnet --list-runtimes` is the authoritative answer and sees layouts the three guesses above do
+    # not, but it is a SUPPLEMENT rather than the primary check: a box with neither runtime installed
+    # frequently has no dotnet.exe on it at all, and that is precisely the box this gate exists for.
+    $muxer = Get-Command 'dotnet' -CommandType Application -ErrorAction SilentlyContinue
+    if ($muxer) {
+        try {
+            foreach ($line in @(& $muxer.Source --list-runtimes 2>$null)) {
+                if ($line -match ('^' + [Regex]::Escape($frameworkName) + '\s+(\S+)\s')) { $versions.Add($Matches[1]) }
+            }
+        }
+        catch {
+            # A dotnet.exe that cannot list its own runtimes tells us nothing the directory scan did not.
+        }
+    }
+
+    return $versions
+}
+
+# True when at least one of $versions is a build of major version $major.
+#
+# The test is on the PARSED leading integer, never a text prefix. '1.10.0' and '110.0.0' both contain the
+# characters '10.' and neither one is .NET 10, so a -like '10.*' or a bare -match '10\.' waves a box
+# through with no runtime on it and hands the operator back the raw host error this gate exists to
+# replace - the worse of the two failures, because it looks like the check ran.
+#
+# MAJOR is the right granularity because it is the granularity the host rolls forward at: a net10.0 app
+# rolls forward across patch and minor by default but never across major, so any 10.x satisfies these
+# binaries and an 11.x does not.
+function Test-FrameworkMajorPresent([string[]]$versions, [int]$major) {
+    if ($null -eq $versions) { return $false }
+
+    foreach ($version in $versions) {
+        if ([string]::IsNullOrWhiteSpace($version)) { continue }
+        if ($version -match '^\s*(\d+)(?:\.|$)') {
+            if ([int]$Matches[1] -eq $major) { return $true }
+        }
+    }
+
+    return $false
+}
+
+# What the gate says it found. 'nothing' rather than an empty string, because a blank there reads as a
+# formatting bug and sends the operator looking in the wrong place.
+function Format-FrameworkVersionList([string[]]$versions) {
+    if ($null -eq $versions -or $versions.Count -eq 0) { return 'nothing' }
+    return (($versions | Sort-Object -Unique) -join ', ')
 }
 
 # -- 1. Environment checks ------------------------------------------------------------------------
@@ -287,6 +388,74 @@ Nothing was installed or changed.
     Write-Host 'this is a question. If it has NOT been, the service will stop working the moment it restarts.' -ForegroundColor Yellow
     $answer = Read-Host 'Point the service at this folder anyway? [y/N]'
     if ($answer -notmatch '^[Yy]') { exit 4 }
+}
+
+# -- 1c. Refuse an install the .NET runtimes on this box cannot run (#2479) ------------------------
+# The first thing a new operator hits and the least self-explanatory. Both shipped binaries are
+# FRAMEWORK-DEPENDENT publishes, so both name a shared framework in their runtimeconfig.json and neither
+# carries one:
+#
+#   PerformanceMonitor.Darling.Service.exe -> Microsoft.NETCore.App + Microsoft.AspNetCore.App
+#   viewer\PerformanceMonitor.Darling.Viewer.exe -> Microsoft.NETCore.App + Microsoft.WindowsDesktop.App
+#
+# ASP.NET Core is required UNCONDITIONALLY, which is the part nobody expects: the MCP tools reference
+# ModelContextProtocol.AspNetCore, which brings the Microsoft.AspNetCore.App framework reference in
+# transitively, so the framework is named in the runtimeconfig whether or not mcp.enabled and
+# web.enabled are ever turned on. Setting them false does not make the requirement go away.
+#
+# A stock Windows Server image has neither runtime. Without this gate the operator's first signal is the
+# .NET host's own error - "You must install .NET to run this application" - printed BY THE PRE-FLIGHT AT
+# STEP 2, which then reports "the config is invalid or a server is unreachable" and offers to install
+# anyway. That diagnosis is not merely unhelpful, it is wrong, and it points at the config file. So this
+# has to run before step 2 touches the exe at all.
+#
+# Governed by -SkipPreflight rather than a switch of its own, because it is the same kind of gate: a
+# question asked before anything is created, answered from the operator's machine, and worth bypassing
+# only when the operator knows something this script cannot see.
+if (-not $SkipPreflight) {
+    $aspNetVersions = @(Get-InstalledFrameworkVersions 'Microsoft.AspNetCore.App')
+    $desktopVersions = @(Get-InstalledFrameworkVersions 'Microsoft.WindowsDesktop.App')
+
+    if (-not (Test-FrameworkMajorPresent $aspNetVersions $dotnetMajor)) {
+        Fail @"
+The ASP.NET Core Runtime $dotnetMajor.0 is not installed, and the service cannot start without it.
+
+  Need:  ASP.NET Core Runtime $dotnetMajor.0 (x64). The Hosting Bundle contains it and also works.
+  Found: $(Format-FrameworkVersionList $aspNetVersions)
+  Get:   $dotnetDownloadUrl
+
+This is required whether or not you ever enable MCP or the web dashboard - the MCP package brings the
+ASP.NET Core framework reference in transitively, so the service names it at startup either way.
+
+Install it and run this script again. Nothing was installed or changed.
+
+If this machine DOES have it in a layout this check cannot see, re-run with -SkipPreflight, which skips
+this gate and the --test-connection probe together.
+"@
+    }
+
+    # A WARNING and not a refusal, and the asymmetry is deliberate. A missing ASP.NET Core runtime means
+    # the thing being installed cannot run; a missing Desktop runtime means only that the viewer cannot,
+    # and a headless collector host that nobody ever opens a window on is a legitimate deployment. What
+    # it must not do is stay quiet, because this script creates Desktop and Start Menu shortcuts a few
+    # steps from here and a tester will double-click one.
+    #
+    # Scoped to the co-located viewer\ folder on purpose: the remote-seat viewer installed from the
+    # Velopack Setup.exe is a SELF-CONTAINED publish and needs no Desktop runtime at all, so this is a
+    # statement about this box, not about every seat.
+    if (-not (Test-FrameworkMajorPresent $desktopVersions $dotnetMajor)) {
+        Write-Host ''
+        Write-Host "WARNING: the .NET Desktop Runtime $dotnetMajor.0 is not installed." -ForegroundColor Yellow
+        Write-Host "  Found: $(Format-FrameworkVersionList $desktopVersions)" -ForegroundColor Yellow
+        Write-Host "  Get:   $dotnetDownloadUrl" -ForegroundColor Yellow
+        Write-Host ''
+        Write-Host 'The SERVICE does not need it and this install continues. The bundled viewer does: the Desktop and' -ForegroundColor Yellow
+        Write-Host 'Start Menu shortcuts this script creates will fail with the .NET host error until it is installed.' -ForegroundColor Yellow
+        Write-Host ''
+    }
+    else {
+        Write-Host "Runtime check passed (ASP.NET Core $dotnetMajor and .NET Desktop $dotnetMajor present)." -ForegroundColor Green
+    }
 }
 
 if (-not (Test-Path $configPath)) {
