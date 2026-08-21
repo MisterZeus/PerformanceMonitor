@@ -1104,17 +1104,11 @@ public partial class MainWindow : Window
     // ── Time-display mode (Server / Local / UTC) ─────────────────────────────────────
 
     /// <summary>
-    /// A server tab's Server/Local/UTC picker changed (the raising tab already set the global mode via
-    /// <see cref="ViewerTimeHelper.CurrentDisplayMode"/> and reloaded itself). Persist the new mode and sync
-    /// every OTHER open tab's picker so they agree — the mode is process-wide, and a background tab reloads
-    /// on activation and picks it up.
-    /// </summary>
-    /// <summary>
     /// Says that a setting the user just changed did not reach disk (#2434).
     ///
-    /// <para>These two handlers persist on an ordinary click — picking a time-display mode, re-sorting the
-    /// Overview — so a failure here has no Save button to report through, and until now had nowhere to go
-    /// at all: the store's Save could throw, neither handler caught it, and the whole-object write had
+    /// <para>The two handlers below persist on an ordinary click — picking a time-display mode, re-sorting
+    /// the Overview — so a failure there has no Save button to report through, and until now had nowhere to
+    /// go at all: the store's Save could throw, neither handler caught it, and the whole-object write had
     /// already replaced whatever it could not read. Save answers with a bool instead of throwing now, and
     /// this is what does something with the answer. Which file and what was wrong with it is in the log;
     /// what the user needs from a dialog is that the click did not stick.</para>
@@ -1128,6 +1122,12 @@ public partial class MainWindow : Window
             "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
     }
 
+    /// <summary>
+    /// A server tab's Server/Local/UTC picker changed (the raising tab already set the global mode via
+    /// <see cref="ViewerTimeHelper.CurrentDisplayMode"/> and reloaded itself). Persist the new mode and sync
+    /// every OTHER open tab's picker so they agree — the mode is process-wide, and a background tab reloads
+    /// on activation and picks it up.
+    /// </summary>
     private void OnDisplayModeChanged(TimeDisplayMode mode)
     {
         var settings = _appSettingsStore.Load();
