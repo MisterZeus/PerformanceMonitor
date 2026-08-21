@@ -238,6 +238,29 @@ ORDER BY collector_name";
     /// <see cref="GetWaitStatsAsync"/> windows its read. The old single now-relative lower bound ignored
     /// the custom To, rounding a custom range to a hours-back-from-now span.
     /// </summary>
+    /// <summary>
+    /// Whether this server has EVER recorded a collector run, ignoring any window.
+    /// <para>Lets an empty log read say WHICH kind of nothing it found. "No runs in the last N hours" is
+    /// true both of a quiet window and of a server that has never collected, and those want opposite
+    /// responses from the caller -- widen the window, versus go find out why collection is not running.
+    /// Darling's twin is <c>DarlingDataReader.HasAnyCollectionLogAsync</c>; the two must stay in step so a
+    /// user moving between the SKUs is not told a different story about the same state.</para>
+    /// </summary>
+    public async Task<bool> HasAnyCollectionLogAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT 1
+FROM v_collection_log
+WHERE server_id = $1
+LIMIT 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return await command.ExecuteScalarAsync() is not null and not DBNull;
+    }
+
     public async Task<List<CollectionLogRow>> GetRecentCollectionLogAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, int maxRows = 500)
     {
         using var connection = await OpenConnectionAsync();

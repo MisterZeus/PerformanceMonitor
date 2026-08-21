@@ -261,4 +261,75 @@ public sealed class McpHealthTools
             return McpHelpers.FormatError("get_collection_health", ex);
         }
     }
+
+    [McpServerTool(Name = "get_collection_log"), Description("Gets the RAW per-run collection log for a server, newest first: one row per collector run with its total duration, the part spent querying the monitored server, the part spent writing to the local store, rows collected, status and any error. get_collection_health rolls these into a per-collector verdict; this is the underlying runs, which is what you need when the rollup says healthy and collection still looks wrong, or when you want to see what a collector was doing during a specific incident window.")]
+    public static async Task<string> GetCollectionLog(
+        LocalDataService dataService,
+        ServerManager serverManager,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description("Maximum rows to return, newest first. Default 200.")] int limit = 200)
+    {
+        var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
+        if (error != null) return error;
+
+        try
+        {
+            var hours = Math.Abs(hours_back);
+            var cap = Math.Clamp(limit, 1, 5000);
+            var rows = await dataService.GetRecentCollectionLogAsync(resolved.ServerId, hours, maxRows: cap);
+
+            if (rows.Count == 0)
+            {
+                /*
+                    Zero rows is two different facts wanting opposite responses. A server that collected
+                    and was simply quiet in THIS window is a true negative and the move is to widen it; a
+                    server with no log rows at all has never collected, which is a fault, and telling that
+                    caller "nothing in the last 24 hours" sends them off widening a window that will never
+                    fill. Darling's twin makes the same distinction with the same words -- a user moving
+                    between the SKUs must not be told a different story about the same state.
+                */
+                var everCollected = await dataService.HasAnyCollectionLogAsync(resolved.ServerId);
+                return everCollected
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"No collector runs recorded for {resolved.ServerName} in the last {hours} hour(s). This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.")
+                    : McpHelpers.Status(
+                        "unavailable",
+                        $"No collector runs have EVER been recorded for {resolved.ServerName}. This is not an empty window — collection has not run at all for this server. Check that collection is running and that the server is enabled; get_collection_health will be equally empty until it does.");
+            }
+
+            var result = rows.Select(r => new
+            {
+                collector = r.CollectorName,
+                collection_time = r.CollectionTime.ToString("o"),
+                duration_ms = r.DurationMs,
+                /*
+                    The split matters more than the total: a collector slow because the monitored server
+                    is slow needs a different fix from one slow because the store is, and the total alone
+                    cannot tell them apart. Named store_duration_ms rather than duckdb_duration_ms so the
+                    two SKUs advertise ONE field name for one meaning -- the storage engine differs, the
+                    question the caller is asking does not.
+                */
+                sql_duration_ms = r.SqlDurationMs,
+                store_duration_ms = r.DuckDbDurationMs,
+                rows_collected = r.RowsCollected,
+                status = r.Status,
+                error_message = r.ErrorMessage,
+            });
+
+            return JsonSerializer.Serialize(new
+            {
+                server = resolved.ServerName,
+                hours_back = hours,
+                run_count = rows.Count,
+                truncated = rows.Count >= cap,
+                runs = result,
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("get_collection_log", ex);
+        }
+    }
 }
