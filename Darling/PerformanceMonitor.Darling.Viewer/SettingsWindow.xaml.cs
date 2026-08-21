@@ -1506,7 +1506,22 @@ public partial class SettingsWindow : Window
         SaveCsvSeparator();
         SaveTimeDisplayMode();
         SaveColorTheme();
-        _appSettingsStore.Save(_appSettings);
+
+        /* #2434: a whole-object replace that did not happen must not pass for one that did. Said here,
+           at the point it happens, rather than folded into the validation list below — that list's
+           sentence is about values the window rejected, which is a different thing from a file it could
+           not write. The operator config further down goes to the Darling store and reports separately,
+           so a failure here does not stop it. */
+        if (!_appSettingsStore.Save(_appSettings))
+        {
+            MessageBox.Show(
+                "The viewer's own settings could not be written to "
+                + $"'{System.IO.Path.GetFileName(_appSettingsStore.FilePath)}', so the viewer-local "
+                + "preferences on this page (theme, CSV separator, timestamp display, tray options) will be "
+                + "back to their previous values on the next launch. The viewer log says why.",
+                "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
         Result = BuildViewerPreferences();
 
         if (errors.Count > 0)
