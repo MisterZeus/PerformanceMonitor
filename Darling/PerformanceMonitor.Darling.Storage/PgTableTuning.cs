@@ -75,6 +75,22 @@ public static class PgTableTuning
            to heap fetches. It was simply missed when the PostgreSQL collectors landed, since this list is
            hand-maintained rather than derived from the catalog. */
         "ALTER TABLE collect.pg_statement_stats SET (" + InsertTuningOptions + ")",
+        /* #2402: query_plan_dim needs the OTHER knob, and needs it for the opposite reason. Every override
+           above tunes INSERT vacuuming so the visibility map stays current on pure-insert hypertable chunks.
+           This table is not a hypertable and is not insert-only: retention DELETEs from it, so its churn is
+           DEAD TUPLES, which autovacuum_vacuum_insert_* does not govern at all.
+
+           Left at the stock 0.2 it needs 20% of the table dead before autovacuum will look at it — on the
+           dogfood store that is ~2.4 M rows, and it showed: 1,223,777 dead tuples with the last autovacuum
+           two days earlier, while its own TOAST table (which has its own thresholds against 57 M chunks) had
+           been vacuumed 152 times. The parent is the half that matters here, because the dead rows a purge
+           leaves behind are precisely the idx_query_plan_dim_last_seen entries the NEXT purge has to visit
+           and test for visibility before discarding. Untuned, each purge makes the following one slower and
+           then waits days for cleanup.
+
+           0.02 + 10000 sizes the trigger to roughly one purge's worth of deletions rather than to the
+           table's total size, so cleanup follows the work that created it. */
+        "ALTER TABLE collect.query_plan_dim SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 10000)",
     };
 
     /// <summary>
