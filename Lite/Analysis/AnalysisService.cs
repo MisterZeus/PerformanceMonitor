@@ -231,11 +231,21 @@ public class AnalysisService
 
             return findings;
         }
-        catch (Exception ex) when (context.CancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException ex) when (context.CancellationToken.IsCancellationRequested)
         {
             /* #2412: the pass was abandoned because it outlived its budget (or the app is
                stopping), which is not a fault and must not read as one. Whatever this pass would
-               have written is gone; the next scheduled pass recomputes it from the store. */
+               have written is gone; the next scheduled pass recomputes it from the store.
+
+               Both halves of the filter are load-bearing, and the TYPE half especially so here.
+               This token fires on TIMEOUT as well as at shutdown, so it is signalled during
+               ordinary running — a blanket `Exception` filter would relabel any genuine fault
+               that happened to land after the budget elapsed as abandonment and drop it to Info,
+               burying the one line of evidence it left. OperationCanceledException is what the
+               checkpoints throw, and what DuckDB's own duckdb_interrupt surfaces, so nothing the
+               cancellation actually produces is lost by naming it. This is the Darling twin's
+               AnalysisShutdown.IsShutdownAbandon discipline — signalled token AND a shape the
+               cancellation really produces — narrowed to the one shape that arises here. */
             AppLogger.Info("AnalysisService",
                 $"Analysis abandoned for {context.ServerName} — this pass's findings are lost by design; the next pass recomputes them ({ex.Message})");
             return [];
