@@ -485,10 +485,29 @@ exclusion list — 82 read endpoints out of 101 tools — and these are the excl
   `config_command` enqueue from 2.3, and the web host has no write path to it.
 - **No alert tuning, no mute-rule writes, no adding or removing servers.**
 
-And the pages simply do not exist for most of what the WPF viewer shows: the web side is Fleet Overview,
-per-server, Alert History, Availability Groups and Custom Views, against the viewer's fourteen per-server inner
-tabs. No wait-type picker, no query heatmap or period compare, no tempdb page, no perfmon picker, no Running
-Jobs, no configuration grids, no Recommendations cards.
+The pages are Fleet Overview, per-server, Alert History, Availability Groups and Custom Views. The per-server
+page carries twelve sub-tabs — Overview, Wait Stats, CPU, Memory, Blocking, File I/O, Queries, Configuration,
+Config Changes, Activity, System Events and Collection Health — reaching 61 of the 82 read endpoints, against
+the viewer's nineteen top-level per-server tabs (65 counting their inner tabs). So most of what the viewer
+shows is now here, and what is not divides into three groups.
+
+**Reads that exist but no web page shows.** The eight `get_pg_*` PostgreSQL reads, because `/api/fleet`'s card
+carries the SQL Server `engine_edition` and no target-engine discriminator, so the browser cannot tell a
+PostgreSQL target from a SQL Server one — a PostgreSQL panel would render on every SQL Server, permanently
+empty. Also `get_database_scoped_config`, whose `databases[].settings[]` shape the table renderer cannot draw,
+and `get_store_metrics`, which is store-wide and has no per-server home.
+
+**Data with no read endpoint at all**, so no amount of web work reaches it: Query Store regressions, the query
+heatmap, three of the four Performance Trends charts, the blocking-duration and deadlock-severity statistics,
+the lock-wait / waiting-task / blocked-session trends, and the raw collection log (the web Collection Health
+tab shows the 7-day rollup, not the log). The daily summary is the current UTC day's roll-up, not the viewer's
+month calendar.
+
+**Desktop things a web imitation would be worse than.** No graphical plan viewer, no query heatmap, no
+block-chain reconstruction and no interactive deadlock graph — the Blocking tab hands you the captured
+blocked-process-report and deadlock-graph XML verbatim instead of pretending. No period-compare grids, no
+per-query drill-down history window, and none of the desktop grids' own affordances: per-column filter
+popups, CSV export, Copy Repro Script, and right-click drill-down into a ±30-minute window.
 
 What it *can* write is one thing: **Custom Views** — the saved dashboards and notebooks in
 `config.custom_views`, created and edited through the built-in composer, plus `POST /api/compose/run` to
