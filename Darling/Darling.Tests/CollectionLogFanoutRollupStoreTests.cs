@@ -233,16 +233,20 @@ public class CollectionLogFanoutRollupStoreTests
     }
 
     /// <summary>
-    /// The tool that serves this names the collectors it applies to, and names all FIVE. The issue said
-    /// "query_store plus the two snapshot ones" and a comment in the runner said the same; two more have
-    /// joined since (<c>query_store_health</c> #2319, <c>plan_correction</c> #1952), and
-    /// <c>plan_correction</c> is the one that matters most in steady state — unlike <c>query_store</c>, whose
-    /// runs on this fleet are 84% empty enumerations on a busy shard and 100% on a quiet one, it is
-    /// productive on every cycle, so its blended duration is a fan-out sum every single time.
+    /// The tool that serves this names the enumeration-driven collectors it applies to, and the list is
+    /// DERIVED from the collector sources rather than typed out here — the first draft of this test hand-typed
+    /// five names, which is the same failure mode as the prose it was meant to guard.
+    ///
+    /// <para>The issue said "query_store plus the two snapshot ones" and a comment in the runner said the
+    /// same; two more had joined since (<c>query_store_health</c> #2319, <c>plan_correction</c> #1952). And
+    /// the description's FIRST version then made the opposite mistake, claiming five collectors fan out full
+    /// stop — there are two mechanisms, and <c>RunsPerDatabase</c> puts eight more on a per-database
+    /// connection loop on Azure SQL DB plus <c>pg_autovacuum_stats</c> always. Both are asserted, because
+    /// the accumulator feeds from both and a caller told only half would look past a collector that has a
+    /// <c>fanout</c> block.</para>
     ///
     /// <para>Pinned on the DESCRIPTION because that is what a caller reads before deciding whether the block
-    /// applies to the collector in front of them. A list that silently goes stale sends them looking for a
-    /// <c>fanout</c> block on a collector that has one, or past a collector that does.</para>
+    /// applies to the collector in front of them.</para>
     /// </summary>
     [Fact]
     public void TheToolDescription_NamesEveryCollectorThatFansOut()
@@ -250,20 +254,40 @@ public class CollectionLogFanoutRollupStoreTests
         var description = ReadRepoFile(System.IO.Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs"));
 
-        foreach (var collector in new[]
-                 {
-                     "query_store", "plan_correction", "query_store_health",
-                     "index_object_stats", "database_scoped_config",
-                 })
+        /* Derived, not remembered: every collector source that overrides BuildEnumerationQuery drives the
+           enumeration fan-out, so a sixth one starting to enumerate fails here instead of quietly falling
+           out of the description. */
+        var collectorsDir = System.IO.Path.Combine(RepoRoot(), "PerformanceMonitor.Collectors");
+        var enumerating = System.IO.Directory
+            .EnumerateFiles(collectorsDir, "*Collector.cs", System.IO.SearchOption.TopDirectoryOnly)
+            .Where(f => System.IO.File.ReadAllText(f).Contains("override CollectorQuery? BuildEnumerationQuery", StringComparison.Ordinal))
+            .Select(f => System.IO.Path.GetFileNameWithoutExtension(f))
+            .ToList();
+
+        Assert.Equal(5, enumerating.Count);
+
+        foreach (var typeName in enumerating)
         {
-            Assert.Contains($"{collector}, ", description, StringComparison.Ordinal);
+            /* CollectorName is the snake_case name the description writes; derive it from the type name so
+               this needs no second hand-typed mapping either. */
+            var snake = string.Concat(typeName[..^"Collector".Length]
+                .Select((c, i) => char.IsUpper(c) && i > 0 ? "_" + char.ToLowerInvariant(c) : char.ToLowerInvariant(c).ToString()));
+
+            Assert.Contains(snake, description, StringComparison.Ordinal);
         }
+
+        /* The OTHER mechanism, which the description's first version left out entirely. */
+        Assert.Contains("per-database connection loop when the target is Azure SQL DB", description, StringComparison.Ordinal);
+        Assert.Contains("pg_autovacuum_stats", description, StringComparison.Ordinal);
 
         /* And both SKUs say the same thing, because the payload is field-identical and a caller should not
            have to learn which product it is talking to. */
         var lite = ReadRepoFile(System.IO.Path.Combine("Lite", "Mcp", "McpHealthTools.cs"));
-        Assert.Contains("dominance is slowest_ms * items / run_ms", lite, StringComparison.Ordinal);
-        Assert.Contains("dominance is slowest_ms * items / run_ms", description, StringComparison.Ordinal);
+
+        /* The formula itself, with no surrounding punctuation: the first version of this assertion included
+           a word the description writes in backticks and matched neither file. */
+        Assert.Contains("slowest_ms * items / run_ms", lite, StringComparison.Ordinal);
+        Assert.Contains("slowest_ms * items / run_ms", description, StringComparison.Ordinal);
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────────────────────────────

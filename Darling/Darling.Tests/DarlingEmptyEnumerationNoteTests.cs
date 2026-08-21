@@ -88,7 +88,14 @@ public sealed class DarlingEmptyEnumerationNoteTests
         var source = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs"));
 
         Assert.Contains("collectionNote = enumeration.Note;", source);
-        Assert.Contains("return new CollectorRunResult(rowsWritten, sqlMs, storageMs, collectionNote);", source);
+
+        /* The success return gained the fan-out rollup at #2472 and this literal moved with it rather than
+           being loosened to a substring. Naming the whole argument list is the point: it is what makes an
+           argument DROPPED from this call — the note included — fail here instead of silently reaching the
+           store as a null. */
+        Assert.Contains(
+            "return new CollectorRunResult(rowsWritten, sqlMs, storageMs, collectionNote, fanout.Result);",
+            source);
     }
 
     [Fact]

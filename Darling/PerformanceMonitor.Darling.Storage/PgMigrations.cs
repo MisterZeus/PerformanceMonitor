@@ -1696,30 +1696,20 @@ CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen
     ON collect.pg_statement_text(last_seen);";
 
     /// <summary>
-    /// V79 — the database file-growth alert (#2349). Between <c>tempdb Space</c> and <c>Volume Free Space</c>
-    /// sits a file that has grown large but has not yet filled its disk, and neither existing alert can express
-    /// it: the first fires on reserved ÷ (reserved + unallocated), whose denominator GROWS with autogrowth so
-    /// the percentage FALLS as tempdb balloons; the second fires on the consequence, too late to act on and
-    /// unable to attribute the space to any one file.
+    /// V80 — the fan-out rollup on <c>collection_log</c> (#2472). A collector that runs once per DATABASE
+    /// writes ONE row whose <c>duration_ms</c> is the sum across every database, so an 80.8-second run is
+    /// indistinguishable between "eight databases at 10.1s each" and "one at 61.9s and seven at 2.7s" — two
+    /// shapes that want opposite fixes, which is why #2468 could not be decided. (#2472 writes the second as
+    /// 62s and rounds both to 80.9; they do not balance, and the claim under test is that the two are
+    /// indistinguishable, so the figures here are its shapes made exact.)
     ///
-    /// <para>Two gates, both graded per server so ONE global setting works across a heterogeneous fleet — the
-    /// constraint that shapes this, since <c>config_alert_settings</c> is a single global row and an absolute MB
-    /// threshold is unusable when normal tempdb sizes differ by an order of magnitude: set it low enough for the
-    /// small instances and the large ones alert constantly. The RISE gate is primary (this file grew N MB inside
-    /// the window), following #2157's reasoning that a level alone pages forever about a size that has been true
-    /// since Tuesday; the LEVEL gate is the file as a share of its VOLUME, which self-scales to each server's
-    /// disk layout whether or not the file has a dedicated one.</para>
-    ///
-    /// <para>Ships OFF. A new alert that starts firing on upgrade is a bad citizen, and the right thresholds are
-    /// a property of the fleet rather than of the product.</para>
-    /// </summary>
-    /// <summary>
-    /// V80 — the fan-out rollup on <c>collection_log</c> (#2472). Five collectors run once per DATABASE
-    /// (<c>query_store</c>, <c>plan_correction</c>, <c>query_store_health</c>, <c>index_object_stats</c>,
-    /// <c>database_scoped_config</c>) and the run writes ONE row whose <c>duration_ms</c> is the sum across
-    /// every database. So an 80.9-second run is indistinguishable between "eight databases at 10.1s each"
-    /// and "one at 62s and seven at 2.7s" — two shapes that want opposite fixes, which is why #2468 could
-    /// not be decided.
+    /// <para><b>Which collectors, and it is two mechanisms rather than one.</b> Five drive the fan-out from
+    /// an ENUMERATION on any SQL Server target — <c>query_store</c>, <c>plan_correction</c>,
+    /// <c>query_store_health</c>, <c>index_object_stats</c>, <c>database_scoped_config</c>. Separately,
+    /// <c>RunsPerDatabase</c> puts eight on a per-database CONNECTION loop when the target is Azure SQL DB,
+    /// and <c>pg_autovacuum_stats</c> on one always. Both mechanisms feed the same accumulator, which is the
+    /// point: <c>query_store</c> uses the first on-prem and the second on Azure, so a rollup wired to only
+    /// one of them would report a different notion of a slow database depending on where it ran.</para>
     ///
     /// <para><b>Why three columns and not a table.</b> The per-database costs already exist; the runner logs
     /// them and throws them away. A <c>collector_item_timings</c> hypertable would keep the whole
@@ -1731,7 +1721,7 @@ CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen
     /// <para><b>The arithmetic they buy.</b> <c>slowest_item_ms * fanout_item_count / duration_ms</c> is the
     /// dominance ratio: 1.0 is a perfectly even fan-out, and the worked example above gives 1.0 against 6.1.
     /// <c>max_duration_ms</c> and <c>p95_duration_ms</c> (#2460) cannot separate those two — both runs are
-    /// 80,900 ms — which is why the tail statistics, real as they are, do not close this.</para>
+    /// 80,800 ms — which is why the tail statistics, real as they are, do not close this.</para>
     ///
     /// <para>Nullable with no DEFAULT on purpose: that is a catalog-only change in PostgreSQL and stays
     /// instant on a large compressed hypertable, where adding a column WITH a default is the shape
@@ -1749,6 +1739,24 @@ ALTER TABLE collect.collection_log
    one alteration CREATE OR REPLACE VIEW permits, which is exactly what an ADD COLUMN produces. */
 CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collection_log;";
 
+    /// <summary>
+    /// V79 — the database file-growth alert (#2349). Between <c>tempdb Space</c> and <c>Volume Free Space</c>
+    /// sits a file that has grown large but has not yet filled its disk, and neither existing alert can express
+    /// it: the first fires on reserved ÷ (reserved + unallocated), whose denominator GROWS with autogrowth so
+    /// the percentage FALLS as tempdb balloons; the second fires on the consequence, too late to act on and
+    /// unable to attribute the space to any one file.
+    ///
+    /// <para>Two gates, both graded per server so ONE global setting works across a heterogeneous fleet — the
+    /// constraint that shapes this, since <c>config_alert_settings</c> is a single global row and an absolute MB
+    /// threshold is unusable when normal tempdb sizes differ by an order of magnitude: set it low enough for the
+    /// small instances and the large ones alert constantly. The RISE gate is primary (this file grew N MB inside
+    /// the window), following #2157's reasoning that a level alone pages forever about a size that has been true
+    /// since Tuesday; the LEVEL gate is the file as a share of its VOLUME, which self-scales to each server's
+    /// disk layout whether or not the file has a dedicated one.</para>
+    ///
+    /// <para>Ships OFF. A new alert that starts firing on upgrade is a bad citizen, and the right thresholds are
+    /// a property of the fleet rather than of the product.</para>
+    /// </summary>
     private const string V79Sql = @"
 ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS file_growth_enabled boolean NOT NULL DEFAULT false,
