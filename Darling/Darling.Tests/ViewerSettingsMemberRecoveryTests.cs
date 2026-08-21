@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.Json.Serialization;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -248,6 +249,53 @@ public sealed class ViewerSettingsMemberRecoveryTests : IDisposable
         Assert.True(read.UnreadableMembers is null or { Count: 0 });
         Assert.Null(read.Problem);
         Assert.Equal(91, read.Value!.AlertCpuThreshold);
+    }
+
+    /// <summary>
+    /// The invariant, and the combination review found that broke it: <c>UnreadableMembers</c> is non-empty
+    /// if and only if <c>Value</c> is non-null.
+    ///
+    /// <para>The reader can drop one member successfully and THEN meet a fault it cannot attribute — a path
+    /// like <c>$['weird.name']</c>, which System.Text.Json bracket-quotes for a property name that is not a
+    /// bare identifier. Before the fix that returned a null value carrying a member list, and the viewer's
+    /// dialog routes on the list: it would have said "these settings could not be read… everything else in
+    /// their file loaded normally" about a file where NOTHING loaded and every setting reverted. An
+    /// overstatement in exactly the place this issue exists to remove one.</para>
+    ///
+    /// <para>The fixture uses a local type because no viewer setting has a name like that today, which is
+    /// what made this latent rather than live. That is the reason to pin it rather than to leave it: the
+    /// first property that needs a converter throwing <c>ArgumentException</c> — an enum, a DateTime — makes
+    /// it reachable with no warning, and the failure is a confident lie rather than a crash.</para>
+    /// </summary>
+    [Fact]
+    public void APartialRecoveryThatCannotFinish_ReportsNoMembersAtAll()
+    {
+        File.WriteAllText(SettingsPath, @"{
+  ""Fine"": ""not a number"",
+  ""weird.name"": ""not a number either""
+}");
+
+        var read = SettingsFileGuard.ReadObject<AwkwardlyNamed>(SettingsPath);
+
+        Assert.Equal(SettingsFileState.Unreadable, read.State);
+        Assert.Null(read.Value);
+        Assert.True(read.UnreadableMembers is null or { Count: 0 },
+            "A read that recovered nothing must not name the members it managed to drop on the way.");
+
+        /* And the message is the FIRST failure's, whose line and position are against the file the user has
+           rather than against a re-serialized copy of it. */
+        Assert.Contains("line 2", read.Problem!, StringComparison.Ordinal);
+    }
+
+    /// <summary>A type with a member System.Text.Json reports as <c>$['weird.name']</c> — a path the reader
+    /// deliberately will not edit a document on. Local to this test because it exists to reach a branch, not
+    /// to model anything the viewer stores.</summary>
+    private sealed class AwkwardlyNamed
+    {
+        [JsonPropertyName("weird.name")]
+        public int Weird { get; set; } = 7;
+
+        public int Fine { get; set; } = 3;
     }
 
     // ── What the STORES do with it ────────────────────────────────────────────────────────────────

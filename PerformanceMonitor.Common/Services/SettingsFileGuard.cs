@@ -69,6 +69,15 @@ public readonly record struct SettingsMemberProblem(string Member, string Proble
 /// save must still copy it aside before replacing it. <c>UnreadableMembers</c> is what separates the two:
 /// empty (or null) means nothing in the file was usable, and the caller's own defaults are the whole
 /// answer.</para>
+///
+/// <para><b>The invariant, because a caller reads one field and believes the other:</b>
+/// <c>UnreadableMembers</c> is non-empty if and only if <c>Value</c> is non-null. Review found the
+/// combination that broke it — a recovery that dropped one member and then hit a fault it could not
+/// attribute returned a null value WITH a member list, and the viewer's dialog routes on the list, so it
+/// would have said "everything else in their file loaded normally" about a file where nothing loaded at
+/// all. It is enforced at the one place that can enforce it (see
+/// <see cref="SettingsFileGuard.DeserializeWithMemberRecovery{T}"/>) rather than at each caller, because
+/// every caller that has to remember a rule is a caller that can forget it.</para>
 /// </summary>
 public readonly record struct SettingsObjectRead<T>(
     SettingsFileState State,
@@ -342,6 +351,11 @@ public static class SettingsFileGuard
         List<SettingsMemberProblem>? dropped = null;
         var current = text;
 
+        /* The first failure's description, kept because it is the only one whose line and position are
+           against the file the user actually has: every later attempt runs over a re-serialized document.
+           It is what a whole-file failure reports, however many members had been dropped before it. */
+        string? firstProblem = null;
+
         for (var attempt = 0; attempt <= MaxDroppedMembers; attempt++)
         {
             JsonException failure;
@@ -354,8 +368,8 @@ public static class SettingsFileGuard
                    consequence of believing that is a file replaced from defaults. */
                 if (value is null)
                 {
-                    return new SettingsObjectRead<T>(SettingsFileState.Unreadable, null,
-                        "the file holds the JSON literal null rather than the settings it should", dropped);
+                    return Unreadable<T>(
+                        "the file holds the JSON literal null rather than the settings it should");
                 }
 
                 return dropped is null
@@ -369,15 +383,17 @@ public static class SettingsFileGuard
             catch (Exception ex) when (ex is NotSupportedException or ArgumentException)
             {
                 /* Not a member fault and carries no path to attribute one with. */
-                return new SettingsObjectRead<T>(SettingsFileState.Unreadable, null, Describe(ex), dropped);
+                return Unreadable<T>(firstProblem ?? Describe(ex));
             }
+
+            firstProblem ??= Describe(failure);
 
             var member = TopLevelMember(failure);
             var without = member is null ? null : WithoutMember(current, member);
 
             if (member is null || without is null)
             {
-                return new SettingsObjectRead<T>(SettingsFileState.Unreadable, null, Describe(failure), dropped);
+                return Unreadable<T>(firstProblem);
             }
 
             (dropped ??= new List<SettingsMemberProblem>()).Add(
@@ -387,9 +403,21 @@ public static class SettingsFileGuard
 
         /* Unreachable for any real file — every pass removes a member that was there — but a loop that
            edits its own input gets a bound rather than a proof. */
-        return new SettingsObjectRead<T>(SettingsFileState.Unreadable, null,
-            "the file holds more unreadable settings than this reader will drop", dropped);
+        return Unreadable<T>("the file holds more unreadable settings than this reader will drop");
     }
+
+    /// <summary>
+    /// A whole-file failure: no value, and deliberately NO member list even when members had already been
+    /// dropped before the reader hit something it could not attribute.
+    ///
+    /// <para>Discarding that partial list is the honest answer rather than a loss. The caller substitutes
+    /// its own defaults for a null value, so EVERY setting in the file reverts — and a list naming three of
+    /// them, next to a message built to mean "only these", would tell the reader the other eighty survived.
+    /// The named subset is worth nothing here anyway: it is a subset of "all of them". This is the one place
+    /// the <see cref="SettingsObjectRead{T}"/> invariant can be enforced, so it is enforced here.</para>
+    /// </summary>
+    private static SettingsObjectRead<T> Unreadable<T>(string? problem) where T : class =>
+        new(SettingsFileState.Unreadable, null, problem, null);
 
     /// <summary>
     /// Why one member's value could not be read, deliberately WITHOUT the line and position
