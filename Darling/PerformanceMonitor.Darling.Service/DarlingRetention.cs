@@ -970,15 +970,39 @@ public static class DarlingRetention
                degenerates to "deleted zero rows" — a slice that clears anything means older slices may
                remain. A ROW-capped caller passes its cap instead, which restores the drain loop's real
                contract (a full-cap batch means there may be more). */
-            return await DrainBatchesAsync(
+            var batches = 0;
+            var drained = await DrainBatchesAsync(
                 async ct =>
                 {
+                    batches++;
                     var rows = await command.ExecuteNonQueryAsync(ct);
                     deleted += rows;
                     return rows;
                 },
                 batchSize,
                 cancellationToken);
+
+            /* A row-capped drain reports the two facts the sweep summary cannot carry, because both are
+               per-table and the summary is fleet-wide.
+
+               The CUTOFF, because it is not the retention knob and reading it as the knob is a live trap:
+               ComputeDimensionCutoff subtracts the configured days PLUS a one-day margin for the hourly
+               last_seen refresh, so counting rows older than the knob value overstates what is eligible by
+               a full day of ingest — on this table that is hundreds of thousands of rows, which reads as a
+               backlog retention is failing to clear when it is simply not due yet.
+
+               And the BATCH COUNT, because rows-deleted alone cannot distinguish a drain from a peel. That
+               is the #2386 failure mode exactly: a purge that removed one bounded slice and reported
+               success looked identical in the log to one that cleared everything expired. One batch means
+               the table was already inside its horizon; many means there was a backlog and it is gone. */
+            if (batchSize > 1)
+            {
+                logger?.LogInformation(
+                    "Retention purge drained {Rows} row(s) from {Table} in {Batches} batch(es) (cap {Cap}), cutoff {Cutoff:yyyy-MM-dd HH:mm}Z",
+                    drained, tableName, batches, batchSize, cutoff);
+            }
+
+            return drained;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

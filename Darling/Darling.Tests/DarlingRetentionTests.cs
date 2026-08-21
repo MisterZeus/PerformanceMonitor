@@ -189,6 +189,37 @@ public sealed class DarlingRetentionTests
         Assert.Equal(2, calls);
     }
 
+    /// <summary>
+    /// The row-capped drain has to SAY what it did, because rows-deleted alone cannot tell a drain from a
+    /// peel — and that ambiguity is #2386's failure mode, where a purge that cleared one bounded slice and
+    /// a purge that cleared a real backlog wrote the same log line. It also has to print the resolved
+    /// cutoff rather than leaving a reader to apply the retention knob, which is a day off: the cutoff
+    /// carries a one-day margin, so counting rows older than the knob overstates the eligible set by a full
+    /// day of ingest.
+    ///
+    /// <para>Source-level rather than a log-capture harness: what is being pinned is that the call site
+    /// passes those two values at all. A logger fake would assert the same thing through more machinery,
+    /// and the failure this guards against is someone simplifying the message back to a row count.</para>
+    /// </summary>
+    [Fact]
+    public void TheRowCappedDrain_LogsItsBatchCountAndResolvedCutoff()
+    {
+        var source = ReadRetentionSource();
+        var at = source.IndexOf("await DrainBatchesAsync(", StringComparison.Ordinal);
+        Assert.True(at >= 0, "the drain call site moved (#2386)");
+        var body = source[Math.Max(0, at - 2000)..Math.Min(source.Length, at + 2500)];
+
+        Assert.Contains("batches++", body, StringComparison.Ordinal);
+        Assert.Contains("{Batches} batch(es)", body, StringComparison.Ordinal);
+
+        /* The cutoff the DELETE actually bound, not the knob it was derived from. */
+        Assert.Contains("cutoff {Cutoff:", body, StringComparison.Ordinal);
+
+        /* Only the row-capped path: the time-sliced statement passes batchSize 1, where "batches" is
+           always 1 and would say nothing. */
+        Assert.Contains("if (batchSize > 1)", body, StringComparison.Ordinal);
+    }
+
     /* ---------------- run-record status/message (pure) ---------------- */
 
     [Fact]
