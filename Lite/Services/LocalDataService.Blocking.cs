@@ -539,8 +539,12 @@ LIMIT 5000";
 
         // Always-on DMV blocking snapshot: merge in the fallback rows so the viewer works even when the
         // blocked-process-report XE captured nothing (threshold unset / AWS RDS). Same connection/lock.
+        /* #2443: CancellationToken.None because the viewer genuinely has no pass to abandon — this
+           read serves a person waiting at a grid, not an analysis pass with a budget or a service
+           stop. Stated here rather than defaulted in the shared method, so the exception belongs to
+           the caller that actually has it. */
         await PerformanceMonitorLite.Analysis.BlockingPairRowQuery.AppendDmvSnapshotRowsAsync(
-            connection.CreateCommand, rows, serverId, start, end);
+            connection.CreateCommand, rows, serverId, start, end, System.Threading.CancellationToken.None);
 
         return rows;
     }
