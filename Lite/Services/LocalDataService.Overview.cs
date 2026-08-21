@@ -145,13 +145,22 @@ public sealed class ServerTagPill
 /// <summary>
 /// The Overview card's status-line state, as a VALUE rather than a rendered string. The word on the card
 /// (<see cref="ServerSummaryItem.StatusDisplay"/>), the colour it is painted
-/// (<see cref="ServerSummaryItem.StatusBrush"/>) and the first line of its tooltip
+/// (<see cref="ServerSummaryItem.StatusBrush"/>), the card's border
+/// (<see cref="ServerSummaryItem.CardBorderBrush"/>), the offline overlay
+/// (<see cref="ServerSummaryItem.IsOffline"/>) and the first line of its tooltip
 /// (<see cref="ServerSummaryItem.StatusTooltip"/>) are all renderings OF THIS — the
 /// (<c>IsOnline</c>, <c>HasCollectorErrors</c>) pair is read here and nowhere else, so no two of them can land
 /// on different answers for the same card. The Darling viewer's twin (<c>ServerCardStatus</c> there) exists
 /// because two review passes on #2429 each found a flag combination where two independent readings disagreed;
 /// the word and the colour here already carried their own copy of the ladder, and the tooltip would have been
 /// a third.
+///
+/// <para>Review on #2451 found the fifth: <c>CardBorderBrush</c> read <c>IsOffline</c> and
+/// <c>HasCollectorErrors</c> raw, agreeing with the status word by coincidence rather than by construction.
+/// It disagreed on one pair already — an unchecked card carrying a collector-error marker drew the amber
+/// "collectors failing" border while its word read "Unknown". The Overview loader only sets that marker when
+/// the connection check SUCCEEDED, so the pair is unreached in practice, which is exactly the argument for
+/// making it unrepresentable rather than leaving it to a caller to keep avoiding.</para>
 ///
 /// <para><b>The amber state is NOT the viewer's.</b> The viewer derives its status from collection freshness
 /// and calls this member <c>Stale</c>; Lite's <c>IsOnline</c> comes from a live connection check and
@@ -251,7 +260,7 @@ public class ServerSummaryItem
         ServerCardStatus.Offline => "#E57373",
         _ => "#888888"
     });
-    public bool IsOffline => IsOnline == false;
+    public bool IsOffline => CardStatus == ServerCardStatus.Offline;
 
     /* ── Per-row concern gates ───────────────────────────────────────────────────────────────────────
        Each metric row's "this is not green" test, evaluated ONCE. The row's own brush reads it and so does
@@ -270,12 +279,15 @@ public class ServerSummaryItem
     public SolidColorBrush CpuBrush => MakeBrush(CpuIsCritical ? "#E57373" : CpuIsElevated ? "#FFB74D" : "#81C784");
     public SolidColorBrush BlockingBrush => MakeBrush(BlockingIsElevated ? "#FFB74D" : "#81C784");
     public SolidColorBrush DeadlockBrush => MakeBrush(DeadlocksAreElevated ? "#E57373" : "#81C784");
+    /* The border ranks the same states the status word names, so it reads the SAME discriminant rather than
+       the flags behind it — see ServerCardStatus for the pair the raw reads disagreed on. The precedence is
+       unchanged: a dark server first, then the metric rows worst-first, then failing collectors. */
     public SolidColorBrush CardBorderBrush => MakeBrush(
-        IsOffline ? "#E57373" :
+        CardStatus == ServerCardStatus.Offline ? "#E57373" :
         DeadlocksAreElevated ? "#E57373" :
         BlockingIsElevated ? "#FFB74D" :
         CpuIsCritical ? "#FFB74D" :
-        HasCollectorErrors ? "#FFD54F" :   // amber border when collectors are failing
+        CardStatus == ServerCardStatus.CollectorErrors ? "#FFD54F" :   // amber border when collectors are failing
         "#2a2d35");
 
     /* ── The card explains itself (#2437 / #2422) ────────────────────────────────────────────────────

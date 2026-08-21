@@ -217,6 +217,49 @@ public sealed class LiteOverviewCardExplainsItselfTests
         Assert.Contains("public string StatusDisplay => CardStatus switch", source, StringComparison.Ordinal);
         Assert.Contains("public SolidColorBrush StatusBrush => MakeBrush(CardStatus switch", source, StringComparison.Ordinal);
         Assert.Contains("private string StatusHeadline => CardStatus switch", source, StringComparison.Ordinal);
+
+        /* And exactly one switch on the flag itself. This is the assertion behind the claim in
+           ServerCardStatus's doc comment; without it the claim is prose that review has to re-check by hand,
+           which is how it came to overstate what was true in the first place (raised on #2451). */
+        Assert.Equal(1, CountOccurrences(source, "IsOnline switch"));
+    }
+
+    /// <summary>
+    /// The card's BORDER renders the same discriminant its word does. Review on #2451 found the last place it
+    /// did not: <c>CardBorderBrush</c> read <c>IsOffline</c> and <c>HasCollectorErrors</c> raw, so it agreed
+    /// with the status word by coincidence rather than by construction — and on one pair it already did not
+    /// agree. An unchecked card carrying a collector-error marker drew the amber "collectors failing" border
+    /// while its word read "Unknown". The loader only sets that marker when the connection check succeeded, so
+    /// the pair is unreached in practice, which is the argument for making it unrepresentable rather than
+    /// leaving a caller to keep avoiding it.
+    /// </summary>
+    [Fact]
+    public void TheCardBorder_RendersTheSameDiscriminantTheWordDoes()
+    {
+        var neutral = Healthy().CardBorderBrush.Color;
+
+        var notChecked = NotYetChecked();
+        notChecked.HasCollectorErrors = true;
+
+        Assert.Equal(ServerCardStatus.Unknown, notChecked.CardStatus);
+        Assert.Equal("Unknown", notChecked.StatusDisplay);
+        Assert.DoesNotContain("collectors", notChecked.StatusTooltip, StringComparison.Ordinal);
+        Assert.Equal(neutral, notChecked.CardBorderBrush.Color);
+
+        /* A card that IS erroring still gets its amber border — and it is now literally the same amber the
+           status word is painted, because both render the same state. */
+        var erroring = CollectorsFailing();
+        Assert.NotEqual(neutral, erroring.CardBorderBrush.Color);
+        Assert.Equal(erroring.StatusBrush.Color, erroring.CardBorderBrush.Color);
+
+        /* Precedence is unchanged: a dark server outranks its own metrics. */
+        Assert.Equal(Offline().CardBorderBrush.Color, Busy().CardBorderBrush.Color);
+
+        var source = ReadRepoFile(Path.Combine("Lite", "Services", "LocalDataService.Overview.cs"));
+        Assert.Contains("CardStatus == ServerCardStatus.Offline ? \"#E57373\"", source, StringComparison.Ordinal);
+        Assert.Contains("CardStatus == ServerCardStatus.CollectorErrors ? \"#FFD54F\"", source, StringComparison.Ordinal);
+        Assert.Contains("public bool IsOffline => CardStatus == ServerCardStatus.Offline;", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("IsOffline ? \"#E57373\"", source, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -295,6 +338,18 @@ public sealed class LiteOverviewCardExplainsItselfTests
     }
 
     // ── helpers ────────────────────────────────────────────────────────────────────────────────────
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        var count = 0;
+        var index = 0;
+        while ((index = haystack.IndexOf(needle, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += needle.Length;
+        }
+        return count;
+    }
 
     /// <summary>Locates a repo file by walking up from this file's compile-time path — the
     /// <c>AlertFiringLogTests</c> / <c>ThemeCompletenessTests</c> idiom, no build-output copying.</summary>
