@@ -500,6 +500,23 @@ public partial class MainWindow : Window
     private async Task StartMcpServerAsync()
     {
         var mcpSettings = McpSettings.Load(App.ConfigDirectory);
+
+        if (mcpSettings.DisabledByUnreadableSettings)
+        {
+            /* #2431. This is the only moment Lite ever knows the endpoint went away, and the person it
+               matters to is not at this keyboard: they are on another machine watching a connection be
+               refused by an app whose own window says everything is fine. So the line names the lost
+               CAPABILITY, not the lost settings -- "every setting is at its default" is true and
+               useless to someone who is not looking at the app. */
+            AppLogger.Error("MCP",
+                $"The MCP server is DISABLED because settings.json in {App.ConfigDirectory} could not be read " +
+                $"({mcpSettings.Problem}). Nothing is listening on any port. If mcp_enabled was true in that file, " +
+                "this endpoint was revoked by a file that could not be parsed and not by anyone's decision, and a " +
+                "client connecting to it -- usually from another machine -- sees only a refused connection. The file " +
+                "has NOT been changed: fix it and restart Lite to get the endpoint back.");
+            return;
+        }
+
         if (!mcpSettings.Enabled) return;
 
         try

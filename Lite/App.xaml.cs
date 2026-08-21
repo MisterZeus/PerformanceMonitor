@@ -685,7 +685,8 @@ public partial class App : Application
 
         AppLogger.Error("Settings",
             $"settings.json could not be parsed ({s_unreadableSettingsProblem}). Every setting it holds is " +
-            "at its default for this session. The file has NOT been changed: fix it and restart to get the " +
+            "at its default for this session -- including mcp_enabled, so the MCP server is OFF and nothing is " +
+            "listening on its port (#2431). The file has NOT been changed: fix it and restart to get the " +
             "settings back, or save from the Settings window, which copies the unreadable file aside first.");
     }
 
@@ -709,6 +710,9 @@ public partial class App : Application
         MessageBox.Show(
             "settings.json could not be read, so Performance Monitor Lite started with default settings.\n\n" +
             $"{Path.Combine(ConfigDirectory, "settings.json")}\n{problem}\n\n" +
+            "The MCP server is one of those defaults, so it is OFF for this session. If you had it enabled, " +
+            "anything that connects to it -- an agent or a client, usually on another machine -- gets a refused " +
+            "connection until this is fixed, and nothing over there can tell you why.\n\n" +
             "Your file has not been changed. Fix it and restart to get your settings back. If you save from " +
             "the Settings window instead, the unreadable file is copied aside as " +
             "settings.json.unreadable-<timestamp> first, so it is recoverable either way.",
