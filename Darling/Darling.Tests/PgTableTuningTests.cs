@@ -51,7 +51,14 @@ public sealed class PgTableTuningTests
         Assert.Contains("ALTER TABLE collect.query_store_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)", sql, StringComparison.Ordinal);
         Assert.Contains("ALTER TABLE collect.pg_statement_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)", sql, StringComparison.Ordinal);
 
-        Assert.Equal(11, PgTableTuning.Statements.Count);   /* +1 #1981 query_stats handle index, +1 pg_statement_stats */
+        /* #2402: the plan dimension takes the DEAD-TUPLE knob, not the insert one. It is a plain table
+           whose churn comes from retention DELETEs, so autovacuum_vacuum_insert_* — which governs every
+           entry above — does not apply to it at all. Asserted by exact text because the two knob families
+           differ by one word and the wrong one would be silently inert. */
+        Assert.Contains("ALTER TABLE collect.query_plan_dim SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 10000)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("collect.query_plan_dim SET (autovacuum_vacuum_insert_scale_factor", sql, StringComparison.Ordinal);
+
+        Assert.Equal(12, PgTableTuning.Statements.Count);   /* +1 #1981 query_stats handle index, +1 pg_statement_stats, +1 #2402 query_plan_dim */
     }
 
     private static int CountOccurrences(string haystack, string needle)
