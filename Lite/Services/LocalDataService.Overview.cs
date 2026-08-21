@@ -158,8 +158,10 @@ public sealed class ServerTagPill
 /// (<see cref="ServerSummaryItem.CardBorderBrush"/>), the offline overlay
 /// (<see cref="ServerSummaryItem.IsOffline"/>) and the first line of its tooltip
 /// (<see cref="ServerSummaryItem.StatusTooltip"/>) are all renderings OF THIS — the
-/// (<c>IsOnline</c>, <c>HasCollectorErrors</c>) pair is read here and nowhere else, so no two of them can land
-/// on different answers for the same card. The Darling viewer's twin (<c>ServerCardStatus</c> there) exists
+/// (<c>IsOnline</c>, <c>HasCollectorErrors</c>) pair is read by <see cref="ServerCardStatusRules.Classify"/>
+/// and nowhere else in Lite, so no two of them can land on different answers for the same server — including
+/// the sidebar row's dot, which carried its own copy of this ladder until #2458 and could therefore disagree
+/// with the card about a server both of them were showing. The Darling viewer's twin exists
 /// because two review passes on #2429 each found a flag combination where two independent readings disagreed;
 /// the word and the colour here already carried their own copy of the ladder, and the tooltip would have been
 /// a third.
@@ -192,6 +194,57 @@ public enum ServerCardStatus
     /// <summary>The server has not been connection-checked yet (<c>IsOnline</c> is null): a card built before
     /// the first check completed, not a dead server.</summary>
     Unknown,
+}
+
+/// <summary>
+/// The ladder itself, in ONE function, plus the two renderings every surface shares. #2451 collapsed the
+/// Overview card's word, colour, border, overlay and tooltip onto <see cref="ServerCardStatus"/>; #2458 found
+/// the sidebar row's dot (<c>ServerConnection.DotStatus</c>) deriving the same four words from its own copy of
+/// the same flag pair, on a different type, on a different surface — so the sidebar and the card could say
+/// different things about one server and nothing would notice. They now read this.
+///
+/// <para><b>The word is a CONNECTION word on both surfaces, and that is deliberate.</b> #2457 kept collection
+/// freshness out of it — freshness bands its own row on the card, in its own vocabulary — because #2429 found
+/// the Darling viewer rendering one amber word for a stale collection AND for a metric breach with nothing
+/// telling them apart, which is the card @ehaar wrote in about in #2422. So nothing here takes a freshness
+/// argument, and it must not grow one: a green dot means the last connection check succeeded and says nothing
+/// about whether anything is being collected. <see cref="Headline"/> is where the reader is told that.</para>
+/// </summary>
+public static class ServerCardStatusRules
+{
+    /// <summary>The (<c>IsOnline</c>, <c>HasCollectorErrors</c>) pair, resolved. The only reader of that pair
+    /// in Lite — which is an assertion in <c>LiteOverviewCardExplainsItselfTests</c> rather than a claim in
+    /// prose, because the prose version came to overstate what was true and had to be caught by review on
+    /// #2451.</summary>
+    public static ServerCardStatus Classify(bool? isOnline, bool hasCollectorErrors) => isOnline switch
+    {
+        true when hasCollectorErrors => ServerCardStatus.CollectorErrors,
+        true => ServerCardStatus.Online,
+        false => ServerCardStatus.Offline,
+        _ => ServerCardStatus.Unknown
+    };
+
+    /// <summary>The four words. They are also the DataTrigger values the sidebar keys its dot colour off in
+    /// <c>Lite/MainWindow.xaml</c>, so a fifth word added here would silently fall through to the muted
+    /// default dot rather than fail anything.</summary>
+    public static string Word(this ServerCardStatus status) => status switch
+    {
+        ServerCardStatus.CollectorErrors => "Warning",
+        ServerCardStatus.Online => "Online",
+        ServerCardStatus.Offline => "Offline",
+        _ => "Unknown"
+    };
+
+    /// <summary>What the word means, in words — the first line of whichever tooltip renders it. Every arm names
+    /// the connection check or the collectors explicitly, because the complaint in #2422 was precisely that a
+    /// word and a colour left the reader guessing which axis they were about.</summary>
+    public static string Headline(this ServerCardStatus status) => status switch
+    {
+        ServerCardStatus.CollectorErrors => "Warning — one or more collectors are failing on this server",
+        ServerCardStatus.Online => "Online — the last connection check succeeded",
+        ServerCardStatus.Offline => "Offline — the last connection check failed",
+        _ => "Unknown — this server has not been connection-checked yet",
+    };
 }
 
 public class ServerSummaryItem
@@ -341,7 +394,8 @@ public class ServerSummaryItem
     private static string Minutes(TimeSpan span) =>
         $"{span.TotalMinutes:0.#} minute{(Math.Abs(span.TotalMinutes - 1) < 0.001 ? "" : "s")}";
 
-    /* Connection status. This is the ONE place the (IsOnline, HasCollectorErrors) pair is read; the word, the
+    /* Connection status. The (IsOnline, HasCollectorErrors) pair is resolved by ServerCardStatusRules.Classify
+       and nowhere else in Lite — the sidebar row's dot carried its own copy until #2458 — and the word, the
        colour and the tooltip's first line all render the result. See ServerCardStatus.
 
        Collection freshness is deliberately NOT one of the states here, and that is option 2 in #2452 being
@@ -350,21 +404,9 @@ public class ServerSummaryItem
        one specific thing. Folding freshness in would make one amber word mean two unrelated failures, which
        is the conflation #2429 spent four review rounds untangling on the viewer and the reason #2422 was
        written. Freshness is a third axis: it bands its own row, and the tooltip names it there. */
-    public ServerCardStatus CardStatus => IsOnline switch
-    {
-        true when HasCollectorErrors => ServerCardStatus.CollectorErrors,
-        true => ServerCardStatus.Online,
-        false => ServerCardStatus.Offline,
-        _ => ServerCardStatus.Unknown
-    };
+    public ServerCardStatus CardStatus => ServerCardStatusRules.Classify(IsOnline, HasCollectorErrors);
 
-    public string StatusDisplay => CardStatus switch
-    {
-        ServerCardStatus.CollectorErrors => "Warning",
-        ServerCardStatus.Online => "Online",
-        ServerCardStatus.Offline => "Offline",
-        _ => "Unknown"
-    };
+    public string StatusDisplay => CardStatus.Word();
     public SolidColorBrush StatusBrush => MakeBrush(CardStatus switch
     {
         ServerCardStatus.CollectorErrors => "#FFD54F",  // amber — connected but collectors failing
@@ -431,16 +473,11 @@ public class ServerSummaryItem
        the metrics at all. Fusing the two into one clause would reproduce the ambiguity in prose, so the
        tooltip keeps them on separate lines: what the status word means, then what the rows say. */
 
-    /// <summary>What the status word means, in words — the tooltip's first line. Switches on
+    /// <summary>What the status word means, in words — the tooltip's first line. Renders
     /// <see cref="CardStatus"/>, the same discriminant <see cref="StatusDisplay"/> renders, so a tooltip that
-    /// hangs off a word can never contradict it.</summary>
-    private string StatusHeadline => CardStatus switch
-    {
-        ServerCardStatus.CollectorErrors => "Warning — one or more collectors are failing on this server",
-        ServerCardStatus.Online => "Online — the last connection check succeeded",
-        ServerCardStatus.Offline => "Offline — the last connection check failed",
-        _ => "Unknown — this server has not been connection-checked yet",
-    };
+    /// hangs off a word can never contradict it — and since #2458 it is the SAME sentence the sidebar dot
+    /// shows for that state, so a reader moving between the two surfaces meets one vocabulary.</summary>
+    private string StatusHeadline => CardStatus.Headline();
 
     /// <summary>
     /// The metric rows that are not green, in the card's OWN display strings — "CPU 96% (SQL 90%), Deadlocks 2".

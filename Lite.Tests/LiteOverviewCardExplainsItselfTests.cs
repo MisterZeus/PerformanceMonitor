@@ -196,6 +196,12 @@ public sealed class LiteOverviewCardExplainsItselfTests
     /// makes them incapable of disagreeing rather than merely observed not to. The viewer arrived at the same
     /// collapse over two review rounds on #2429, each of which found a different flag pair where two independent
     /// readings contradicted each other.
+    ///
+    /// <para>Since #2458 the ladder is <c>ServerCardStatusRules.Classify</c> rather than a member of this class,
+    /// and the count below spans the sidebar's file too. The reason is the shape of what this pin missed: it
+    /// counted one literal in ONE file, which was true and stayed true while a fourth copy of the same ladder sat
+    /// in <c>Lite/Models/ServerConnection.cs</c> driving the sidebar dot. A pin scoped to one file cannot see the
+    /// duplicate it exists to forbid.</para>
     /// </summary>
     [Fact]
     public void TheCardStatus_IsTheOnlyPlaceTheStatusFlagsAreRead()
@@ -213,15 +219,26 @@ public sealed class LiteOverviewCardExplainsItselfTests
         Assert.Contains("Offline", offlineAndErroring.StatusTooltip, StringComparison.Ordinal);
 
         var source = ReadRepoFile(Path.Combine("Lite", "Services", "LocalDataService.Overview.cs"));
-        Assert.Contains("public ServerCardStatus CardStatus => IsOnline switch", source, StringComparison.Ordinal);
-        Assert.Contains("public string StatusDisplay => CardStatus switch", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "public static ServerCardStatus Classify(bool? isOnline, bool hasCollectorErrors) => isOnline switch",
+            source, StringComparison.Ordinal);
+        Assert.Contains(
+            "public ServerCardStatus CardStatus => ServerCardStatusRules.Classify(IsOnline, HasCollectorErrors);",
+            source, StringComparison.Ordinal);
+        Assert.Contains("public string StatusDisplay => CardStatus.Word();", source, StringComparison.Ordinal);
         Assert.Contains("public SolidColorBrush StatusBrush => MakeBrush(CardStatus switch", source, StringComparison.Ordinal);
-        Assert.Contains("private string StatusHeadline => CardStatus switch", source, StringComparison.Ordinal);
+        Assert.Contains("private string StatusHeadline => CardStatus.Headline();", source, StringComparison.Ordinal);
 
-        /* And exactly one switch on the flag itself. This is the assertion behind the claim in
-           ServerCardStatus's doc comment; without it the claim is prose that review has to re-check by hand,
-           which is how it came to overstate what was true in the first place (raised on #2451). */
-        Assert.Equal(1, CountOccurrences(source, "IsOnline switch"));
+        /* And exactly one switch on the flag itself, counted across BOTH files that render it. This is the
+           assertion behind the claim in ServerCardStatus's doc comment; without it the claim is prose that
+           review has to re-check by hand, which is how it came to overstate what was true in the first place
+           (raised on #2451). The literal moved with the ladder — it is now the classifier's own parameter
+           list — and the card may not switch on the property again. The sidebar's file is scanned for either
+           casing, because the copy #2458 removed was the property-cased one. */
+        var sidebar = ReadRepoFile(Path.Combine("Lite", "Models", "ServerConnection.cs"));
+        Assert.Equal(1, CountOccurrences(source, "isOnline switch"));
+        Assert.Equal(0, CountOccurrences(source, "IsOnline switch"));
+        Assert.Equal(0, CountOccurrences(sidebar, "sOnline switch"));
     }
 
     /// <summary>
