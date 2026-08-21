@@ -916,12 +916,23 @@ public partial class MainWindow : Window
     {
         SeatText.Text = ViewerSeatIndicator.Text(state);
         SeatText.ToolTip = ViewerSeatIndicator.ToolTip(state, _dataService?.StoreIsOnThisMachine ?? true);
-        SeatText.Foreground = state switch
-        {
-            ViewerSeatState.Unreachable => (System.Windows.Media.Brush)FindResource("ErrorBrush"),
-            ViewerSeatState.ReadOnly => (System.Windows.Media.Brush)FindResource("WarningBrush"),
-            _ => (System.Windows.Media.Brush)FindResource("ForegroundMutedBrush"),
-        };
+
+        /* TryFindResource rather than the hard FindResource the sibling status fields use, and the reason is
+           the call site rather than doubt about the keys: all three brushes exist in all three shipped
+           themes, but ApplySeatState is called from INSIDE the catch that handles an unreachable store. A
+           ResourceReferenceKeyNotFoundException thrown from a catch block is unhandled, so a missing key in
+           some future theme would turn "the service is down" into "the viewer crashed" - the one moment the
+           viewer most needs to stay up and explain itself. Falling back to the muted foreground costs a
+           colour and nothing else. */
+        SeatText.Foreground =
+            (state switch
+            {
+                ViewerSeatState.Unreachable => TryFindResource("ErrorBrush"),
+                ViewerSeatState.ReadOnly => TryFindResource("WarningBrush"),
+                _ => TryFindResource("ForegroundMutedBrush"),
+            } as System.Windows.Media.Brush)
+            ?? TryFindResource("ForegroundMutedBrush") as System.Windows.Media.Brush
+            ?? SeatText.Foreground;
     }
 
     private async Task LoadServersAsync(bool preserveSelection = false)
