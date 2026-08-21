@@ -37,7 +37,16 @@ Nothing is installed on the monitored SQL Servers by either edition beyond two l
 - **Windows** for the service host (Windows-service lifetime, DPAPI password protection) and for the viewer (WPF). Monitored servers can be SQL Server 2016–2025, Azure SQL Managed Instance, AWS RDS for SQL Server, or Azure SQL Database.
 - **A PostgreSQL store — bundled or your own.** In managed mode (the shipped default, see [Managed Bundled PostgreSQL](#managed-bundled-postgresql)) the service runs its own bundled PostgreSQL 18 + TimescaleDB and no database provisioning is needed. To bring your own instead, PostgreSQL 16 or newer is recommended (developed and validated against PostgreSQL 18) with a database and a login the service can create tables in — and if that store has TimescaleDB, size its background workers before you rely on compression, because the stock PostgreSQL defaults cannot run the policies (see [Background workers](#background-workers-sizing-an-unmanaged-store-and-what-happens-if-you-dont)).
 - **TimescaleDB is optional and auto-adopted.** If the extension is installed (or pre-created by an administrator) in the store database, the service detects it at startup and automatically converts the collector tables to hypertables with compression; without it, the service runs in plain-PostgreSQL mode, which is fully supported. No configuration flag either way.
-- **.NET 10** to build and run.
+- **Two .NET 10 runtimes on the host**, from <https://dotnet.microsoft.com/download/dotnet/10.0>. Both
+  shipped binaries are framework-dependent, and a stock Windows Server image has neither:
+  - **ASP.NET Core Runtime 10** for the service. Required unconditionally — the MCP package brings the
+    ASP.NET Core framework reference in transitively, so it is needed whether or not you ever enable MCP
+    or the web dashboard.
+  - **.NET Desktop Runtime 10** for the viewer (WPF). Not needed on a headless collector host, and not
+    needed for a remote seat installed from the viewer's own `Setup.exe`, which is self-contained.
+
+  `install-darling.ps1` checks both before it installs anything: it refuses when ASP.NET Core is missing
+  and warns when the Desktop runtime is. The .NET 10 SDK covers both if you are building from source.
 
 Build from the repository root:
 
