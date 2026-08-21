@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Net;
 using System.Runtime.Versioning;
 using System.Security.Cryptography;
@@ -229,5 +230,101 @@ internal static class DarlingHostBinding
         var expectedHash = SHA256.HashData(Encoding.UTF8.GetBytes(expected));
         var presentedHash = SHA256.HashData(Encoding.UTF8.GetBytes(presented));
         return CryptographicOperations.FixedTimeEquals(expectedHash, presentedHash);
+    }
+
+    /* ---------------------------------------------------------------------------------------------------
+       WHICH PLANE decided this endpoint is on, and on what port (#2389). One <c>mcp</c> object in darling.json
+       has TWO owners: <c>enabled</c>/<c>port</c> are a first-run SEED that the store's config_service row
+       overrides forever after, while <c>network.*</c> (listen / allowFrom / the DPAPI token) is file-only and
+       restart-only. Nothing in the file distinguishes them, so an operator who edits mcp.enabled, restarts and
+       greps the log finds "Starting MCP server on http://<lan-ip>:5152" -- true, and then contradicted five
+       seconds later when the worker's first publish arrives and the supervisor reconciles to the store.
+
+       network.* deliberately STAYS file-only rather than being moved into the store to match: the DPAPI token
+       is LocalMachine-scoped, so a blob in config_service is undecryptable on any other host that reads that
+       store, and a bind address + CIDR + token living in config_service would let a REMOTE admin store
+       connection -- the pivot the postgres.network role warning already names -- re-point this listener onto a
+       LAN interface behind a credential of its own choosing. Exposure should require touching the host. So the
+       split is kept and made VISIBLE instead: the effective values carry their origin into the start line, and
+       a disagreement is reported at the point of override rather than left to be inferred from two INFO lines.
+       --------------------------------------------------------------------------------------------------- */
+
+    /// <summary>Which plane supplied the effective enable/port a host supervisor is acting on (#2389).</summary>
+    internal enum EndpointToggleOrigin
+    {
+        /// <summary>darling.json, because the worker has not published yet (still bootstrapping, or it never
+        /// reached the store). PROVISIONAL: the control plane can contradict it within one poll interval.</summary>
+        File,
+
+        /// <summary>The store's <c>config.config_service</c> row, published by the worker. Authoritative.</summary>
+        ControlPlane,
+    }
+
+    /// <summary>The effective (enabled, port) a supervisor acts on, WITH its provenance (#2389).
+    /// <see cref="EnabledOverridden"/> / <see cref="PortOverridden"/> are true only when the control plane
+    /// supplied a value that DIFFERS from darling.json's -- the reportable disagreement.</summary>
+    internal readonly record struct EndpointToggle(
+        bool Enabled, int Port, EndpointToggleOrigin Origin, bool EnabledOverridden, bool PortOverridden);
+
+    /// <summary>
+    /// PURE: the store row wins whenever the worker has published one -- byte-for-byte the old
+    /// <c>published?.Enabled ?? config.Mcp.Enabled</c> pair -- but it also reports WHERE the values came from
+    /// and whether they contradict the file, which a null-coalesce structurally cannot.
+    /// </summary>
+    internal static EndpointToggle ResolveEndpointToggle((bool Enabled, int Port)? published, bool fileEnabled, int filePort)
+        => published is null
+            ? new EndpointToggle(fileEnabled, filePort, EndpointToggleOrigin.File, false, false)
+            : new EndpointToggle(
+                published.Value.Enabled,
+                published.Value.Port,
+                EndpointToggleOrigin.ControlPlane,
+                EnabledOverridden: published.Value.Enabled != fileEnabled,
+                PortOverridden: published.Value.Port != filePort);
+
+    /// <summary>
+    /// PURE: the provenance clause the start line carries, so "Starting ... on http://..." says on whose
+    /// authority it is starting -- and admits when it is running on file values the control plane has not
+    /// weighed in on yet, which is the line the operator greps and stops reading.
+    /// </summary>
+    internal static string DescribeToggleOrigin(EndpointToggle toggle)
+        => toggle.Origin == EndpointToggleOrigin.ControlPlane
+            ? "the control plane (config.config_service)"
+            : "darling.json (PROVISIONAL - the control plane has not published yet and may stop or rebind this server)";
+
+    /// <summary>
+    /// PURE: the one-line report of a control-plane override, or null when the two planes agree (or nothing is
+    /// published yet, in which case there is nothing to disagree with). <paramref name="section"/> is the
+    /// darling.json object name, the config_service column prefix, and the CLI verb suffix at once ("mcp" -&gt;
+    /// mcp.enabled / config_service.mcp_enabled / --enable-mcp), which is what keeps the MCP and web wordings
+    /// from drifting apart. The file values are passed in rather than re-derived so the message quotes what the
+    /// caller actually loaded.
+    /// </summary>
+    internal static string? DescribeToggleOverride(
+        EndpointToggle toggle, string section, string surface, bool fileEnabled, int filePort)
+    {
+        if (toggle.Origin != EndpointToggleOrigin.ControlPlane || (!toggle.EnabledOverridden && !toggle.PortOverridden))
+        {
+            return null;
+        }
+
+        var fields = new List<string>(2);
+        if (toggle.EnabledOverridden)
+        {
+            fields.Add(
+                $"enabled is {(fileEnabled ? "true" : "false")} in darling.json ({section}.enabled) but "
+                + $"{(toggle.Enabled ? "true" : "false")} in config.config_service.{section}_enabled");
+        }
+
+        if (toggle.PortOverridden)
+        {
+            fields.Add($"port is {filePort} in darling.json ({section}.port) but {toggle.Port} in config.config_service.{section}_port");
+        }
+
+        return $"{surface} configuration disagrees across the two planes and the CONTROL PLANE WINS: "
+            + string.Join("; ", fields)
+            + $". After the first run darling.json's {section}.enabled/{section}.port are only the SEED -- change them with "
+            + $"--enable-{section}/--disable-{section} or the Viewer's Settings, or the file values will keep being ignored. "
+            + $"The {section}.network block is the OPPOSITE: file-only, restart-only, no store equivalent -- so an exposure "
+            + "block in darling.json is live even while the control plane keeps this endpoint off.";
     }
 }
