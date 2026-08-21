@@ -145,7 +145,8 @@ public sealed class McpAlertSettingsKeyTests
     /// (#1726) mirrored three of those four knobs and has no re-fire at all — no static, no settings.json
     /// key, no edge state that could re-announce a still-disconnected replica. Emitting it as a constant 0
     /// would tell an agent it can tune something Lite cannot, which is the same reasoning that omits
-    /// self_alerts whole.</para></summary>
+    /// self_alerts whole. Filed as #2426 — the exemption is the honest report of a gap, not the fix for
+    /// it.</para></summary>
     private static readonly string[] LiteOmittedMembers = { "ag.disconnect_refire_minutes" };
 
     /// <summary>
@@ -298,7 +299,7 @@ public sealed class McpAlertSettingsKeyTests
     /// <para>The gap itself is real and worth closing: Lite has no AG disconnect re-fire, so a replica
     /// disconnected for a week is announced exactly once here where Darling can re-announce it. That is
     /// #1696's Lite half, and it is a feature rather than a payload key — which is why this PR reports the
-    /// three knobs Lite really has instead of inventing a fourth.</para>
+    /// three knobs Lite really has instead of inventing a fourth. Filed as #2426.</para>
     /// </summary>
     [Fact]
     public void GetAlertSettings_OmitsAgDisconnectRefire_WhichLiteHasNoEquivalentFor()

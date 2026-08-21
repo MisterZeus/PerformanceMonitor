@@ -210,7 +210,7 @@ public sealed class McpAlertTools
                    three of those four knobs. Emitting a constant 0 would tell an agent it can tune
                    something Lite cannot, which is exactly why self_alerts is omitted whole above. The
                    omission is pinned by name in McpAlertSettingsKeyTests so it cannot outlive its
-                   reason. */
+                   reason, and the gap itself is filed as #2426. */
                 ag = new
                 {
                     enabled = App.NotifyAgHealth,
