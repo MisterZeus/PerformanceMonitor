@@ -83,10 +83,17 @@ internal static class ViewerSettingsFile
 
         if (read.State == SettingsFileState.Unreadable && FirstReportOf(filePath, read.Problem))
         {
+            /* Two different facts, so two different sentences. A file the reader could not use AT ALL costs
+               every setting in it; a file it read after dropping named members costs only those. Saying the
+               first when the second is true is the overstatement #2456 was filed to end — and saying the
+               second when the first is true would be worse, because it implies the rest survived. */
             ViewerLogger.Error(logSource,
-                $"'{filePath}' could not be read ({read.Problem}), so every setting it holds is at its " +
-                "default for this session. The file has not been changed; the next save copies it aside " +
-                "before replacing it.");
+                read.UnreadableMembers is { Count: > 0 }
+                    ? $"'{filePath}': {read.Problem}. Every other setting in the file loaded normally. " +
+                      "The file has not been changed; the next save copies it aside before replacing it."
+                    : $"'{filePath}' could not be read ({read.Problem}), so every setting it holds is at " +
+                      "its default for this session. The file has not been changed; the next save copies " +
+                      "it aside before replacing it.");
         }
 
         return read.Value is null ? read with { Value = new T() } : read;
@@ -122,9 +129,13 @@ internal static class ViewerSettingsFile
 
         if (permit.QuarantinedTo is not null)
         {
+            /* Deliberately does not claim WHAT the replacement is written from. Since #2456 that depends on
+               how much of the file the load recovered — everything but the named members, or nothing at all
+               — and this permit is asked at save time by a caller holding an object it did not necessarily
+               load. The one fact that matters here is true either way: the original bytes are in the copy. */
             ViewerLogger.Warn(logSource,
                 $"'{Path.GetFileName(filePath)}' could not be read ({permit.Problem}), so this save " +
-                "rewrites it from defaults. The unreadable original was copied to " +
+                "replaces it. The unreadable original was copied to " +
                 $"'{Path.GetFileName(permit.QuarantinedTo)}' first — the settings it held are recoverable " +
                 "from there.");
         }

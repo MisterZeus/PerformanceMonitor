@@ -91,13 +91,22 @@ public partial class MainWindow : Window
     private readonly ViewerAppSettingsStore _appSettingsStore = new();
 
     /// <summary>
-    /// The per-user settings files that were on disk at startup and could not be read, each with why
-    /// (#2434). Collected in the constructor, where both stores are loaded, and reported once from
+    /// The per-user settings files that were on disk at startup and could not be read AT ALL, each with why
+    /// (#2434). Collected in the constructor, where all three stores are loaded, and reported once from
     /// <see cref="OnLoaded"/> — a dialog raised from the constructor has no window behind it. Empty on
     /// every ordinary run INCLUDING a first run: an absent file is not a problem, and saying so would make
     /// a warning out of the most normal thing the viewer ever does.
     /// </summary>
     private readonly List<string> _unreadableSettingsFiles = new();
+
+    /// <summary>
+    /// The individual SETTINGS that could not be read, per file, when the rest of that file loaded normally
+    /// (#2456). Kept apart from <see cref="_unreadableSettingsFiles"/> because the two need different
+    /// sentences: one says every setting in the file reverted, the other says these did and nothing else
+    /// did. Collapsing them would put an overstatement in front of whichever case was not being described,
+    /// and the whole complaint here was a dialog that could not say which settings were lost.
+    /// </summary>
+    private readonly List<string> _unreadableSettingsValues = new();
 
     /// <summary>
     /// The system-tray icon + minimize-to-tray behavior (ported from Lite's SystemTrayService, adapted for
@@ -172,19 +181,22 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         _preferences = _preferencesStore.Load();
-        NoteUnreadableSettingsFile(_preferencesStore.FilePath, _preferencesStore.LastLoadState, _preferencesStore.LastLoadProblem);
+        NoteUnreadableSettingsFile(_preferencesStore.FilePath, _preferencesStore.LastLoadState, _preferencesStore.LastLoadProblem,
+            _preferencesStore.LastLoadUnreadableMembers);
         /* The registry loads in its own field initializer, which has already run by the time the
            constructor body does, so its state is available here — and it is the one of the three worth
            surfacing most: a viewer that opens with no servers because it could not read viewer-servers.json
            looks exactly like a viewer nobody has configured yet. */
-        NoteUnreadableSettingsFile(_serverStore.FilePath, _serverStore.LastLoadState, _serverStore.LastLoadProblem);
+        NoteUnreadableSettingsFile(_serverStore.FilePath, _serverStore.LastLoadState, _serverStore.LastLoadProblem,
+            _serverStore.LastLoadUnreadableMembers);
         /* Seed the persisted app settings the viewer honors at runtime BEFORE any tab/chart renders: the CSV
            export separator (grid exports) and the Server/Local/UTC time-display mode (every timestamp render
            routes through ViewerTimeHelper, which reads CurrentDisplayMode). UiTimeContext is deliberately left
            at its identity default — Darling charts pre-convert their X through ForDisplay, so wiring it would
            double-convert on hover/crosshair. */
         var appSettings = _appSettingsStore.Load();
-        NoteUnreadableSettingsFile(_appSettingsStore.FilePath, _appSettingsStore.LastLoadState, _appSettingsStore.LastLoadProblem);
+        NoteUnreadableSettingsFile(_appSettingsStore.FilePath, _appSettingsStore.LastLoadState, _appSettingsStore.LastLoadProblem,
+            _appSettingsStore.LastLoadUnreadableMembers);
         ViewerExportSettings.Apply(appSettings);
         /* Seed the new-mute-rule default expiration preference so every MuteRuleEditDialog opens on it, and the
            dismiss/mute action-logging opt-in the Alerts tab honors. */
@@ -212,14 +224,35 @@ public partial class MainWindow : Window
         Closed += OnClosed;
     }
 
-    /// <summary>Records a settings file that is present and could not be read, for the one startup report.
-    /// Absent and readable both record nothing, which is the whole point of the three-way split.</summary>
-    private void NoteUnreadableSettingsFile(string filePath, SettingsFileState state, string? problem)
+    /// <summary>
+    /// Records a settings file that is present and could not be read, for the one startup report. Absent
+    /// and readable both record nothing, which is the whole point of the three-way split.
+    ///
+    /// <para>Since #2456 the state carries a fourth possibility inside <c>Unreadable</c>: the file was read
+    /// after dropping members the deserializer could not understand, and <paramref name="members"/> names
+    /// them. That goes on the other list, because it is a different claim — those settings reverted and the
+    /// rest of the file did not.</para>
+    /// </summary>
+    private void NoteUnreadableSettingsFile(
+        string filePath,
+        SettingsFileState state,
+        string? problem,
+        IReadOnlyList<SettingsMemberProblem> members)
     {
-        if (state == SettingsFileState.Unreadable)
+        if (state != SettingsFileState.Unreadable)
         {
-            _unreadableSettingsFiles.Add($"{System.IO.Path.GetFileName(filePath)} — {problem}");
+            return;
         }
+
+        var fileName = System.IO.Path.GetFileName(filePath);
+
+        if (members.Count > 0)
+        {
+            _unreadableSettingsValues.Add($"{fileName} — {string.Join(", ", members)}");
+            return;
+        }
+
+        _unreadableSettingsFiles.Add($"{fileName} — {problem}");
     }
 
     /// <summary>
@@ -235,22 +268,47 @@ public partial class MainWindow : Window
     /// <para>Raised from Loaded so it has a window behind it, and before the store connect below on
     /// purpose: it costs nothing when there is nothing to say, and the connection-failure overlay would
     /// otherwise bury the one message that explains why the settings changed.</para>
+    ///
+    /// <para>Two paragraphs rather than one list, because there are two different facts and #2456 is the
+    /// issue about telling them apart. A file that could not be read at all costs every setting in it; a
+    /// file that was read after dropping named members costs only those. One sentence covering both would
+    /// have to overstate one of them, and an overstated capability is worse than an admitted gap — which
+    /// is also why the second paragraph says the settings are NAMED rather than implying the list is
+    /// exhaustive of everything wrong with the file.</para>
     /// </summary>
     private void ReportUnreadableSettingsFiles()
     {
-        if (_unreadableSettingsFiles.Count == 0)
+        if (_unreadableSettingsFiles.Count == 0 && _unreadableSettingsValues.Count == 0)
         {
             return;
         }
 
-        MessageBox.Show(
-            "The viewer could not read these settings files, so the settings they hold are at their "
-            + "defaults for this session:\n\n"
-            + string.Join("\n", _unreadableSettingsFiles)
-            + "\n\nThey have been left exactly as they are. Fix the JSON and restart to get those settings "
-            + "back — or save from the Settings window, which copies an unreadable file aside as "
-            + "'.unreadable-<timestamp>' before replacing it.",
-            "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+        var message = new System.Text.StringBuilder();
+
+        if (_unreadableSettingsFiles.Count > 0)
+        {
+            message
+                .Append("The viewer could not read these settings files, so the settings they hold are at ")
+                .Append("their defaults for this session:\n\n")
+                .AppendJoin('\n', _unreadableSettingsFiles)
+                .Append("\n\n");
+        }
+
+        if (_unreadableSettingsValues.Count > 0)
+        {
+            message
+                .Append("These individual settings could not be read and are at their defaults for this ")
+                .Append("session. Everything else in their file loaded normally:\n\n")
+                .AppendJoin('\n', _unreadableSettingsValues)
+                .Append("\n\n");
+        }
+
+        message
+            .Append("The files have been left exactly as they are. Fix the JSON and restart to get those ")
+            .Append("settings back — or save from the Settings window, which copies an unreadable file ")
+            .Append("aside as '.unreadable-<timestamp>' before replacing it.");
+
+        MessageBox.Show(message.ToString(), "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)

@@ -121,6 +121,16 @@ public sealed class ViewerServerStore
     public string? LastLoadProblem { get; private set; }
 
     /// <summary>
+    /// Present so all three stores answer the same three questions, and ALWAYS empty here — which is the
+    /// point rather than an oversight. The member recovery #2456 added only edits a root JSON object, and
+    /// this file's root is an array: dropping a bad element would silently delete a monitored server from
+    /// the operator's registry, which is the data loss #2434 exists to prevent wearing a repair's clothes.
+    /// The registry stays all-or-nothing, and the guard has a control test that pins it.
+    /// </summary>
+    public IReadOnlyList<SettingsMemberProblem> LastLoadUnreadableMembers { get; private set; } =
+        Array.Empty<SettingsMemberProblem>();
+
+    /// <summary>
     /// Whether the last write of the registry reached disk (#2434). Every mutator here ends in the same
     /// <see cref="Save"/>, and several of them keep return types that already mean something else —
     /// <c>ToggleFavorite</c> answers "is it favourite now", <c>ImportServersFromFile</c> answers with
@@ -386,6 +396,7 @@ public sealed class ViewerServerStore
         var read = ViewerSettingsFile.Load<List<ViewerServerEntry>>(_filePath, LogSource, s_jsonOptions);
         LastLoadState = read.State;
         LastLoadProblem = read.Problem;
+        LastLoadUnreadableMembers = read.UnreadableMembers ?? Array.Empty<SettingsMemberProblem>();
         return read.Value!;
     }
 

@@ -7,8 +7,11 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -47,15 +50,44 @@ public readonly record struct SettingsFileRead(
     string? Problem);
 
 /// <summary>
+/// One top-level member of a settings file whose VALUE the deserializer could not read, and what was wrong
+/// with it (#2456). Carried rather than thrown, because the whole point is that the reader gets to name it.
+/// </summary>
+public readonly record struct SettingsMemberProblem(string Member, string Problem)
+{
+    /// <summary>One line, ready to put in a log or a dialog.</summary>
+    public override string ToString() => $"{Member} ({Problem})";
+}
+
+/// <summary>
 /// The outcome of <see cref="SettingsFileGuard.ReadObject{T}"/>, for a store that round-trips a whole
-/// object rather than merging a document key by key. <c>Value</c> is non-null only for
-/// <see cref="SettingsFileState.Readable"/>; the caller supplies its own defaults for the other two
-/// states, and must tell them apart before deciding whether to say anything about it.
+/// object rather than merging a document key by key.
+///
+/// <para><c>Value</c> is non-null for <see cref="SettingsFileState.Readable"/> and for a file that was read
+/// after DROPPING members the deserializer could not understand — in which case the state is still
+/// <see cref="SettingsFileState.Unreadable"/>, because the file as written is exactly that, and the next
+/// save must still copy it aside before replacing it. <c>UnreadableMembers</c> is what separates the two:
+/// empty (or null) means nothing in the file was usable, and the caller's own defaults are the whole
+/// answer.</para>
+///
+/// <para><b>The invariant, because a caller reads one field and believes the other:</b> a non-empty
+/// <c>UnreadableMembers</c> always comes with a non-null <c>Value</c>. One direction only, and stated that
+/// way deliberately — the reverse is false, because an ordinary <see cref="SettingsFileState.Readable"/>
+/// file has a value and no members at all, so an "if and only if" here would be a sentence a future
+/// <c>Debug.Assert</c> could fire on down the happy path.</para>
+///
+/// <para>Review found the combination that broke the direction that IS guaranteed: a recovery that dropped
+/// one member and then hit a fault it could not attribute returned a null value WITH a member list, and the
+/// viewer's dialog routes on the list — so it would have said "everything else in their file loaded
+/// normally" about a file where nothing loaded at all. It is enforced at the one place that can enforce it
+/// (see <see cref="SettingsFileGuard.DeserializeWithMemberRecovery{T}"/>) rather than at each caller,
+/// because every caller that has to remember a rule is a caller that can forget it.</para>
 /// </summary>
 public readonly record struct SettingsObjectRead<T>(
     SettingsFileState State,
     T? Value,
-    string? Problem) where T : class;
+    string? Problem,
+    IReadOnlyList<SettingsMemberProblem>? UnreadableMembers = null) where T : class;
 
 /// <summary>
 /// The outcome of <see cref="SettingsFileGuard.RootForWrite"/>. <c>Problem</c> is null on the ordinary
@@ -255,6 +287,11 @@ public static class SettingsFileGuard
     /// every add, edit and favourite toggle. The typed deserialize is the right judge of whether the file
     /// says what this caller reads — for a settings object an array still fails, and for a
     /// <c>List&lt;T&gt;</c> an object still fails.</para>
+    ///
+    /// <para>When the deserialize fails on ONE member's value rather than on the document, that member is
+    /// named, dropped, and the read is attempted again — see
+    /// <see cref="DeserializeWithMemberRecovery{T}"/> for why that is the shape rather than per-property
+    /// reads (#2456).</para>
     /// </summary>
     public static SettingsObjectRead<T> ReadObject<T>(string settingsPath, JsonSerializerOptions? options = null)
         where T : class
@@ -265,23 +302,225 @@ public static class SettingsFileGuard
             return new SettingsObjectRead<T>(state, null, problem);
         }
 
+        return DeserializeWithMemberRecovery<T>(text!, options);
+    }
+
+    /// <summary>
+    /// A top-level member name in a <see cref="JsonException.Path"/>: <c>$.AlertCpuThreshold</c>,
+    /// <c>$.AlertExcludedDatabases[1]</c> and <c>$.Nested.Deeper</c> all yield the first segment, while
+    /// <c>$</c>, <c>$[3].DisplayName</c> and <c>$['with space']</c> yield nothing — an array root and a
+    /// bracket-quoted name are both paths this reader must not edit a document on.
+    ///
+    /// <para><b>Everything up to the first <c>.</c> or <c>[</c>, not an ASCII identifier.</b> Review raised
+    /// the narrower form as a diacritic edge case; measuring System.Text.Json showed it is wider and more
+    /// ordinary than that. STJ writes the DOT form for every name that needs no escaping, which includes
+    /// <c>$.with-dash</c> and <c>$.dollar$sign</c> as well as <c>$.ServerNaïve</c> and <c>$.サーバー</c>; it
+    /// bracket-quotes only where it must, e.g. <c>$['with space']</c>. An identifier class would have
+    /// captured <c>with</c> out of <c>with-dash</c> — and a hyphenated key is an ordinary thing to find in a
+    /// settings file, not an exotic one. It failed SAFE (<see cref="WithoutMember"/> finds no such key and
+    /// the read falls back to whole-file <c>Unreadable</c>), so nothing was ever at risk; what it lost was
+    /// the per-member recovery, silently, for exactly the settings someone had to name by hand with
+    /// <c>JsonPropertyName</c>.</para>
+    /// </summary>
+    private static readonly Regex s_topLevelMember =
+        new(@"^\$\.([^.\[]+)", RegexOptions.CultureInvariant);
+
+    /// <summary>A file cannot lose more members than it has; the cap is a termination guard, not a policy.</summary>
+    private const int MaxDroppedMembers = 500;
+
+    /// <summary>
+    /// Deserialize <typeparamref name="T"/>, and when the failure is one member's VALUE rather than the
+    /// document, name that member, drop it, and try again — so a badly-shaped setting costs exactly its own
+    /// setting and the read can say which ones it lost (#2456).
+    ///
+    /// <para><b>Why this shape and not per-property reads.</b> #2444 gave Lite a per-KEY reader, which works
+    /// there because Lite's settings.json is built key by key on BOTH sides: #2441 made every writer mutate
+    /// one <see cref="JsonObject"/>, so a per-key read is symmetric with a per-key write. These files are a
+    /// whole-object round trip on both sides, and converting only the READ half to hand-written properties
+    /// would break that symmetry: a property added to the settings class would still be serialized on save
+    /// and would silently never be read back. That is a worse defect than the one being fixed, and an
+    /// invisible one. Dropping the named member and re-running the SAME deserialize keeps the round trip
+    /// intact, so a new property is covered the day it is added.</para>
+    ///
+    /// <para><b>Why it is not two readers.</b> #2213 spent a review round on a two-pass classify where the
+    /// second pass judged the file by a different standard from the first. Every attempt here is
+    /// <see cref="JsonSerializer.Deserialize{T}(string, JsonSerializerOptions)"/> with the caller's own
+    /// options over the caller's own type. The only thing that changes between attempts is that one member
+    /// is gone, so the two passes cannot disagree about what "unreadable" means — there is only one judge.</para>
+    ///
+    /// <para><b>What it deliberately will not recover.</b> Only a top-level member of a root JSON OBJECT.
+    /// The viewer's server registry is a root ARRAY, and a bad element there has a path of
+    /// <c>$[3]</c> — dropping it would silently delete a monitored server from the operator's registry,
+    /// which is the data loss #2434 exists to prevent, dressed up as a repair. So an array-rooted file keeps
+    /// its all-or-nothing behaviour and says so, and
+    /// <c>ReadObject_LeavesAnArrayRootedRegistryAllOrNothing</c> is the control for exactly that mistake.</para>
+    ///
+    /// <para>The state stays <see cref="SettingsFileState.Unreadable"/> for a partially-recovered file, on
+    /// purpose. The file on disk is still the one that could not be read, so <see cref="PermitReplace{T}"/>
+    /// must still copy it aside before anything replaces it — the recovered values are in memory, and the
+    /// dropped members' original text exists nowhere else.</para>
+    /// </summary>
+    internal static SettingsObjectRead<T> DeserializeWithMemberRecovery<T>(string text, JsonSerializerOptions? options)
+        where T : class
+    {
+        List<SettingsMemberProblem>? dropped = null;
+        var current = text;
+
+        /* The first failure's description, kept because it is the only one whose line and position are
+           against the file the user actually has: every later attempt runs over a re-serialized document.
+           It is what a whole-file failure reports, however many members had been dropped before it. */
+        string? firstProblem = null;
+
+        for (var attempt = 0; attempt <= MaxDroppedMembers; attempt++)
+        {
+            JsonException failure;
+            try
+            {
+                var value = JsonSerializer.Deserialize<T>(current, options);
+
+                /* The JSON literal null parses and deserializes to null. Reported, because it is the shape
+                   that reads as "nothing was configured" to a caller that only null-checks, and the
+                   consequence of believing that is a file replaced from defaults. */
+                if (value is null)
+                {
+                    return Unreadable<T>(
+                        "the file holds the JSON literal null rather than the settings it should");
+                }
+
+                return dropped is null
+                    ? new SettingsObjectRead<T>(SettingsFileState.Readable, value, null)
+                    : new SettingsObjectRead<T>(SettingsFileState.Unreadable, value, Summarize(dropped), dropped);
+            }
+            catch (JsonException ex)
+            {
+                failure = ex;
+            }
+            catch (Exception ex) when (ex is NotSupportedException or ArgumentException)
+            {
+                /* Not a member fault and carries no path to attribute one with. */
+                return Unreadable<T>(firstProblem ?? Describe(ex));
+            }
+
+            firstProblem ??= Describe(failure);
+
+            var member = TopLevelMember(failure);
+            var without = member is null ? null : WithoutMember(current, member, options);
+
+            if (member is null || without is null)
+            {
+                return Unreadable<T>(firstProblem);
+            }
+
+            (dropped ??= new List<SettingsMemberProblem>()).Add(
+                new SettingsMemberProblem(member, DescribeMemberValue(failure)));
+            current = without;
+        }
+
+        /* Unreachable for any real file — every pass removes a member that was there — but a loop that
+           edits its own input gets a bound rather than a proof. */
+        return Unreadable<T>("the file holds more unreadable settings than this reader will drop");
+    }
+
+    /// <summary>
+    /// A whole-file failure: no value, and deliberately NO member list even when members had already been
+    /// dropped before the reader hit something it could not attribute.
+    ///
+    /// <para>Discarding that partial list is the honest answer rather than a loss. The caller substitutes
+    /// its own defaults for a null value, so EVERY setting in the file reverts — and a list naming three of
+    /// them, next to a message built to mean "only these", would tell the reader the other eighty survived.
+    /// The named subset is worth nothing here anyway: it is a subset of "all of them". This is the one place
+    /// the <see cref="SettingsObjectRead{T}"/> invariant can be enforced, so it is enforced here.</para>
+    /// </summary>
+    private static SettingsObjectRead<T> Unreadable<T>(string? problem) where T : class =>
+        new(SettingsFileState.Unreadable, null, problem, null);
+
+    /// <summary>
+    /// Why one member's value could not be read, deliberately WITHOUT the line and position
+    /// <see cref="Describe"/> renders.
+    ///
+    /// <para>That omission is a correctness fix, not a trim. Each retry runs over the document with the
+    /// previous member removed, and removing it re-serializes — so from the second member onward the
+    /// exception's line and position describe the RE-SERIALIZED text, not the file the user is about to
+    /// open. Measured: three bad members on lines 2, 3 and 4 reported "line 2, position 22", then
+    /// "line 1, position 30" and "line 1, position 14". A position that confidently names the wrong line is
+    /// worse than no position, and here there is a better locator anyway — the member's NAME, which is what
+    /// this whole reader exists to produce and what a reader will search their file for. The line and
+    /// position stay on the DOCUMENT fault, where the parse position is the only locator there is.</para>
+    /// </summary>
+    private static string DescribeMemberValue(JsonException failure) =>
+        WithoutPathSuffix(failure.Message).Trim();
+
+    /// <summary>The member a <see cref="JsonException"/> stopped on, or null when it stopped on the document
+    /// itself (<c>$</c>) or somewhere this reader will not edit.</summary>
+    private static string? TopLevelMember(JsonException failure)
+    {
+        var path = failure.Path;
+        if (string.IsNullOrEmpty(path))
+        {
+            return null;
+        }
+
+        var match = s_topLevelMember.Match(path);
+        return match.Success ? match.Groups[1].Value : null;
+    }
+
+    /// <summary>
+    /// The same JSON with one top-level member removed, or null when the root is not an object, the member
+    /// is not actually there, or the text will not re-parse. The existence check is what makes the retry
+    /// loop terminate: a pass that removed nothing would fail identically forever.
+    ///
+    /// <para><b>The parse borrows the caller's leniency, and it has to.</b> Review found the seam: the retry
+    /// loop deserializes with the caller's <see cref="JsonSerializerOptions"/>, so a caller that allows
+    /// trailing commas or comments has a file the DESERIALIZE accepts — while a bare
+    /// <see cref="JsonNode.Parse(string, JsonNodeOptions?, JsonDocumentOptions)"/> here runs with both
+    /// disallowed and throws on the very same text. The recovery would then bail to whole-file Unreadable
+    /// and silently give up the per-member repair, on files it was written for.</para>
+    ///
+    /// <para>Dormant today — none of the three viewer stores passes permissive options — and not hypothetical
+    /// either: <c>ViewerSettings</c> reads darling.json with <c>AllowTrailingCommas</c> and
+    /// <c>ReadCommentHandling.Skip</c> because that file is JSONC, so the next caller of this general-purpose
+    /// API is as likely to be lenient as strict. This is also the one place the "one judge, not two" claim
+    /// this recovery rests on could have quietly become false, which is why the mapping is here and pinned
+    /// rather than left to match by luck.</para>
+    /// </summary>
+    private static string? WithoutMember(string text, string member, JsonSerializerOptions? options)
+    {
         try
         {
-            var value = JsonSerializer.Deserialize<T>(text!, options);
+            var documentOptions = new JsonDocumentOptions
+            {
+                AllowTrailingCommas = options?.AllowTrailingCommas ?? false,
+                CommentHandling = options?.ReadCommentHandling ?? JsonCommentHandling.Disallow,
+                MaxDepth = options?.MaxDepth ?? 0,
+            };
 
-            /* The JSON literal null parses and deserializes to null. Reported, because it is the shape that
-               reads as "nothing was configured" to a caller that only null-checks, and the consequence of
-               believing that is a file replaced from defaults. */
-            return value is null
-                ? new SettingsObjectRead<T>(SettingsFileState.Unreadable, null,
-                    "the file holds the JSON literal null rather than the settings it should")
-                : new SettingsObjectRead<T>(SettingsFileState.Readable, value, null);
+            if (JsonNode.Parse(text, nodeOptions: null, documentOptions) is not JsonObject root
+                || !root.Remove(member))
+            {
+                return null;
+            }
+
+            return root.ToJsonString();
         }
-        catch (Exception ex) when (ex is JsonException or NotSupportedException or ArgumentException)
+        catch (JsonException)
         {
-            return new SettingsObjectRead<T>(SettingsFileState.Unreadable, null, Describe(ex));
+            return null;
         }
     }
+
+    /// <summary>
+    /// The one-line <c>Problem</c> for a partially-recovered file. Names the members rather than counting
+    /// them: a count sends someone to proofread the whole file, which is the message #2444 replaced.
+    /// </summary>
+    private static string Summarize(List<SettingsMemberProblem> dropped) =>
+        string.Format(
+            CultureInfo.InvariantCulture,
+            "{0} setting{1} could not be read and {2} at {3} default{1}: {4}",
+            dropped.Count,
+            dropped.Count == 1 ? "" : "s",
+            dropped.Count == 1 ? "is" : "are",
+            dropped.Count == 1 ? "its" : "their",
+            string.Join(", ", dropped.Select(d => d.ToString())));
 
     /// <summary>
     /// <see cref="RootForWrite"/>'s twin for a store that REPLACES the file instead of merging into it.
