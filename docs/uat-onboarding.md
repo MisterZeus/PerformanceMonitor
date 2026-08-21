@@ -75,9 +75,10 @@ will not override it. When the two disagree the service says so, once per start,
     dashboard, because the host framework is referenced unconditionally.
   - **.NET Desktop Runtime 10.0** — the WPF viewer.
 
-  A stock Windows Server image has neither, `install-darling.ps1` does **not** check for them, and a missing
-  runtime surfaces as the raw .NET host error ("You must install .NET…"), not as anything Darling says.
-  Install both first.
+  A stock Windows Server image has neither. `install-darling.ps1` now checks: it **refuses** the install if
+  the ASP.NET Core Runtime is missing, and **warns** if the .NET Desktop Runtime is. The asymmetry is
+  deliberate — without ASP.NET Core the service cannot start at all, whereas without the Desktop Runtime the
+  service runs fine and only the viewer will not open. Install both first anyway and skip the round trip.
 - **A monitored SQL Server** (2016–2025, Azure SQL MI, AWS RDS, or Azure SQL DB) and a login on it with
   `VIEW SERVER STATE` and the rest of the [monitoring grants](../Darling/README.md#permissions-on-monitored-servers).
 - **Nothing else.** In the shipped default (`postgres.managed = true`) the service runs its own bundled
@@ -403,8 +404,17 @@ is to open **Settings**: a read-only seat shows
 
 Elsewhere you will see disabled buttons with tooltips, or a status line saying which write is blocked. Some
 dialogs say it in their own title bar — Database State Overrides appends `(read-only seat — changes cannot
-be saved)` — but **the main window does not**, so there is no one place to look. That is a known gap rather
-than something you are missing: see Part 6.
+be saved)`.
+
+**There is now one place to look.** The main window carries a seat indicator reading **`Seat: read-only`** or
+**`Seat: read-write`**, set from the same probe, so you no longer have to trip a refusal to find out. Hover it
+and the tooltip gives the reason for *this* connection — a host seat connects as `postgres.connectAs`
+(default `admin`, read-write), a LAN seat as `postgres.network.role` (default `viewer`, read-only) — along
+with the reassurance that nothing is ever written to a monitored SQL Server.
+
+Before the probe returns, the indicator says so rather than guessing. A viewer that cannot reach the store
+reports *that*, and does not claim read-only — a status line blaming your role when the service is simply
+down would send you off fixing the wrong thing.
 
 **How to change it.** On a managed store this is a config change, not a `GRANT` — the `admin` role and its
 credential already exist, provisioned on every service start:
@@ -536,9 +546,18 @@ Add a `network` block to `web` in `darling.json` (managed mode only), or let `--
 }
 ```
 
-`--configure-network` generates a 32-character token for you and prints the plaintext **once** — save it then;
-`darling.json` keeps only the DPAPI blob and there is no verb that prints it back. Bring your own instead if
-you prefer, and encrypt it with `--encrypt-password`. A plaintext `"token"` works and is warned about.
+`--configure-network` generates a 32-character token for you and prints the plaintext once. Bring your own
+instead if you prefer, and encrypt it with `--encrypt-password`. A plaintext `"token"` works and is warned
+about.
+
+**You can reprint it.** Losing the plaintext no longer means regenerating and re-onboarding every client:
+
+```powershell
+.\PerformanceMonitor.Darling.Service.exe --print-web-token
+```
+
+Run it **elevated, on the box that encrypted it** — DPAPI is `LocalMachine`-scoped, so the blob only opens
+there. It writes a live token to stdout, so treat that console the way you would the token itself.
 
 **The block is file-authoritative and read once at service start.** After editing it, from an **elevated**
 PowerShell:
@@ -654,7 +673,8 @@ Add a `network` block to `mcp` (managed mode only, and `mcp.enabled` must be on)
 
 Same rules as the web block: file-authoritative, **read once at service start**, fail-closed, and the token is
 DPAPI at LocalMachine scope so it must be produced on that box. `--configure-network` will generate and encrypt
-one for you and print the plaintext once. Then, from an **elevated** PowerShell:
+one for you and print the plaintext once, and `--print-mcp-token` reprints it later — elevated, on that same
+box — so a lost token does not cost you a re-onboard. Then, from an **elevated** PowerShell:
 
 ```powershell
 Restart-Service 'PerformanceMonitor Darling'
@@ -698,9 +718,20 @@ Both common failures leave the store flag reading `true`, so "it says enabled" i
 3. **Is the client pointed at the box's IP, with the header?** And do a fresh `initialize` + `tools/list`
    rather than trusting a cached tool list from a previous version.
 
-**A rejected request leaves no trace in the service log.** 401 (bad or missing bearer), 403 (outside
-`allowFrom`) and 400 (Host-header guard) are all returned silently, on both the MCP and web endpoints —
-Kestrel's own logging is suppressed. Diagnose those from the client side, not by grepping the service log.
+**Rejected requests are logged now, so this is answerable from the service log.** A 401 (bad or missing
+bearer), 403 (outside `allowFrom`) or 400 (Host-header guard) on either endpoint writes a line naming the
+gate that rejected it and why:
+
+```
+MCP refused a request from 10.1.2.3 (HTTP 403): the source address allowlist (network.allowFrom) gate
+rejected it — ... .
+```
+
+That is the whole "is my token wrong, or my CIDR wrong?" question answered directly, rather than inferred
+from a status code on the client. It is rate-limited to one line per gate per source per 10 minutes, and a
+folded line then says how many further refusals it stands for — so a scanner hitting the port cannot flood
+the log, and you still see that it happened. If the budget for distinct sources fills, the line says it is
+speaking for several, which is itself the signal that the port is being scanned.
 
 If the block itself is bad the service *is* loud, and it fails closed to loopback rather than half-exposing:
 
@@ -779,17 +810,10 @@ These are known, current, and not bugs:
   is a TLS-terminating reverse proxy. Both are trusted-LAN opt-ins.
 - **No client-side secret store for the viewer.** A remote seat's `darling.json` holds the store role password
   in cleartext; ACL it. Fine for the read-only `viewer` role, worth thinking about for `admin`.
-- **No verb prints an existing MCP or web token.** `--configure-network` shows the plaintext once at
-  generation. Lose it and you regenerate.
-- **`install-darling.ps1` does not check for the .NET runtimes.** A missing one surfaces as the raw .NET host
-  error, not as a Darling message.
-- **The viewer has no global read-only indicator.** You discover your seat one surface at a time.
 - **The web dashboard has no plan analysis and no live-server actions** — that is the WPF viewer's job — and
   its page set is a deliberate subset of the viewer's.
-- **Rejected HTTP requests are not logged.** A 401, 403 or 400 from the MCP or web endpoint leaves nothing in
-  the service log, so "is my token wrong or is my CIDR wrong?" has to be answered from the client's response
-  code.
-- **`network` blocks need a service restart.** There is no hot reload for exposure.
+- **`network` blocks need a service restart.** There is no hot reload for exposure. The service now says so
+  at startup, naming the block it loaded, so a config edit that appears to do nothing is at least explained.
 - **PostgreSQL monitored targets** collect and are readable, but apart from the three Tier 0 outage predictors
   they do not raise alerts or produce analysis findings yet, and there is no plan capture or blocking-chain
   read for them. See [PostgreSQL Targets](../Darling/README.md#postgresql-targets).
