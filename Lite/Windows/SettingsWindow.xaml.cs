@@ -176,19 +176,43 @@ public partial class SettingsWindow : Window
         }
     }
 
+    /* #2431: why settings.json could not be read, or null. Without it this window presents the fallback
+       "off, port 5151" as though it were the user's configuration -- an unticked box and a status line
+       reading "Disabled", which is the app agreeing that the endpoint was never wanted. */
+    private string? _mcpSettingsProblem;
+
     private void LoadMcpSettings()
     {
         var settings = McpSettings.Load(App.ConfigDirectory);
+        _mcpSettingsProblem = settings.Problem;
         McpEnabledCheckBox.IsChecked = settings.Enabled;
         McpPortTextBox.Text = settings.Port.ToString();
     }
 
     private void UpdateMcpStatus()
     {
+        /* Cleared first, so a re-run after the file is fixed does not leave the unreadable-file
+           explanation hanging off a status line that no longer says it. */
+        McpStatusText.ToolTip = null;
+
         if (_mcpService != null)
         {
-            var settings = McpSettings.Load(App.ConfigDirectory);
-            McpStatusText.Text = $"Status: Running on http://localhost:{settings.Port}";
+            /* Asked of the running host rather than re-read from settings.json, which may have been
+               broken since the endpoint started -- and would then hand back the 5151 fallback and print
+               it as the live port. */
+            McpStatusText.Text = $"Status: Running on http://localhost:{_mcpService.Port}";
+        }
+        else if (_mcpSettingsProblem != null)
+        {
+            /* Not "Disabled": nobody disabled it. Kept to one short line because this TextBlock does not
+               wrap; the part that does not fit is on the tooltip. */
+            McpStatusText.Text = "Status: Off \u2014 settings.json could not be read";
+            McpStatusText.ToolTip =
+                $"settings.json could not be read ({_mcpSettingsProblem}), so the MCP server did not start and "
+                + "the tickbox and port above are defaults rather than your settings.\n\n"
+                + "Fix the file and restart Lite to get the endpoint back. Saving from this window instead "
+                + "copies the unreadable file aside first, but it saves what you can see here, which is not "
+                + "what the file said.";
         }
         else
         {
@@ -225,6 +249,18 @@ public partial class SettingsWindow : Window
 
         _saved = true;
         if (mcpChanged) McpSettingsChanged = true;
+
+        /* #2431: the saves above copy an unreadable settings.json aside and write a fresh one, so a
+           warning raised when this window opened may simply not be true any more — and this window
+           stays open afterwards, so it would otherwise keep saying "settings.json could not be read"
+           over a file that now reads fine. Re-read rather than assume the save fixed it: a write that
+           failed leaves the file exactly as unreadable as it was, and this is the one surface in Lite
+           claiming to show the endpoint's state. */
+        if (_mcpSettingsProblem != null)
+        {
+            _mcpSettingsProblem = McpSettings.Load(App.ConfigDirectory).Problem;
+            UpdateMcpStatus();
+        }
 
         if (!alertsValid || !mcpValid || !webhooksValid) return;
 
