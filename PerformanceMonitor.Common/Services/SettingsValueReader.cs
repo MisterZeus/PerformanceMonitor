@@ -206,11 +206,6 @@ public readonly struct SettingsValue
         Element.ValueKind == JsonValueKind.Array || Reject(false, "a list");
 
     /// <summary>
-    /// Records this key against its reader and hands back the caller's fallback, so every reader above is one
-    /// expression. The message names the kind that WAS there, in the same phrasing the MCP settings loader
-    /// already uses, because "it holds a JSON string" is what lets someone find the line in their file.
-    /// </summary>
-    /// <summary>
     /// Records a value that IS a number and still cannot be used, naming which of the two problems it has —
     /// "holds a JSON number where a whole number belongs" is a nonsense sentence about a number, and this one
     /// reaches a dialog. The token is truncated because a hand-edited file is where a thousand-digit number
@@ -234,6 +229,11 @@ public readonly struct SettingsValue
         return fallback;
     }
 
+    /// <summary>
+    /// Records this key against its reader and hands back the caller's fallback, so every reader above is one
+    /// expression. The message names the kind that WAS there, in the same phrasing the MCP settings loader
+    /// already uses, because "it holds a JSON string" is what lets someone find the line in their file.
+    /// </summary>
     private T Reject<T>(T fallback, string expected)
     {
         _reader?.Reject(
