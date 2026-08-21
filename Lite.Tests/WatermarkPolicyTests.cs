@@ -209,21 +209,15 @@ public sealed class WatermarkPolicyTests
     /// service's runners, and Lite's twin of them. <c>WatermarkPolicy.cs</c> is excluded because it is the
     /// one place allowed to write the number down — including its own record of what the horizon used to
     /// be, which is history worth keeping rather than prose that has gone stale.</summary>
-    private static IEnumerable<string> ClampSources([CallerFilePath] string thisFile = "")
+    private static IEnumerable<string> ClampSources()
     {
-        var repo = new DirectoryInfo(Path.GetDirectoryName(thisFile)!);
-        while (repo is not null && !Directory.Exists(Path.Combine(repo.FullName, "PerformanceMonitor.Collectors")))
-        {
-            repo = repo.Parent;
-        }
-
-        Assert.True(repo is not null, $"could not locate the repo root walking up from {thisFile}");
+        var repo = RepoRoot();
 
         var roots = new[]
         {
-            Path.Combine(repo!.FullName, "PerformanceMonitor.Collectors"),
-            Path.Combine(repo.FullName, "Darling", "PerformanceMonitor.Darling.Service"),
-            Path.Combine(repo.FullName, "Lite", "Services"),
+            Path.Combine(repo, "PerformanceMonitor.Collectors"),
+            Path.Combine(repo, "Darling", "PerformanceMonitor.Darling.Service"),
+            Path.Combine(repo, "Lite", "Services"),
         };
 
         foreach (var root in roots)
@@ -246,5 +240,60 @@ public sealed class WatermarkPolicyTests
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// A guard that CI skips on the PRs it guards is a guard that has silently stopped guarding — the
+    /// same failure the horizon pin above exists to close, one layer out.
+    ///
+    /// <para>Raised by review on #2471. That pin lives in <c>Lite.Tests</c> and walks the Darling service
+    /// tree, but <c>build.yml</c>'s "Run Lite tests" step gates on <c>lite</c> / <c>core</c> / <c>root</c>.
+    /// <c>core</c> covers <c>PerformanceMonitor.Collectors</c> and <c>lite</c> covers <c>Lite/Services</c>,
+    /// so two of the three trees were fine — but <c>Darling/PerformanceMonitor.Darling.Service</c> belongs
+    /// only to <c>darling</c>, and three of the twelve sites the pin was written for live there. A
+    /// Darling-only PR reintroducing one would have fired <c>darling</c>, skipped this suite, and been
+    /// caught a day later by the nightly.</para>
+    ///
+    /// <para>So the filter entry is load-bearing, and a filter entry is exactly the kind of thing that gets
+    /// tidied away by someone trimming what looks like an over-broad path. It is asserted rather than
+    /// commented — <c>Darling.Tests</c>' CI-worker-sizing guards already set the precedent for a test
+    /// reading these workflows.</para>
+    /// </summary>
+    [Fact]
+    public void TheLiteSuite_RunsOnEveryTreeTheHorizonPinScans()
+    {
+        var yaml = File.ReadAllText(Path.Combine(RepoRoot(), ".github", "workflows", "build.yml"))
+            .Replace("\r\n", "\n", StringComparison.Ordinal);
+
+        var at = yaml.IndexOf("\n            lite:\n", StringComparison.Ordinal);
+        Assert.True(at > 0, "build.yml's 'lite' path filter is gone — find where it moved before editing this test");
+
+        /* The block runs to the next area key at the same indent; its own entries are indented deeper. */
+        var rest = yaml[(at + 1)..];
+        var next = Regex.Match(rest, "\n            [a-z_]+:\n");
+        var block = next.Success ? rest[..next.Index] : rest;
+
+        Assert.Contains("Darling/PerformanceMonitor.Darling.Service/**/!(*.md)", block, StringComparison.Ordinal);
+
+        /* The step that consumes it. If "Run Lite tests" ever stops reading `lite`, the entry above is
+           decoration and this test is the only thing that would notice. */
+        var step = yaml.IndexOf("name: Run Lite tests", StringComparison.Ordinal);
+        Assert.True(step > 0, "the 'Run Lite tests' step is gone — find where it moved before editing this test");
+        Assert.Contains("steps.filter.outputs.lite == 'true'", yaml[step..(step + 400)], StringComparison.Ordinal);
+    }
+
+    /// <summary>The repo root, located by walking up from this file's compile-time path — the same idiom
+    /// the other source-scanning suites use.</summary>
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+    {
+        for (var dir = new DirectoryInfo(Path.GetDirectoryName(thisFile)!); dir is not null; dir = dir.Parent)
+        {
+            if (Directory.Exists(Path.Combine(dir.FullName, "PerformanceMonitor.Collectors")))
+            {
+                return dir.FullName;
+            }
+        }
+
+        throw new DirectoryNotFoundException($"could not locate the repo root walking up from {thisFile}");
     }
 }
