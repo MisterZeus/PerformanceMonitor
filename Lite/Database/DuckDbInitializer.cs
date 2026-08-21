@@ -227,7 +227,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 54;
+    internal const int CurrentSchemaVersion = 55;
 
     private readonly string _archivePath;
 
@@ -1371,6 +1371,37 @@ public class DuckDbInitializer
                    the accumulator degrades to reporting the total as the window count — the pre-#2216
                    information rather than a broken alert path. */
                 _logger?.LogWarning("Migration to v54 encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
+
+        if (fromVersion < 55)
+        {
+            /* v55 (#2472): the per-database fan-out rollup on collection_log, twinning Darling's V80. One
+               collector run that fans out over N databases writes ONE row whose duration_ms is the sum, so
+               "eight databases at 10.1s" and "one at 62s beside seven at 2.7s" are the same number and want
+               opposite fixes. These three carry the ratio that separates them.
+
+               Fresh installs get the columns from GetAllTableStatements(); this is for an existing database
+               and is idempotent. Nothing to backfill and nothing that COULD be: a row written before the
+               upgrade genuinely does not know its fan-out, so NULL is the honest value rather than a zero
+               that would read as "fanned out over nothing".
+
+               Non-fatal, matching the blocks above: without the columns the writer's INSERT would fail and
+               take collection logging with it, so a failed ADD COLUMN must not also break the run — the
+               write path treats a log failure as non-fatal already. */
+            _logger?.LogInformation("Running migration to v55: adding collection_log fan-out rollup columns");
+            try
+            {
+                await ExecuteNonQueryAsync(connection,
+                    "ALTER TABLE collection_log ADD COLUMN IF NOT EXISTS fanout_item_count INTEGER");
+                await ExecuteNonQueryAsync(connection,
+                    "ALTER TABLE collection_log ADD COLUMN IF NOT EXISTS slowest_item VARCHAR");
+                await ExecuteNonQueryAsync(connection,
+                    "ALTER TABLE collection_log ADD COLUMN IF NOT EXISTS slowest_item_ms INTEGER");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v55 encountered an error (non-fatal): {Error}", ex.Message);
             }
         }
     }

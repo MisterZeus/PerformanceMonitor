@@ -136,6 +136,7 @@ public static class PgMigrations
         new Migration(77, "activity-driven-plan-fetch", V77Sql),
         new Migration(78, "compose-statement-timeout", V78Sql),
         new Migration(79, "file-growth-alert", V79Sql),
+        new Migration(80, "collection-log-fanout-rollup", V80Sql),
     };
 
     /// <summary>
@@ -1712,6 +1713,42 @@ CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen
     /// <para>Ships OFF. A new alert that starts firing on upgrade is a bad citizen, and the right thresholds are
     /// a property of the fleet rather than of the product.</para>
     /// </summary>
+    /// <summary>
+    /// V80 — the fan-out rollup on <c>collection_log</c> (#2472). Five collectors run once per DATABASE
+    /// (<c>query_store</c>, <c>plan_correction</c>, <c>query_store_health</c>, <c>index_object_stats</c>,
+    /// <c>database_scoped_config</c>) and the run writes ONE row whose <c>duration_ms</c> is the sum across
+    /// every database. So an 80.9-second run is indistinguishable between "eight databases at 10.1s each"
+    /// and "one at 62s and seven at 2.7s" — two shapes that want opposite fixes, which is why #2468 could
+    /// not be decided.
+    ///
+    /// <para><b>Why three columns and not a table.</b> The per-database costs already exist; the runner logs
+    /// them and throws them away. A <c>collector_item_timings</c> hypertable would keep the whole
+    /// distribution and cost roughly a tenth of <c>collection_log</c>'s own row volume forever. These three
+    /// columns cost ZERO rows and are NULL on ~98% of them (only a productive fan-out run writes any), which
+    /// on a hypertable compressed and segmented by <c>server_id</c> is very nearly free. They answer the
+    /// specific question all three of #2468's live shapes need, and no more than that.</para>
+    ///
+    /// <para><b>The arithmetic they buy.</b> <c>slowest_item_ms * fanout_item_count / duration_ms</c> is the
+    /// dominance ratio: 1.0 is a perfectly even fan-out, and the worked example above gives 1.0 against 6.1.
+    /// <c>max_duration_ms</c> and <c>p95_duration_ms</c> (#2460) cannot separate those two — both runs are
+    /// 80,900 ms — which is why the tail statistics, real as they are, do not close this.</para>
+    ///
+    /// <para>Nullable with no DEFAULT on purpose: that is a catalog-only change in PostgreSQL and stays
+    /// instant on a large compressed hypertable, where adding a column WITH a default is the shape
+    /// TimescaleDB has historically refused. Backfill is deliberately absent — a historical row genuinely
+    /// does not know its fan-out, and NULL says so rather than inventing a zero.</para>
+    /// </summary>
+    private const string V80Sql = @"
+ALTER TABLE collect.collection_log
+    ADD COLUMN IF NOT EXISTS fanout_item_count integer,
+    ADD COLUMN IF NOT EXISTS slowest_item text,
+    ADD COLUMN IF NOT EXISTS slowest_item_ms integer;
+
+/* Postgres FREEZES a view's SELECT * column list at CREATE, so the passthrough every read goes through
+   would keep serving eleven columns forever — the V14 lesson, and the reason it exists. Appending is the
+   one alteration CREATE OR REPLACE VIEW permits, which is exactly what an ADD COLUMN produces. */
+CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collection_log;";
+
     private const string V79Sql = @"
 ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS file_growth_enabled boolean NOT NULL DEFAULT false,
