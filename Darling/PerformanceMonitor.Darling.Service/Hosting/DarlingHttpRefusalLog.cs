@@ -278,7 +278,16 @@ internal sealed class DarlingHttpRefusalLog
         return builder.ToString();
     }
 
-    /// <summary>The " (N more suppressed…)" clause, or empty when this is the first or only line.</summary>
+    /// <summary>
+    /// The "N more were suppressed" clause, or empty when this is the first or only line.
+    ///
+    /// <para>The wording branches on <see cref="Decision.Aggregated"/> because the two buckets fold
+    /// different things, and saying so wrongly is worse than saying nothing. A per-source entry folds
+    /// repeats from ONE address. The aggregate entry folds the cap overflow, which is by definition many
+    /// DIFFERENT addresses through one gate — so "N further refusals from this source" would be actively
+    /// false there, and false in the direction that matters: an operator reading it would go looking for
+    /// one busy client when what is happening is a broad scan. Review catch on #2479.</para>
+    /// </summary>
     internal static string DescribeSuppression(Decision decision, TimeSpan window)
     {
         if (decision.SuppressedSinceLastLog <= 0)
@@ -288,7 +297,9 @@ internal sealed class DarlingHttpRefusalLog
 
         return string.Format(
             CultureInfo.InvariantCulture,
-            " {0} further refusal(s) from this source were not logged in the last {1} minute(s).",
+            decision.Aggregated
+                ? " {0} further refusal(s) through this gate, from other sources, were not logged in the last {1} minute(s)."
+                : " {0} further refusal(s) from this source were not logged in the last {1} minute(s).",
             decision.SuppressedSinceLastLog,
             (int)Math.Round(window.TotalMinutes));
     }

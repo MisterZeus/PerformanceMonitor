@@ -166,6 +166,54 @@ public class DarlingHttpRefusalLogTests
     }
 
     /// <summary>
+    /// The aggregate bucket folds MANY DIFFERENT addresses, so its suppression clause must not claim they
+    /// were repeats from one.
+    ///
+    /// <para>Review catch on #2479: <c>PastTheCap_…</c> above only exercises the FIRST overflow, before any
+    /// folding has happened on the aggregate — so the wording that ships with the folded count was
+    /// untested, and it said "from this source". That is false in the direction that matters. An operator
+    /// reading "400 further refusals from this source" goes looking for one busy client; what is actually
+    /// happening is a broad scan, which is the thing the aggregate bucket exists to tell them.</para>
+    /// </summary>
+    [Fact]
+    public void TheAggregateSuppressionClause_DoesNotClaimTheyCameFromOneSource()
+    {
+        var log = new DarlingHttpRefusalLog(Window, 2);
+
+        /* Fill the per-source budget, then push the overflow through one gate from many addresses. */
+        log.Observe(DarlingRefusalGate.Token, "10.0.0.1", T0);
+        log.Observe(DarlingRefusalGate.Token, "10.0.0.2", T0);
+
+        var firstOverflow = log.Observe(DarlingRefusalGate.Token, "203.0.113.1", T0);
+        Assert.True(firstOverflow.Log);
+        Assert.True(firstOverflow.Aggregated);
+
+        for (var i = 2; i <= 400; i++)
+        {
+            Assert.False(log.Observe(DarlingRefusalGate.Token, $"203.0.113.{i}", T0.AddSeconds(i)).Log);
+        }
+
+        var next = log.Observe(DarlingRefusalGate.Token, "203.0.113.401", T0.Add(Window).AddSeconds(1));
+        Assert.True(next.Log);
+        Assert.True(next.Aggregated);
+        Assert.Equal(399, next.SuppressedSinceLastLog);
+
+        var clause = DarlingHttpRefusalLog.DescribeSuppression(next, Window);
+        Assert.Contains("399", clause, StringComparison.Ordinal);
+        Assert.Contains("from other sources", clause, StringComparison.Ordinal);
+        Assert.DoesNotContain("from this source", clause, StringComparison.Ordinal);
+
+        /* And the per-source wording is still right where it IS one source. */
+        var perSource = log.Observe(DarlingRefusalGate.Token, "10.0.0.1", T0.Add(Window).AddSeconds(2));
+        Assert.True(perSource.Log);
+        Assert.False(perSource.Aggregated);
+        Assert.Contains(
+            "from this source",
+            DarlingHttpRefusalLog.DescribeSuppression(perSource with { SuppressedSinceLastLog = 7 }, Window),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Eviction is keyed on LAST SEEN, not last logged. Keyed on last logged, a source still being refused
     /// every second would be dropped at the two-window horizon and re-log as a fresh first sighting —
     /// turning the rate limit into a rate multiplier, which is worse than no limit because it looks like
