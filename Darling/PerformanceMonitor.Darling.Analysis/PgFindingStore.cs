@@ -208,7 +208,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
                 });
             }
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgFindingStore] FilterMutedFindingsAsync failed: {Message}", ex.Message);
         }
@@ -246,7 +246,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
                 await InsertFindingAsync(connection, finding);
             }
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgFindingStore] InsertFindingsAsync failed: {Message}", ex.Message);
         }
