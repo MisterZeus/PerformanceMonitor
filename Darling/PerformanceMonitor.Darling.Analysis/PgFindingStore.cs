@@ -64,9 +64,16 @@ public sealed record MutedStory(
 /// </para>
 ///
 /// <para>
-/// Error discipline mirrors the Dashboard twin: no public method throws — writes log and
-/// degrade, reads log and return empty. The mute-hash read fails OPEN (an unreadable mute
-/// registry lets findings through rather than suppressing them), exactly like both twins.
+/// Error discipline mirrors the Dashboard twin: reads log and return empty, and the mute-hash read
+/// fails OPEN (an unreadable mute registry lets findings through rather than suppressing them),
+/// exactly like both twins. <see cref="InsertFindingsAsync"/> is the ONE exception, and #2448 is
+/// why: "log and degrade" needs something to degrade TO, and once the batch became all-or-nothing
+/// there is nothing between "all persisted" and "none persisted". Swallowing the second would let
+/// <c>DarlingAnalysisService</c> set LastAnalysisTime, fire AnalysisCompleted and log "Analysis
+/// complete — N finding(s)" over a store holding none of them, which is #2448's own misreading
+/// moved one layer out and made louder. So it logs the detail only it can know and rethrows, and
+/// the pass reports itself failed — which is what the Lite twin has always done, by never catching
+/// at all.
 /// </para>
 /// </summary>
 public sealed class PgFindingStore
@@ -251,6 +258,15 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// nothing, so reaching the commit is not evidence that anything was written. That is the other
     /// reason the row write must not swallow.</para>
     ///
+    /// <para>It is also the one write here that THROWS, against the class's own no-throw discipline,
+    /// and that follows from the transaction rather than sitting beside it. A swallowed rollback returns
+    /// the same list a full success returns, so the caller cannot tell them apart and announces a
+    /// complete analysis for a set the store does not have. Before the transaction that line was only a
+    /// little wrong — most rows had landed — and now it would be entirely wrong, which is the same
+    /// defect this method exists to remove, one layer further out. The single ERROR line below carries
+    /// the part only this method knows (which row, or that it was the commit); the pass adds its own
+    /// outcome line and reports itself failed.</para>
+    ///
     /// <para>#2443: the connection open is still the LAST cancellation point on this pass, unchanged
     /// by the above. Past it the batch runs to completion, and cancelling before the first row costs
     /// this cycle's findings and says so in the line the pass already logs. This is the same call
@@ -315,6 +331,11 @@ VALUES ($1, $2, $3, $4, $5, $6)";
                     "[PgFindingStore] InsertFindingsAsync failed at row {Row} of {Count} and the batch was rolled back — this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {Message}",
                     row, findings.Count, ex.Message);
             }
+
+            /* And it must not be swallowed: see the note above. The caller announces a completed
+               analysis on the strength of this returning, so eating a total rollback would move the
+               #2448 misreading up a layer instead of removing it. */
+            throw;
         }
 
         return findings;

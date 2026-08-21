@@ -587,9 +587,12 @@ VALUES ($1, $2, $3, $4, $5, $6)", connection);
             var doomed = await store.FilterMutedFindingsAsync(PartialBatchStories(faultAtRow: 3), context);
             Assert.Equal(5, doomed.Count);
 
-            /* The store never throws to the pass (the class's error discipline); the loss reaches
-               the caller as one logged line, not as an exception. */
-            await store.InsertFindingsAsync(doomed, context);
+            /* It THROWS rather than degrading, which is the one place this store departs from its
+               own no-throw discipline and is deliberate: swallowing a total rollback returns the
+               same list a full success returns, so DarlingAnalysisService would set LastAnalysisTime,
+               fire AnalysisCompleted and log "Analysis complete - 5 finding(s)" over a store holding
+               none of them. That is this very defect moved one layer out. */
+            await Assert.ThrowsAsync<PostgresException>(() => store.InsertFindingsAsync(doomed, context));
 
             /* The assertion #2448 exists for: not "fewer rows", NO rows. A partial set here would
                be indistinguishable from a healthy server. */

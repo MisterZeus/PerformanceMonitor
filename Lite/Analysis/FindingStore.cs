@@ -6,6 +6,7 @@ using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Analysis;
 
@@ -152,10 +153,40 @@ public class FindingStore
            No token check between rows: see the note above. */
         using var transaction = connection.BeginTransaction();
 
-        foreach (var finding in findings)
-            await InsertFindingAsync(connection, transaction, finding);
+        var row = 0;
+        var everyRowAccepted = false;
 
-        transaction.Commit();
+        try
+        {
+            foreach (var finding in findings)
+            {
+                row++;
+                await InsertFindingAsync(connection, transaction, finding);
+            }
+
+            everyRowAccepted = true;
+            transaction.Commit();
+        }
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
+        {
+            /* #2448: the same line the Darling twin logs, for the same reason and in the same two
+               shapes. Without it a Lite operator gets only AnalysisService's generic "Analysis failed
+               for {server}", which cannot answer the question the issue said should decide this —
+               how often a batch actually fails partway — because it does not say a batch was even
+               involved, let alone which row.
+
+               The commit gets its own branch because `row` sits at findings.Count once the loop ends,
+               so sharing one line would report "failed at row N of N" for a commit fault and name the
+               last finding as the bad one when every row had in fact been accepted.
+
+               Logged and RETHROWN, not swallowed: letting it out is what stops AnalysisService
+               announcing a completed analysis for a set the store does not have, and it is the
+               behaviour this store has always had. Only the diagnostic is new. */
+            AppLogger.Error("AnalysisService", everyRowAccepted
+                ? $"Finding batch for {context.ServerName} had all {findings.Count} row(s) accepted and then failed to COMMIT them, so the batch was rolled back — this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {ex.Message}"
+                : $"Finding batch for {context.ServerName} failed at row {row} of {findings.Count} and was rolled back — this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {ex.Message}");
+            throw;
+        }
 
         return findings;
     }
