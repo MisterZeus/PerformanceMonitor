@@ -672,6 +672,14 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             _app = builder.Build();
 
+            /* #2479 item 5: every gate below used to refuse silently, so "is my token wrong or my CIDR
+               wrong" was answerable only from the client, which sees one opaque status code. One log per
+               refusal is rate-limited per (gate, source) because this port is LAN-exposed on purpose and
+               an exposed port meets a scanner eventually - see DarlingHttpRefusalLog for the shape and
+               what it deliberately never writes. Created here, per started server, so a rebind starts
+               with a clean budget rather than inheriting the previous listener's scan. */
+            var refusals = new DarlingHttpRefusalLog();
+
             /* DNS-rebinding guard (#1648) — the FIRST middleware, in BOTH modes, mirroring the web host's
                #1576 fix. The loopback bind is tokenless by design (the network gates below install only in
                network mode), so a browser ON this host that loads attacker content could be rebound to
@@ -686,6 +694,12 @@ public sealed class DarlingMcpHostService : BackgroundService
             {
                 if (!DarlingHostBinding.IsAllowedHost(context.Request.Host.Host, networkListenIp))
                 {
+                    refusals.Report(
+                        _logger, "MCP", DarlingRefusalGate.HostAllowlist, StatusCodes.Status400BadRequest,
+                        context.Connection.RemoteIpAddress,
+                        $"the Host header '{DarlingHttpRefusalLog.Sanitize(context.Request.Host.Host)}' is not an address this endpoint binds"
+                        + " (a loopback name/IP, or mcp.network.listen when LAN-exposed)",
+                        DateTime.UtcNow);
                     context.Response.StatusCode = StatusCodes.Status400BadRequest;
                     return;
                 }
@@ -709,6 +723,17 @@ public sealed class DarlingMcpHostService : BackgroundService
                 {
                     if (!IsBearerTokenAuthorized(context.Request.Headers.Authorization.ToString(), token))
                     {
+                        /* Presented-or-not, never the value. Which of the two it is IS the operator's next
+                           step - an absent header is a client that was never configured, a wrong one is a
+                           token that does not match mcp.network.encryptedToken - and neither statement
+                           says anything about what the token is. */
+                        refusals.Report(
+                            _logger, "MCP", DarlingRefusalGate.Token, StatusCodes.Status401Unauthorized,
+                            context.Connection.RemoteIpAddress,
+                            ExtractBearerToken(context.Request.Headers.Authorization.ToString()) is null
+                                ? "no 'Authorization: Bearer <token>' header was presented"
+                                : "the presented bearer token does not match mcp.network.encryptedToken",
+                            DateTime.UtcNow);
                         context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                         context.Response.Headers.WWWAuthenticate = "Bearer";
                         return;
@@ -721,6 +746,11 @@ public sealed class DarlingMcpHostService : BackgroundService
                 {
                     if (!IsRemoteAddressAllowed(context.Connection.RemoteIpAddress, cidr))
                     {
+                        refusals.Report(
+                            _logger, "MCP", DarlingRefusalGate.SourceCidr, StatusCodes.Status403Forbidden,
+                            context.Connection.RemoteIpAddress,
+                            $"its address is outside mcp.network.allowFrom ({cidr})",
+                            DateTime.UtcNow);
                         context.Response.StatusCode = StatusCodes.Status403Forbidden;
                         return;
                     }

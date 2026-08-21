@@ -428,6 +428,11 @@ public sealed class DarlingWebHostService : BackgroundService
 
             _app = builder.Build();
 
+            /* #2479 item 5: the gates below used to refuse silently. Rate-limited per (gate, source),
+               because this port is LAN-exposed on purpose - see DarlingHttpRefusalLog. Created per
+               started server so a rebind starts with a clean budget. */
+            var refusals = new DarlingHttpRefusalLog();
+
             /* Pipeline order: the Host-allowlist middleware runs FIRST on EVERY request (both modes) as the
                DNS-rebinding guard, then (network mode only) the auth middleware, then DarlingWebEndpoints.MapAll
                -> UseDefaultFiles -> UseStaticFiles. WebApplication auto-inserts UseRouting at the head and
@@ -446,6 +451,12 @@ public sealed class DarlingWebHostService : BackgroundService
             {
                 if (!IsAllowedHost(context.Request.Host.Host, networkListenIp))
                 {
+                    refusals.Report(
+                        _logger, "Web dashboard", DarlingRefusalGate.HostAllowlist, StatusCodes.Status400BadRequest,
+                        context.Connection.RemoteIpAddress,
+                        $"the Host header '{DarlingHttpRefusalLog.Sanitize(context.Request.Host.Host)}' is not an address this endpoint binds"
+                        + " (a loopback name/IP, or web.network.listen when LAN-exposed)",
+                        DateTime.UtcNow);
                     context.Response.StatusCode = StatusCodes.Status400BadRequest;
                     return;
                 }
@@ -468,8 +479,8 @@ public sealed class DarlingWebHostService : BackgroundService
                     var remote = context.Connection.RemoteIpAddress;
                     var hasValidCookie = TryValidateSessionCookie(
                         context.Request.Cookies[SessionCookieName], signingKey, DateTimeOffset.UtcNow);
-                    var hasValidToken = DarlingHostBinding.FixedTimeTokenEquals(
-                        context.Request.Query["token"].ToString(), token);
+                    var presentedToken = context.Request.Query["token"].ToString();
+                    var hasValidToken = DarlingHostBinding.FixedTimeTokenEquals(presentedToken, token);
 
                     switch (DecideWebAuth(remote, cidr, hasValidCookie, hasValidToken))
                     {
@@ -485,10 +496,34 @@ public sealed class DarlingWebHostService : BackgroundService
                             return;
 
                         case WebAuthAction.Forbid:
+                            /* The ONLY 403 this host produces: an out-of-CIDR remote, or one whose address
+                               ASP.NET Core could not report (which fails closed). A wrong credential from
+                               inside the CIDR is ShowLogin, not this - see below. */
+                            refusals.Report(
+                                _logger, "Web dashboard", DarlingRefusalGate.SourceCidr, StatusCodes.Status403Forbidden,
+                                remote,
+                                remote is null
+                                    ? "its source address could not be determined, which fails closed"
+                                    : $"its address is outside web.network.allowFrom ({cidr})",
+                                DateTime.UtcNow);
                             context.Response.StatusCode = StatusCodes.Status403Forbidden;
                             return;
 
                         default: /* ShowLogin */
+                            /* A 200 rather than a 401, so this is not a "rejected request" by status - and
+                               it is exactly the state an operator asks about when a ?token= they pasted did
+                               not work. Logged ONLY when a token was actually presented and did not match:
+                               a first visit with no token is the normal path to the login page and logging
+                               it would make every bookmark a warning. */
+                            if (!string.IsNullOrEmpty(presentedToken))
+                            {
+                                refusals.Report(
+                                    _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status200OK,
+                                    remote,
+                                    "the presented ?token= does not match web.network.encryptedToken, so the login page was served instead",
+                                    DateTime.UtcNow);
+                            }
+
                             await WriteLoginPageAsync(context);
                             return;
                     }
