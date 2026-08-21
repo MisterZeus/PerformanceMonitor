@@ -306,13 +306,24 @@ public static class SettingsFileGuard
     }
 
     /// <summary>
-    /// A top-level member name in a <see cref="JsonException.Path"/>: <c>$.AlertCpuThreshold</c> and
-    /// <c>$.AlertExcludedDatabases[1]</c> both yield <c>AlertCpuThreshold</c> / <c>AlertExcludedDatabases</c>,
-    /// while <c>$</c> and <c>$[3].DisplayName</c> yield nothing. Anchored and deliberately narrow — see
-    /// <see cref="DeserializeWithMemberRecovery{T}"/>.
+    /// A top-level member name in a <see cref="JsonException.Path"/>: <c>$.AlertCpuThreshold</c>,
+    /// <c>$.AlertExcludedDatabases[1]</c> and <c>$.Nested.Deeper</c> all yield the first segment, while
+    /// <c>$</c>, <c>$[3].DisplayName</c> and <c>$['with space']</c> yield nothing — an array root and a
+    /// bracket-quoted name are both paths this reader must not edit a document on.
+    ///
+    /// <para><b>Everything up to the first <c>.</c> or <c>[</c>, not an ASCII identifier.</b> Review raised
+    /// the narrower form as a diacritic edge case; measuring System.Text.Json showed it is wider and more
+    /// ordinary than that. STJ writes the DOT form for every name that needs no escaping, which includes
+    /// <c>$.with-dash</c> and <c>$.dollar$sign</c> as well as <c>$.ServerNaïve</c> and <c>$.サーバー</c>; it
+    /// bracket-quotes only where it must, e.g. <c>$['with space']</c>. An identifier class would have
+    /// captured <c>with</c> out of <c>with-dash</c> — and a hyphenated key is an ordinary thing to find in a
+    /// settings file, not an exotic one. It failed SAFE (<see cref="WithoutMember"/> finds no such key and
+    /// the read falls back to whole-file <c>Unreadable</c>), so nothing was ever at risk; what it lost was
+    /// the per-member recovery, silently, for exactly the settings someone had to name by hand with
+    /// <c>JsonPropertyName</c>.</para>
     /// </summary>
     private static readonly Regex s_topLevelMember =
-        new(@"^\$\.([A-Za-z_][A-Za-z0-9_]*)", RegexOptions.CultureInvariant);
+        new(@"^\$\.([^.\[]+)", RegexOptions.CultureInvariant);
 
     /// <summary>A file cannot lose more members than it has; the cap is a termination guard, not a policy.</summary>
     private const int MaxDroppedMembers = 500;

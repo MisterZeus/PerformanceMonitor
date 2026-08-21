@@ -290,6 +290,63 @@ public sealed class ViewerSettingsMemberRecoveryTests : IDisposable
         Assert.Contains("line 2", read.Problem!, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A hand-named member recovers like any other. Review raised the narrow identifier match as a diacritic
+    /// edge case; measuring System.Text.Json showed it is wider and far more ordinary than that — STJ writes
+    /// the DOT form for every name needing no escaping, so <c>$.alert-cpu-threshold</c>,
+    /// <c>$.dollar$sign</c> and <c>$.サーバー</c> all arrive that way, and only a name like
+    /// <c>$['with space']</c> gets bracket-quoted.
+    ///
+    /// <para>A hyphenated key is an ordinary thing to find in a settings file. The narrow form captured
+    /// <c>alert</c> out of it, found no such member, and fell back to whole-file <c>Unreadable</c> — safe,
+    /// and silently short of the per-member recovery, for exactly the settings someone had to name by hand.
+    /// Pinned with the two names that actually differ between the forms rather than with the diacritic,
+    /// because those are the ones a settings file is likely to contain.</para>
+    /// </summary>
+    [Fact]
+    public void AHandNamedMemberRecoversLikeAnyOther()
+    {
+        File.WriteAllText(SettingsPath, @"{
+  ""alert-cpu-threshold"": ""ninety"",
+  ""dollar$sign"": ""also not a number"",
+  ""Fine"": 22
+}");
+
+        var read = SettingsFileGuard.ReadObject<HandNamed>(SettingsPath);
+
+        Assert.Equal(
+            new[] { "alert-cpu-threshold", "dollar$sign" },
+            read.UnreadableMembers!.Select(m => m.Member));
+        Assert.Equal(22, read.Value!.Fine);
+    }
+
+    /// <summary>And the boundary that must NOT move with it: a bracket-quoted path is still refused, because
+    /// the reader has no business editing a document it cannot name a member in unambiguously.</summary>
+    [Fact]
+    public void ABracketQuotedPathIsStillRefused()
+    {
+        File.WriteAllText(SettingsPath, @"{ ""with space"": ""not a number"" }");
+
+        var read = SettingsFileGuard.ReadObject<HandNamed>(SettingsPath);
+
+        Assert.Equal(SettingsFileState.Unreadable, read.State);
+        Assert.Null(read.Value);
+        Assert.True(read.UnreadableMembers is null or { Count: 0 });
+    }
+
+    /// <summary>Members System.Text.Json renders in its dot form despite not being C# identifiers, plus one
+    /// it bracket-quotes. Local to the test: these exist to cover the path shapes, not to model a setting.</summary>
+    private sealed class HandNamed
+    {
+        [JsonPropertyName("alert-cpu-threshold")] public int Hyphenated { get; set; } = 80;
+
+        [JsonPropertyName("dollar$sign")] public int Dollar { get; set; } = 1;
+
+        [JsonPropertyName("with space")] public int Spaced { get; set; } = 2;
+
+        public int Fine { get; set; } = 3;
+    }
+
     /// <summary>A type with a member System.Text.Json reports as <c>$['weird.name']</c> — a path the reader
     /// deliberately will not edit a document on. Local to this test because it exists to reach a branch, not
     /// to model anything the viewer stores.</summary>
