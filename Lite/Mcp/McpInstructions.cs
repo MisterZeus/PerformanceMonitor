@@ -36,7 +36,7 @@ internal static class McpInstructions
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
         | `list_servers` | Lists all monitored SQL Server instances with status and last collection time | none |
-        | `get_collection_health` | Shows collector health: running, failing, or stale, plus the server's sweep_pressure block: a `verdict` for SUSTAINED demand (a SATURATED body collects at a multiple of its configured cadence with every collector healthy) and a separate `peak_cycle_risk` for a SINGLE sweep (BODY_OVERRUN means one scheduled body cannot fit the budget even when the verdict reads OK, the signature of one infrequent heavy collector; `peak_collector` names it) | `server_name` |
+        | `get_collection_health` | Shows collector health: running, failing, or stale, plus the server's sweep_pressure block: a `verdict` for SUSTAINED demand (a SATURATED body collects at a multiple of its configured cadence with every collector healthy) and a separate `peak_cycle_risk` for a SINGLE sweep (BODY_OVERRUN means one scheduled body cannot fit the budget even when the verdict reads OK, the signature of one infrequent heavy collector; `peak_collector` names it). Per-collector rows carry `avg_duration_ms`, `p95_duration_ms` and `max_duration_ms`: a mean far below the p95 means the collector's runs come in two sizes and the mean describes neither | `server_name` |
         | `get_server_summary` | Quick health overview: CPU %, memory, blocking/deadlock counts | `server_name` |
         | `get_daily_summary` | Daily composite health band + wait/query/deadlock/blocking/CPU/memory/alert rollup for one day | `server_name`, `summary_date` (yyyy-MM-dd, default today) |
 

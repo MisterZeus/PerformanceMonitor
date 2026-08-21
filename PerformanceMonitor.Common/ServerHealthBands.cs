@@ -645,15 +645,33 @@ namespace PerformanceMonitor.Common
     /// approaches the budget while its amortized cost is negligible — the signature of an infrequent heavy
     /// collector. prod-pos-use2-multi-49 is the measured case: index_object_stats averages 37,207 ms of a
     /// 60,000 ms body, and at a 1440-minute cadence contributes 26 ms/min to a 12,250 ms/min total that
-    /// reads OK at 20.4%. So <see cref="SweepPressure.PeakCycleMs"/> adds the collectors' averages WITHOUT
-    /// amortizing: the body's cost on the cycle where every cadence comes due together. That cycle is not
-    /// a hypothetical worst case. Any set of positive integer cadences coincides on their LCM, so the
-    /// aligned body is a periodic certainty for ANY schedule, including one hand-edited in Lite's
+    /// reads OK at 20.4%. So <see cref="SweepPressure.PeakCycleMs"/> adds the collectors' single-run costs
+    /// WITHOUT amortizing: the body's cost on the cycle where every cadence comes due together. That cycle
+    /// is not a hypothetical worst case. Any set of positive integer cadences coincides on their LCM, so
+    /// the aligned body is a periodic certainty for ANY schedule, including one hand-edited in Lite's
     /// schedule editor — the shipped defaults (1 | 5 | 60 | 1440) merely make it frequent, every 1440
-    /// minutes, rather than rare. Those figures compute a 73,408 ms aligned body against a
-    /// 60,000 ms budget, which is the number the pinned fixture reproduces; a live read of all 41 of that
-    /// server's collectors minutes later came to 73,193 ms, so treat either as the same measurement taken
-    /// twice rather than as two claims.</para>
+    /// minutes, rather than rare.</para>
+    ///
+    /// <para><b>Which single-run cost, and why not the mean (#2460):</b> #2446 built that cycle out of each
+    /// collector's AVERAGE duration, which is a contradiction whenever a collector's run cost is bimodal —
+    /// and on this fleet one of them plainly is. <c>query_store</c> on prod-pos-use2-multi-49 reported an
+    /// average of 13,834 ms over 1,155 runs, but 958 of those runs carried the empty-enumeration note and
+    /// cost about 36 ms each (measured on prod-pos-use2-apex-01, which yields nothing on all 1,551 of its
+    /// runs and pays 36 ms for it). Back that out and the 197 PRODUCTIVE runs cost ~80,900 ms EACH — more
+    /// than the entire 60,000 ms budget, on their own, once each. 13,834 ms describes neither population;
+    /// it is an 83/17 blend that happens to land in a range that reads like a plausible single number, and
+    /// a "worst scheduled cycle" built from it understated that server's worst body by ~67,000 ms.
+    ///
+    /// So the caller now measures each collector's TAIL run cost as well as its mean — p95 of the same
+    /// window's <c>duration_ms</c> values, a statistic the store has always held per run and nothing has
+    /// ever read — and the peak cycle is built from <see cref="PeakRunMs"/>. p95 rather than the maximum
+    /// because a max is one run: a single pathological cycle would make a collector look permanently
+    /// terrible and every server on the fleet read BODY_OVERRUN, which is exactly how a second signal
+    /// teaches operators to skip it. p95 also degrades gracefully with sample size — over 3,500 runs it
+    /// discards the one bad cycle, and over the six runs a daily collector gets in a week there is no
+    /// outlier anyone can afford to discard, so it lands on the max by construction. The maximum is served
+    /// beside it as a fact rather than fed into a decision, because comparing a p95 to a max is what tells
+    /// a routine cost from a one-off.</para>
     ///
     /// <para>It is reported as its own field with its own vocabulary rather than folded into the verdict,
     /// because a once-daily 37-second collector is not saturation and calling it SATURATED would spend the
@@ -710,18 +728,49 @@ namespace PerformanceMonitor.Common
         public const double BodyOverrunPercent = 100.0;
 
         /// <summary>
+        /// #2460: how far a collector's tail run has to stand above its mean before the peak-cycle note
+        /// says so out loud — twice the mean. For a two-mode population (an empty run costing <i>a</i>, a
+        /// productive one costing <i>b</i>, in an 83/17 mix) that fires once <i>b</i> is about 2.5x
+        /// <i>a</i>, which is comfortably past anything ordinary run-to-run variance produces and well
+        /// short of the 2,000x this was found on. A ratio rather than a millisecond gap so it means the
+        /// same thing for a 30 ms collector and a 30-second one.
+        /// </summary>
+        public const double BimodalTailRatio = 2.0;
+
+        /// <summary>
+        /// The single-run cost one scheduled body is charged for a collector: its p95, floored at its mean.
+        ///
+        /// <para>The floor is load-bearing, not defensive. p95 is not guaranteed to sit above the mean —
+        /// a collector with 99 runs at 10 ms and one at 1,000,000 ms has a mean of 10,009 ms and a p95 of
+        /// 10 ms — so taking the p95 unconditionally could compute a SMALLER aligned cycle than the
+        /// mean-based one #2446 shipped and make a BODY_OVERRUN it already caught disappear. Flooring
+        /// makes this change monotonic: the aligned cycle can only ever go up, so #2460 refines #2446's
+        /// answer and can never retract it.</para>
+        ///
+        /// <para>Lives here, public, because both SKUs' get_collection_health also render a per-collector
+        /// "% of the sweep budget per run" from the same rule, and a hand-copied floor in two tools is the
+        /// drift <see cref="FormatPeakCycleNote"/> exists to avoid.</para>
+        /// </summary>
+        public static double PeakRunMs(double avgDurationMs, double p95DurationMs) =>
+            Math.Max(avgDurationMs, p95DurationMs);
+
+        /// <summary>
         /// Both answers in one pass, over one population of collectors.
         ///
         /// <para><b>Amortized execution demand and its verdict.</b> Each scheduled collector contributes
         /// its average duration divided by its cadence in minutes — milliseconds of work demanded per
         /// minute of wall time for a body that runs collectors serially. Percent is against the 60,000 ms
         /// one minute holds; the fastest shipped cadence is one minute, which is what makes the minute the
-        /// budget.</para>
+        /// budget. This half deliberately keeps using the MEAN even though #2460 hands the method a tail
+        /// statistic as well: sustained demand over a window IS the mean, and amortizing a p95 would claim
+        /// a rate of work the server never sustains.</para>
         ///
-        /// <para><b>The peak cycle and its risk (#2446).</b> The same collectors' averages added WITHOUT
-        /// being divided: what the body costs when every cadence comes due together, which the nested
-        /// shipped cadences make a periodic certainty rather than a hypothetical. Reported separately from
-        /// the verdict, never folded into it — see the type's remarks for why.</para>
+        /// <para><b>The peak cycle and its risk (#2446, #2460).</b> The same collectors' single-run costs
+        /// added WITHOUT being divided: what the body costs when every cadence comes due together, which
+        /// the nested shipped cadences make a periodic certainty rather than a hypothetical. Each
+        /// collector is charged <see cref="PeakRunMs"/> — its p95 floored at its mean — rather than its
+        /// mean, because a mean over a bimodal collector describes neither of its populations. Reported
+        /// separately from the verdict, never folded into it — see the type's remarks for why.</para>
         ///
         /// <para>A non-recurring collector (<paramref name="collectors"/> entry with frequency &lt;= 0:
         /// on-load, unknown) contributes to NEITHER — it runs on connect, not in the recurring body, so it
@@ -729,17 +778,22 @@ namespace PerformanceMonitor.Common
         /// peak collector, which would otherwise name a collector that never shares a body with the ones
         /// it is being compared against.</para>
         /// </summary>
-        public static SweepPressure Compute(IEnumerable<(string CollectorName, double AvgDurationMs, int FrequencyMinutes)> collectors)
+        public static SweepPressure Compute(
+            IEnumerable<(string CollectorName, double AvgDurationMs, double P95DurationMs, int FrequencyMinutes)> collectors)
         {
             double busyMsPerMinute = 0;
             double peakCycleMs = 0;
             string? peakCollectorName = null;
+            double peakCollectorPeakRunMs = 0;
             double peakCollectorAvgDurationMs = 0;
             int peakCollectorFrequencyMinutes = 0;
 
-            foreach (var (collectorName, avgDurationMs, frequencyMinutes) in collectors)
+            foreach (var (collectorName, avgDurationMs, p95DurationMs, frequencyMinutes) in collectors)
             {
-                if (frequencyMinutes <= 0 || avgDurationMs <= 0)
+                /* "Nothing measured" is BOTH statistics being empty, not the mean alone: a collector whose
+                   mean rounds to nothing is still allowed to contribute a tail, which is the whole shape
+                   #2460 is about. */
+                if (frequencyMinutes <= 0 || (avgDurationMs <= 0 && p95DurationMs <= 0))
                 {
                     continue;
                 }
@@ -750,13 +804,21 @@ namespace PerformanceMonitor.Common
                    costs on the cycle where every cadence comes due together. Excluding the on-load
                    collectors here is the same choice for the same reason — they run on connect, not in
                    the recurring body, so they are not part of any scheduled cycle. */
-                peakCycleMs += avgDurationMs;
+                var peakRunMs = PeakRunMs(avgDurationMs, p95DurationMs);
+                peakCycleMs += peakRunMs;
 
-                /* Strict >, so an exact tie keeps the first collector the caller enumerated rather than
+                /* Ranked on the SINGLE-RUN cost, which is the question this field answers — and on the
+                   tail rather than the mean, so the collector named is the one that actually owns the
+                   body. On multi-49 that changes the answer: index_object_stats has the larger mean
+                   (37,207 ms against query_store's 13,834) but query_store's heavy run is ~80,900 ms, so
+                   it, not the daily collector, is what puts that body over the budget.
+
+                   Strict >, so an exact tie keeps the first collector the caller enumerated rather than
                    letting the answer wobble with the row order of whatever query produced it. */
-                if (avgDurationMs > peakCollectorAvgDurationMs)
+                if (peakRunMs > peakCollectorPeakRunMs)
                 {
                     peakCollectorName = collectorName;
+                    peakCollectorPeakRunMs = peakRunMs;
                     peakCollectorAvgDurationMs = avgDurationMs;
                     peakCollectorFrequencyMinutes = frequencyMinutes;
                 }
@@ -778,6 +840,7 @@ namespace PerformanceMonitor.Common
                 peakCyclePercent,
                 peakCycleRisk,
                 peakCollectorName,
+                peakCollectorPeakRunMs,
                 peakCollectorAvgDurationMs,
                 peakCollectorFrequencyMinutes);
         }
@@ -799,18 +862,32 @@ namespace PerformanceMonitor.Common
                 return string.Empty;
             }
 
+            /* #2460: the bimodal clause, appended only when this collector's tail really does stand above
+               its mean. On a collector whose runs all cost about the same the two numbers are the same
+               number, and "its mean run is 37,207 ms, so the mean understates one body by 0 ms" is the
+               kind of sentence that trains a reader to stop reading the note. */
+            var bimodalClause = pressure.PeakCollectorAvgDurationMs > 0
+                && pressure.PeakCollectorPeakRunMs >= pressure.PeakCollectorAvgDurationMs * BimodalTailRatio
+                ? string.Format(
+                    CultureInfo.InvariantCulture,
+                    " Its MEAN run is only {0:N0} ms, so its cost is bimodal and any figure built from that mean — the sustained verdict, the heaviest_collectors ranking, and this cycle before #2460 — understates one body by {1:N0} ms.",
+                    Math.Round(pressure.PeakCollectorAvgDurationMs),
+                    Math.Round(pressure.PeakCollectorPeakRunMs - pressure.PeakCollectorAvgDurationMs))
+                : string.Empty;
+
             return string.Format(
                 CultureInfo.InvariantCulture,
-                "On the cycle where every scheduled cadence comes due together this body costs {0:N0} ms — {1:N1}% of the {2:N0} ms sweep budget — so that body cannot finish inside its cadence and its relaunch is skipped, however much headroom the sustained {3:N1}% reports. Its largest single contributor is {4}, {5:N0} ms per run and {6:N1}% of the budget on its own, every {7} minutes. Amortized over that cadence it is worth {8:N0} ms per minute, so the sustained figure and the heaviest_collectors ranked by it both understate what this collector does to one body. The lever here is the schedule's shape — moving or splitting that collector so it stops sharing a cycle — not the capacity answer a SATURATED verdict calls for.",
+                "On the cycle where every scheduled cadence comes due together this body costs {0:N0} ms — {1:N1}% of the {2:N0} ms sweep budget — so that body cannot finish inside its cadence and its relaunch is skipped, however much headroom the sustained {3:N1}% reports. Its largest single contributor is {4}, {5:N0} ms on a heavy run and {6:N1}% of the budget on its own, every {7} minutes. Amortized over that cadence it is worth {8:N0} ms per minute, so the sustained figure and the heaviest_collectors ranked by it both understate what this collector does to one body.{9} The lever here is the schedule's shape — moving or splitting that collector so it stops sharing a cycle — not the capacity answer a SATURATED verdict calls for.",
                 Math.Round(pressure.PeakCycleMs),
                 pressure.PeakCyclePercent,
                 SweepBudgetMs,
                 pressure.BusyPercent,
                 pressure.PeakCollectorName,
-                Math.Round(pressure.PeakCollectorAvgDurationMs),
-                pressure.PeakCollectorAvgDurationMs / SweepBudgetMs * 100.0,
+                Math.Round(pressure.PeakCollectorPeakRunMs),
+                pressure.PeakCollectorPeakRunMs / SweepBudgetMs * 100.0,
                 pressure.PeakCollectorFrequencyMinutes,
-                Math.Round(pressure.PeakCollectorAvgDurationMs / pressure.PeakCollectorFrequencyMinutes));
+                Math.Round(pressure.PeakCollectorAvgDurationMs / pressure.PeakCollectorFrequencyMinutes),
+                bimodalClause);
         }
     }
 
@@ -825,7 +902,15 @@ namespace PerformanceMonitor.Common
     /// <param name="PeakCyclePercent"><paramref name="PeakCycleMs"/> against the same budget.</param>
     /// <param name="PeakCycleRisk">FITS / BODY_OVERRUN — the SINGLE-SWEEP answer. Never a verdict value.</param>
     /// <param name="PeakCollectorName">The largest single contributor to that cycle, or null when nothing is scheduled.</param>
-    /// <param name="PeakCollectorAvgDurationMs">That collector's average single-run cost.</param>
+    /// <param name="PeakCollectorPeakRunMs">
+    /// That collector's HEAVY single-run cost — <see cref="SweepPressureClassifier.PeakRunMs"/>, its p95
+    /// floored at its mean (#2460). What one aligned body is actually charged for it.
+    /// </param>
+    /// <param name="PeakCollectorAvgDurationMs">
+    /// That same collector's MEAN single-run cost. Carried beside the tail rather than replaced by it for
+    /// two reasons: the amortized line in the note has to be computed from the mean (that is what
+    /// amortization means), and the gap between the two IS the finding whenever the collector is bimodal.
+    /// </param>
     /// <param name="PeakCollectorFrequencyMinutes">That collector's cadence — the number that makes its amortized share small.</param>
     public sealed record SweepPressure(
         double BusyMsPerMinute,
@@ -835,6 +920,7 @@ namespace PerformanceMonitor.Common
         double PeakCyclePercent,
         string PeakCycleRisk,
         string? PeakCollectorName,
+        double PeakCollectorPeakRunMs,
         double PeakCollectorAvgDurationMs,
         int PeakCollectorFrequencyMinutes);
 }
