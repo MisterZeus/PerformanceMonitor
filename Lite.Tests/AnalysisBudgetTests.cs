@@ -147,6 +147,15 @@ public sealed class AnalysisBudgetTests : IClassFixture<SharedDuckDbFixture>
             "StuckAnalysisMaxBackoffDoublings",
             source,
             StringComparison.Ordinal);
+
+        /* And the shutdown hold has to wait on an UNCANCELLED token. Offloading the pass onto the
+           pool is what makes the hold necessary at all — the store work can now still be in flight
+           when the loop is told to stop — and handing the already-fired stopping token to the wait
+           would collapse it instantly, which looks identical to having waited. */
+        Assert.Contains(
+            "await analyzeTask.WaitAsync(AnalysisUnwindGrace, CancellationToken.None);",
+            source,
+            StringComparison.Ordinal);
     }
 
     private static string FindRepoDirectory(string relativePath)

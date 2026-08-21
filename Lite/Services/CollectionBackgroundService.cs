@@ -72,9 +72,12 @@ public class CollectionBackgroundService : BackgroundService
        stay noticed. Capped so the shift cannot run away on a long-lived process. */
     private const int StuckAnalysisMaxBackoffDoublings = 20;
 
-    /* How long the loop waits BEYOND the budget for a cancelled pass to unwind, so that a pass
-       which honoured its cancellation is observed finishing rather than racing the loop's own
-       timer. Matches the Darling twin's analysis shutdown grace. */
+    /* How long the loop gives a cancelled pass to unwind. It serves twice, and the two are not
+       the same wait. On the TIMEOUT path it extends the loop's patience past the budget, so a pass
+       that honours its cancellation is observed finishing rather than racing the loop's own timer.
+       On SHUTDOWN it is the hold below that keeps a pass from being orphaned, which is a wait the
+       loop's Task.Delay cannot provide because that delay observes the stopping token and so
+       collapses the instant it fires. Same five seconds as the Darling twin's shutdown grace. */
     private static readonly TimeSpan AnalysisUnwindGrace = TimeSpan.FromSeconds(5);
 
     /// <summary>
@@ -516,12 +519,37 @@ public class CollectionBackgroundService : BackgroundService
 
                 /* Wait the budget PLUS a short grace, so a pass that honours its cancellation is
                    seen finishing here. Losing that race now carries real information: the pass was
-                   asked to stop and did not. */
+                   asked to stop and did not. Note this delay observes the stopping token and so
+                   collapses the moment it fires — shutdown is handled by the hold below, not here. */
                 var finished = await Task.WhenAny(
                     analyzeTask, Task.Delay(timeout + AnalysisUnwindGrace, stoppingToken));
 
                 if (stoppingToken.IsCancellationRequested)
                 {
+                    /* Hold briefly for the pass to unwind instead of orphaning it (the Darling
+                       twin's #2299 discipline). Offloading onto the pool is what makes this
+                       necessary: the store work used to run inline on this thread and so could not
+                       still be in flight at this line, and now it can — walking away from it
+                       mid-InsertFindingsAsync leaves that write to be torn off by process
+                       teardown. CancellationToken.None on purpose: stoppingToken has already
+                       FIRED, so passing it here would cancel the wait instantly and defeat the
+                       grace entirely. A pass that outlives the hold is left to the in-flight
+                       marker, which keeps it from being relaunched either way. */
+                    try
+                    {
+                        await analyzeTask.WaitAsync(AnalysisUnwindGrace, CancellationToken.None);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        /* Shutdown — quiet and expected. */
+                    }
+                    catch (TimeoutException)
+                    {
+                        _logger?.LogDebug(
+                            "Analysis for {Server} did not unwind within {Grace}s of shutdown — it is abandoned in place",
+                            serverName, (int)AnalysisUnwindGrace.TotalSeconds);
+                    }
+
                     break;
                 }
 
