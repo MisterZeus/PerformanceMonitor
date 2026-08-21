@@ -4428,7 +4428,8 @@ LIMIT 1";
                databases, #1837). The status stays SUCCESS, and every health/band read keys on status rather
                than on error_message, so the note is inert outside the Collection Log detail grid. */
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "SUCCESS", result.Rows, result.SqlMs, result.StorageMs, result.Note, _logger, cancellationToken);
+                _postgres!, runtime, collectorName, "SUCCESS", result.Rows, result.SqlMs, result.StorageMs, result.Note,
+                result.Fanout, _logger, cancellationToken);
 
             /* #2219: statement TEXT rides alongside the statement stats, on its own hourly cadence. Hung off the
                stats collector's success rather than given its own loop because it is meaningless without those
@@ -4459,7 +4460,7 @@ LIMIT 1";
                 server.Config.DisplayName, collectorName, ex.Message);
 
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "SESSION_MISSING", 0, 0, 0, ex.Message, _logger, cancellationToken);
+                _postgres!, runtime, collectorName, "SESSION_MISSING", 0, 0, 0, ex.Message, fanout: null, _logger, cancellationToken);
             return 0;
         }
         catch (SqlException ex) when (ex.Number == 1222 && CollectorCatalog.YieldsOnLockTimeout(collectorName))
@@ -4480,7 +4481,7 @@ LIMIT 1";
             await DarlingObservability.LogCollectionAsync(
                 _postgres!, runtime, collectorName, "YIELDED", 0, 0, 0,
                 $"Lock-timeout yield (SQL error #{ex.Number}): the 1-second LOCK_TIMEOUT guard fired rather than waiting in a blocking chain. One snapshot sweep skipped; evidence of lock contention on the monitored server, not a monitoring failure.",
-                _logger, cancellationToken);
+                fanout: null, _logger, cancellationToken);
             return 0;
         }
         catch (SqlException ex) when (ex.Number is 229 or 297 or 300 or 8189)
@@ -4498,7 +4499,7 @@ LIMIT 1";
                 server.Config.DisplayName, collectorName, ex.Number, message);
 
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0, message, _logger, cancellationToken);
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0, message, fanout: null, _logger, cancellationToken);
             return 0;
         }
         catch (PostgresException ex) when (
@@ -4533,7 +4534,7 @@ LIMIT 1";
             }
 
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, status, 0, 0, 0, explanation, _logger, cancellationToken);
+                _postgres!, runtime, collectorName, status, 0, 0, 0, explanation, fanout: null, _logger, cancellationToken);
             return 0;
         }
         catch (Exception ex)
@@ -4571,7 +4572,7 @@ LIMIT 1";
             try
             {
                 await DarlingObservability.LogCollectionAsync(
-                    _postgres!, runtime, collectorName, "ERROR", 0, 0, 0, ex.Message, _logger, cancellationToken);
+                    _postgres!, runtime, collectorName, "ERROR", 0, 0, 0, ex.Message, fanout: null, _logger, cancellationToken);
             }
             catch
             {
