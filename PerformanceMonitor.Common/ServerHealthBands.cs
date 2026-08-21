@@ -647,8 +647,10 @@ namespace PerformanceMonitor.Common
     /// 60,000 ms body, and at a 1440-minute cadence contributes 26 ms/min to a 12,250 ms/min total that
     /// reads OK at 20.4%. So <see cref="SweepPressure.PeakCycleMs"/> adds the collectors' averages WITHOUT
     /// amortizing: the body's cost on the cycle where every cadence comes due together. That cycle is not
-    /// a hypothetical worst case — the shipped cadences are strictly nested (1 | 5 | 60 | 1440), so
-    /// alignment is a guaranteed periodic event. Those figures compute a 73,408 ms aligned body against a
+    /// a hypothetical worst case. Any set of positive integer cadences coincides on their LCM, so the
+    /// aligned body is a periodic certainty for ANY schedule, including one hand-edited in Lite's
+    /// schedule editor — the shipped defaults (1 | 5 | 60 | 1440) merely make it frequent, every 1440
+    /// minutes, rather than rare. Those figures compute a 73,408 ms aligned body against a
     /// 60,000 ms budget, which is the number the pinned fixture reproduces; a live read of all 41 of that
     /// server's collectors minutes later came to 73,193 ms, so treat either as the same measurement taken
     /// twice rather than as two claims.</para>
