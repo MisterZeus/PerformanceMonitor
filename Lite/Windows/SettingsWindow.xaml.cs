@@ -258,7 +258,11 @@ public partial class SettingsWindow : Window
 
         bool written = App.WriteSettingsDocument(root, "settings");
 
-        _saved = true;
+        /* _saved is what stops CloseButton_Click / OnClosing reverting the live theme preview, so it has to
+           mean "the theme reached settings.json" and not "Save was clicked". Set unconditionally it makes
+           the window contradict itself: the dialog below says nothing was saved while the unpersisted theme
+           stays applied for the rest of the run and comes back to its old value on the next launch. */
+        _saved = written;
         if (mcpChanged) McpSettingsChanged = true;
 
         switch (SettingsSaveReport.Classify(written, mcpChanged, alertsValid, mcpValid, webhooksValid))
@@ -460,6 +464,12 @@ public partial class SettingsWindow : Window
 
     private bool _isLoadingTheme;
     private readonly string _originalTheme = ThemeManager.CurrentTheme;
+    /// <summary>
+    /// Whether this window's Save actually reached settings.json. Read by <c>CloseButton_Click</c> and
+    /// <c>OnClosing</c> to decide whether to revert the live theme preview, so it tracks the write rather
+    /// than the click (#2433) — a theme that was previewed but never persisted must not survive the window
+    /// that failed to save it.
+    /// </summary>
     private bool _saved;
     public bool McpSettingsChanged { get; private set; }
 

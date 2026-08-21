@@ -160,6 +160,25 @@ public sealed class SettingsSaveButtonHonestyTests
         }
     }
 
+    /// <summary>
+    /// The window's other claim about a save, and the one that used to contradict the dialog. The theme
+    /// selector applies its choice LIVE, and <c>_saved</c> is what stops the close handlers reverting that
+    /// preview — so setting it on the click rather than on the write left an unpersisted theme applied for
+    /// the rest of the run while the dialog said nothing had been saved. It has to track the write.
+    /// </summary>
+    [Fact]
+    public void TheLiveThemePreview_OnlySurvivesASaveThatWrote()
+    {
+        var source = SettingsWindowSource();
+        var body = MethodBody(source, "SaveButton_Click");
+
+        Assert.Contains("_saved = written;", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("_saved = true;", body, StringComparison.Ordinal);
+
+        /* And the gate it feeds is still there, so this cannot quietly stop meaning anything. */
+        Assert.Contains("if (!_saved)", source, StringComparison.Ordinal);
+    }
+
     private static string MethodBody(string source, string methodName)
     {
         var signature = source.IndexOf(methodName + "(", StringComparison.Ordinal);
