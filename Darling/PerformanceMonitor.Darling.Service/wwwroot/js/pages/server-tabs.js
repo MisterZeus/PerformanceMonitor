@@ -256,8 +256,14 @@ function stat(title, read, params, stats, subtitle, span = 1) {
   return renderPanel({ title, subtitle, read, params, viz: "stat", stats, span });
 }
 
-/** A line panel over a read's row array. */
+/**
+ * A line panel over a read's row array. `opts.emptyText` is REQUIRED for the same reason table()'s is, and for
+ * one extra: two of these reads (get_blocking_trend, get_deadlock_trend) answer an idle server with `trend: []`
+ * and NO {status,message} envelope, so without a sentence a perfectly healthy server was told "Not enough data
+ * points to chart yet" about a condition it simply never had.
+ */
 function line(title, read, params, rowsKey, xKey, series, opts = {}) {
+  if (!opts.emptyText) throw new Error("line(" + title + "): a chart panel must explain its own empty state.");
   return renderPanel({
     title,
     subtitle: opts.subtitle,
@@ -269,6 +275,7 @@ function line(title, read, params, rowsKey, xKey, series, opts = {}) {
     series,
     format: opts.format,
     unit: opts.unit,
+    emptyText: opts.emptyText,
     span: opts.span ?? 1,
   });
 }
@@ -295,16 +302,20 @@ export const SERVER_TABS = [
         subtitle: ctx.label,
         format: "pct",
         unit: "%",
+        emptyText: "No CPU samples in this window.",
       }),
       line("Memory", "get_memory_trend", { server, hours: ctx.hours }, "trend", "time", MEMORY_SERIES, {
         subtitle: ctx.label,
         format: "mb",
+        emptyText: "No memory samples in this window.",
       }),
       line("Blocking Events", "get_blocking_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
+        emptyText: "No blocking events in this window — an empty trend here means none happened, not that nothing was collected.",
       }),
       line("Deadlocks", "get_deadlock_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
+        emptyText: "No deadlocks in this window — an empty trend here means none happened, not that nothing was collected.",
       }),
       fileIoPanel(server, ctx),
       table(
@@ -364,6 +375,7 @@ export const SERVER_TABS = [
         format: "pct",
         unit: "%",
         span: 2,
+        emptyText: "No CPU samples in this window.",
       }),
       stat("Scheduler Pressure", "get_cpu_scheduler_pressure", { server }, SCHEDULER_STATS, SNAPSHOT, 2),
       table(
@@ -396,6 +408,7 @@ export const SERVER_TABS = [
         subtitle: ctx.label,
         format: "mb",
         span: 2,
+        emptyText: "No memory samples in this window.",
       }),
       table(
         "Memory Clerks",
@@ -414,7 +427,7 @@ export const SERVER_TABS = [
         "grants",
         "collection_time",
         GRANT_SERIES,
-        { subtitle: ctx.label, format: "mb" }
+        { subtitle: ctx.label, format: "mb", emptyText: "No memory grant samples in this window." }
       ),
       table(
         "Resource Semaphore",
@@ -457,9 +470,11 @@ export const SERVER_TABS = [
     build: (server, ctx) => [
       line("Blocking Events", "get_blocking_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
+        emptyText: "No blocking events in this window — an empty trend here means none happened, not that nothing was collected.",
       }),
       line("Deadlocks", "get_deadlock_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
+        emptyText: "No deadlocks in this window — an empty trend here means none happened, not that nothing was collected.",
       }),
       table(
         "Blocking",
@@ -527,6 +542,7 @@ export const SERVER_TABS = [
         subtitle: ctx.label,
         format: "mb",
         span: 2,
+        emptyText: "No tempdb samples in this window.",
       }),
       table(
         "Database Sizes",
@@ -583,7 +599,7 @@ export const SERVER_TABS = [
         "trend",
         "time",
         DURATION_SERIES,
-        { subtitle: ctx.label, format: "ms", span: 2 }
+        { subtitle: ctx.label, format: "ms", span: 2, emptyText: "No query duration samples in this window." }
       ),
       table(
         "Top Queries by CPU",
@@ -790,7 +806,7 @@ export const SERVER_TABS = [
         "entries",
         "event_time",
         HEALTH_CPU_SERIES,
-        { subtitle: ctx.label, format: "pct", unit: "%", span: 2 }
+        { subtitle: ctx.label, format: "pct", unit: "%", span: 2, emptyText: "No system_health entries in this window." }
       ),
       table(
         "system_health Entries",

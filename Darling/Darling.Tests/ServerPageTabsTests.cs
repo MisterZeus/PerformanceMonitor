@@ -228,16 +228,25 @@ public sealed class ServerPageTabsTests
     }
 
     /// <summary>
-    /// Every table panel says why it could be empty.
+    /// Every data panel says why it could be empty — charts as well as tables.
     ///
-    /// <para>renderPanel already shows a read's own <c>{status,message}</c> envelope when the read has nothing —
-    /// that path is honest and better-worded than anything a descriptor could carry. What it does NOT cover is
-    /// the read returning data whose row array is empty: vizTable falls back to a generic "No rows in this
-    /// window", which on a collector that is off, opt-in, or daily reads as a fault. So every table panel here
-    /// supplies its own <c>emptyText</c>, and this counts them rather than spot-checking one.</para>
+    /// <para>renderPanel already shows a read's own <c>{status,message}</c> envelope when the read has nothing,
+    /// and that sentence is better than anything a descriptor could carry. What it does NOT cover is the read
+    /// returning DATA whose row array is empty, and both renderers had a wrong generic for that case. vizTable
+    /// falls back to "No rows in this window", which on a collector that is off, opt-in, or daily reads as a
+    /// fault. vizLine fell through to the chart's "Not enough data points to chart yet", which is right while
+    /// collection is warming up and wrong for the two reads whose empty array means the thing did not happen:
+    /// <c>get_blocking_trend</c> and <c>get_deadlock_trend</c> answer an idle server with <c>trend: []</c> and no
+    /// envelope at all, so a healthy server was told its blocking chart was still warming up.</para>
+    ///
+    /// <para>Both helpers THROW without a sentence, and every tab is built during the DOM-shim run, so a panel
+    /// that forgot one cannot reach a browser. The zero-versus-one distinction was verified against the shipped
+    /// vizLine: zero points with an emptyText renders the descriptor's sentence, one point still renders the
+    /// chart's own (which is the true statement there), and zero points WITHOUT one still falls through — so a
+    /// stored view authored before this existed is unchanged.</para>
     /// </summary>
     [Fact]
-    public void EveryTablePanel_ExplainsItsOwnEmptyState()
+    public void EveryDataPanel_ExplainsItsOwnEmptyState()
     {
         var js = ServerTabsJs;
 
@@ -251,10 +260,19 @@ public sealed class ServerPageTabsTests
             js,
             StringComparison.Ordinal);
 
-        /* And renderPanel is what renders it, from the descriptor field the helper sets. */
+        Assert.Contains("function line(title, read, params, rowsKey, xKey, series, opts = {})", js, StringComparison.Ordinal);
+        Assert.Contains(
+            "if (!opts.emptyText) throw new Error(\"line(\" + title + \"): a chart panel must explain its own empty state.\");",
+            js,
+            StringComparison.Ordinal);
+
+        /* And renderPanel is what renders both, from the descriptor field the helpers set. The line guard fires
+           at EXACTLY zero rows: at one row the chart's own sentence is the true one, and a descriptor that never
+           had an emptyText (every stored view authored before this) still falls through unchanged. */
         var panels = ReadRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js"));
         Assert.Contains("desc.emptyText || \"No rows in this window.\"", panels, StringComparison.Ordinal);
+        Assert.Contains("if (!points.length && desc.emptyText) return emptyStrip(desc.emptyText);", panels, StringComparison.Ordinal);
     }
 
     // ── helpers ────────────────────────────────────────────────────────────────────────────────────
