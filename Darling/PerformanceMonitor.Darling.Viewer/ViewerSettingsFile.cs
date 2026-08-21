@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using PerformanceMonitor.Common;
@@ -46,6 +47,29 @@ namespace PerformanceMonitor.Darling.Viewer;
 internal static class ViewerSettingsFile
 {
     /// <summary>
+    /// The (file, problem) pairs already reported this session, so one broken file is one log line rather
+    /// than one per read.
+    ///
+    /// <para>Nothing reads these files once. The theme is applied from viewer-settings.json before the
+    /// window exists, MainWindow loads it again to seed itself, the Settings window loads it on open and
+    /// MainWindow re-loads it on close, and the control-plane migration loads it too — so an unreported
+    /// duplicate would put five identical ERROR lines in the log for one defect, which is a poor reward for
+    /// whoever went looking. The first line is the one that carries the fact; the rest carry nothing.</para>
+    ///
+    /// <para>Keyed on the problem as well as the path deliberately: if the file changes mid-session and
+    /// breaks in a NEW way, that is a new fact and it is said again.</para>
+    /// </summary>
+    private static readonly HashSet<string> s_reported = new(StringComparer.Ordinal);
+
+    private static bool FirstReportOf(string filePath, string? problem)
+    {
+        lock (s_reported)
+        {
+            return s_reported.Add($"{filePath}|{problem}");
+        }
+    }
+
+    /// <summary>
     /// Reads <paramref name="filePath"/> into <typeparamref name="T"/>, substituting a default instance
     /// when there is nothing usable to read. The returned <c>State</c> is what a caller needs to decide
     /// whether the defaults it just got are a legitimate first run or a configuration that is still on
@@ -57,7 +81,7 @@ internal static class ViewerSettingsFile
     {
         var read = SettingsFileGuard.ReadObject<T>(filePath, options);
 
-        if (read.State == SettingsFileState.Unreadable)
+        if (read.State == SettingsFileState.Unreadable && FirstReportOf(filePath, read.Problem))
         {
             ViewerLogger.Error(logSource,
                 $"'{filePath}' could not be read ({read.Problem}), so every setting it holds is at its " +
