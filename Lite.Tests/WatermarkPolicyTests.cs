@@ -151,6 +151,20 @@ public sealed class WatermarkPolicyTests
     /// <para>So the assertion is not "the comments say 1h" — that is the same defect with a fresher number in
     /// it, and it would go stale the next time the horizon moves. It is that no source discussing the clamp
     /// states an hours figure at all. The number has one home, and prose has to point at it.</para>
+    ///
+    /// <para><b>If this fails on something that has nothing to do with the horizon, read this first.</b> The
+    /// trigger list is broader than the concept, on purpose and at a known cost. "catch-up" is ordinary English
+    /// in this codebase — the compression backlog catches up, a cold-start sweep body catches up, WAL replay
+    /// catches up — and none of those is <see cref="WatermarkPolicy.MaxCatchup"/>. A future comment that pairs
+    /// one of them with an unrelated hours figure inside the window will fail this test, and it will be a
+    /// SCOPE problem in the list below, not the horizon drifting. Fix it by narrowing the trigger, never by
+    /// widening the window's tolerance for figures.</para>
+    ///
+    /// <para>Narrowing to "catch-up clamp" is the obvious escape and it does not work: two of the twelve sites
+    /// this caught named the clamp without the word "clamp" adjacent ("roll past 24h on their own", two lines
+    /// under "legitimate catch-up"), and two more named it without the words "catch-up" at all
+    /// ("24h-clamped outage holes"). A precise trigger would have missed the ones that hide best. The false
+    /// positive is the price of that, and it is the cheaper failure — it is loud, and it is this paragraph.</para>
     /// </summary>
     [Fact]
     public void TheCatchUpHorizon_IsWrittenDownInExactlyOnePlace()
