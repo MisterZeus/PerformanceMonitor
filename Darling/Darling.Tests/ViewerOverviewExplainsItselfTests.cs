@@ -176,6 +176,119 @@ public sealed class ViewerOverviewExplainsItselfTests
         }
     }
 
+    /// <summary>
+    /// THE INVARIANT, rather than the two instances of it that review found one at a time. The card's status
+    /// word and its tooltip must agree for EVERY combination of the two freshness flags, including the ones
+    /// <c>ApplyFreshness</c> cannot reach — both flags are plain settable properties, so a fixture or a new
+    /// data path can construct any of them.
+    ///
+    /// <para>Two rounds on #2429 each surfaced a different contradicting pair (<c>IsOnline</c> null with no
+    /// awaiting marker, then <c>IsOnline</c> true WITH one). Guarding those two would have left the third to
+    /// be found the same way, so the renderings now share one discriminant
+    /// (<see cref="ServerCardStatus"/>) and this walks the whole product to prove no pair is left.</para>
+    /// </summary>
+    [Fact]
+    public void TheCardsTooltip_AgreesWithTheStatusWord_ForEveryCombinationOfTheFreshnessFlags()
+    {
+        bool?[] online = { true, false, null };
+        bool[] awaiting = { true, false };
+        bool[] stale = { true, false };
+        double?[] cpu = { null, 96 };
+
+        /* A long max-wait with a zero event count bands Blocking as Warning while BuildReason's own gate
+           (count > 0) skips it — a card outside Healthy with nothing to name, which is the other way the
+           ranking-only fallback reaches a tooltip. It is in the sweep because widening the sweep is what
+           found it. */
+        long[] maxBlockingMs = { 0, 20000 };
+        int[] failedCollectors = { 0, 1 };
+
+        /* Status word -> the words no tooltip under it may use, because each names a different state. */
+        var forbidden = new Dictionary<string, string[]>(StringComparer.Ordinal)
+        {
+            ["Online"] = new[] { "Offline", "Awaiting first collection", "Unknown" },
+            ["Warning"] = new[] { "Offline", "Awaiting first collection", "Unknown" },
+            ["Offline"] = new[] { "Awaiting first collection", "Unknown" },
+            ["Awaiting first collection"] = new[] { "Offline", "Unknown" },
+            ["Unknown"] = new[] { "Offline", "Awaiting first collection" },
+        };
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var cases = 0;
+
+        foreach (var o in online)
+        foreach (var a in awaiting)
+        foreach (var st in stale)
+        foreach (var c in cpu)
+        foreach (var blockMs in maxBlockingMs)
+        foreach (var failed in failedCollectors)
+        {
+            var card = new ServerSummaryItem
+            {
+                DisplayName = "s",
+                ServerId = 1,
+                IsOnline = o,
+                AwaitingFirstCollection = a,
+                HasCollectorErrors = st,
+                CpuPercent = c,
+                MaxBlockingWaitMs = blockMs,
+                FailedCollectorCount = failed,
+            };
+
+            var word = card.StatusDisplay;
+            var tooltip = card.StatusTooltip;
+            seen.Add(word);
+            cases++;
+
+            var where = $"IsOnline={o?.ToString() ?? "null"} Awaiting={a} Stale={st} Cpu={c?.ToString() ?? "null"} " +
+                        $"MaxBlockingMs={blockMs} FailedCollectors={failed} " +
+                        $"-> word '{word}' tooltip '{tooltip.Replace("\n", " | ", StringComparison.Ordinal)}'";
+
+            foreach (var banned in forbidden[word])
+            {
+                Assert.False(tooltip.Contains(banned, StringComparison.Ordinal),
+                    $"the tooltip claims '{banned}' under a status word of '{word}'. {where}");
+            }
+
+            /* And the ranking-only fallback never reaches a card, whatever the flags say. */
+            Assert.False(tooltip.Contains("Needs attention", StringComparison.Ordinal), where);
+        }
+
+        Assert.Equal(96, cases);
+
+        /* The sweep really did exercise all five status words, so a future rewrite that collapses one of them
+           cannot leave this test passing over a smaller surface than it claims to cover. */
+        Assert.Equal(5, seen.Count);
+    }
+
+    /// <summary>The word, the colour, the reason and the tooltip are four renderings of ONE discriminant. That is
+    /// what makes the sweep above hold by construction instead of by luck.</summary>
+    [Fact]
+    public void TheCardStatus_IsTheOnlyPlaceTheFreshnessFlagsAreRead()
+    {
+        Assert.Equal(ServerCardStatus.Online, Healthy().CardStatus);
+        Assert.Equal(ServerCardStatus.Stale, Stale().CardStatus);
+        Assert.Equal(ServerCardStatus.Offline, Offline().CardStatus);
+        Assert.Equal(ServerCardStatus.AwaitingFirstCollection, Awaiting().CardStatus);
+        Assert.Equal(ServerCardStatus.Unknown, UnknownStatus().CardStatus);
+
+        /* The pair the second review round found: awaiting set alongside an online card. The status word has
+           always ignored the marker there, and now so does everything downstream of it. */
+        var onlineAndAwaiting = Healthy();
+        onlineAndAwaiting.AwaitingFirstCollection = true;
+
+        Assert.Equal(ServerCardStatus.Online, onlineAndAwaiting.CardStatus);
+        Assert.Equal("Online", onlineAndAwaiting.StatusDisplay);
+        Assert.DoesNotContain("Awaiting", onlineAndAwaiting.StatusTooltip, StringComparison.Ordinal);
+        Assert.DoesNotContain("Awaiting", FleetRollup.BuildReason(onlineAndAwaiting), StringComparison.Ordinal);
+
+        /* The source pin: nothing but CardStatus may branch on the flag pair. */
+        var overview = ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.Overview.cs"));
+        Assert.Contains("public ServerCardStatus CardStatus => IsOnline switch", overview, StringComparison.Ordinal);
+        Assert.Contains("public string StatusDisplay => CardStatus switch", overview, StringComparison.Ordinal);
+        Assert.Contains("public SolidColorBrush StatusBrush => MakeBrush(CardStatus switch", overview, StringComparison.Ordinal);
+    }
+
     /// <summary>The card view-model exposes it, because a static nothing binds to fixes nothing.</summary>
     [Fact]
     public void TheCardViewModel_ExposesTheTooltip_WithoutReimplementingIt()

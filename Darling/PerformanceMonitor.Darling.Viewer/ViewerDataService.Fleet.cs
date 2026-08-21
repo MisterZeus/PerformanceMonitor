@@ -336,7 +336,14 @@ public sealed class FleetRollup
     /// Warning too; otherwise Healthy. No new thresholds are introduced here.
     /// </summary>
     public static FleetHealthBand ClassifyBand(ServerSummaryItem s) =>
-        ServerHealthClassifier.ClassifyBand(s.IsOnline, s.AwaitingFirstCollection, s.HasCollectorErrors, s.OverallMetricSeverity);
+        ServerHealthClassifier.ClassifyBand(
+            s.IsOnline,
+            /* Via the card's discriminant, not the raw flag. The shared classifier honours an awaiting marker
+               whatever IsOnline says, so an online card carrying a stray marker banded Warning while the card
+               said "Online" and had nothing to report — a third reading of the same pair. See ServerCardStatus. */
+            s.CardStatus == ServerCardStatus.AwaitingFirstCollection,
+            s.HasCollectorErrors,
+            s.OverallMetricSeverity);
 
     /// <summary>
     /// The worst-first ordering score — the SHARED <see cref="ServerHealthClassifier.FleetHealthScore"/> over
@@ -354,12 +361,15 @@ public sealed class FleetRollup
     /// </summary>
     public static string BuildReason(ServerSummaryItem s)
     {
-        if (s.IsOnline == false)
+        /* Keyed on the card's own status discriminant rather than on the flags behind it. Reading
+           AwaitingFirstCollection independently of IsOnline is what let an online card claim it was awaiting
+           its first collection — see ServerCardStatus. */
+        if (s.CardStatus == ServerCardStatus.Offline)
         {
             return "Offline — no recent collection";
         }
 
-        if (s.AwaitingFirstCollection)
+        if (s.CardStatus == ServerCardStatus.AwaitingFirstCollection)
         {
             return "Awaiting first collection";
         }
@@ -395,8 +405,16 @@ public sealed class FleetRollup
             parts.Add("collection stale");
         }
 
-        return parts.Count > 0 ? string.Join(", ", parts) : "Needs attention";
+        return parts.Count > 0 ? string.Join(", ", parts) : UnspecifiedReason;
     }
+
+    /// <summary>
+    /// What <see cref="BuildReason"/> answers when it can name nothing — a card banded away from Healthy by a
+    /// severity whose display the reason does not cover. It reads fine in the ranking, where every row is a
+    /// problem server, and reads as an unexplained demand on a card, so the tooltip degrades to the band label
+    /// rather than repeating it. Named so the two sides cannot drift apart on the spelling.
+    /// </summary>
+    public const string UnspecifiedReason = "Needs attention";
 
     /// <summary>The line every card tooltip ends on. The sidebar alert badge's tooltip has the same shape —
     /// the breakdown, then how to act on it — so the Overview card is not the surface that explains itself
@@ -422,39 +440,54 @@ public sealed class FleetRollup
 
     /// <summary>
     /// The tooltip's first line: what this card's state IS, in the words the card's own status line uses,
-    /// followed by the reason when there is one to give. Every arm of <see cref="ServerSummaryItem.StatusDisplay"/>
-    /// has a match here — a tooltip that hangs off a word and then contradicts it is the defect this change
-    /// exists to remove, not a smaller version of it.
+    /// followed by the reason when there is one to give.
+    ///
+    /// <para>It switches on <see cref="ServerSummaryItem.CardStatus"/> — the SAME discriminant
+    /// <see cref="ServerSummaryItem.StatusDisplay"/> renders — rather than re-reading the flags underneath it.
+    /// A tooltip that hangs off a word and then contradicts it is the defect this change exists to remove, and
+    /// two independent readings of the same two flags is precisely how it comes back.</para>
     /// </summary>
     private static string Headline(ServerSummaryItem s)
     {
-        /* Offline and awaiting-first-collection come back from BuildReason as whole sentences that already
-           name the state, so putting a band label in front would only say "Offline" twice. */
-        if (s.IsOnline == false || s.AwaitingFirstCollection)
-        {
-            return BuildReason(s);
-        }
-
         var band = ClassifyBand(s);
 
-        /* The status word carries one arm the band does not: IsOnline null with no first-collection marker
-           renders "Unknown", while ClassifyBand falls straight through to the metrics and can land on Healthy.
-           ApplyFreshness never leaves a card in that pair today, so this is a lockstep guard rather than a
-           live defect — but the tooltip hangs off the word itself, and "Healthy" beside "Unknown" is exactly
-           the contradiction being fixed. Raised in review on #2429. */
-        if (s.IsOnline is null)
+        return s.CardStatus switch
         {
-            return band == FleetHealthBand.Healthy
-                ? UnknownStatus
-                : $"{UnknownStatus}; {BuildReason(s)}";
-        }
+            /* Offline and never-reached come back from BuildReason as whole sentences that already name the
+               state — the same sentence the status word shows — so a band label in front would only say
+               "Offline" twice. */
+            ServerCardStatus.Offline or ServerCardStatus.AwaitingFirstCollection => BuildReason(s),
 
-        /* A healthy card has no reason to give. BuildReason's "Needs attention" fallback is written for a
-           ranking that only ever holds problem servers; the card grid shows EVERY server, so reusing the
-           fallback here would tell a green card the opposite of the truth. */
-        return band == FleetHealthBand.Healthy
-            ? "Healthy — every metric on this card is inside its threshold"
-            : $"{ServerHealthClassifier.BandLabel(band)} — {BuildReason(s)}";
+            /* "Unknown" is the one status word with no band behind it: ClassifyBand goes straight to the
+               metrics and, on a clean card, answers Healthy. The word wins, and the metrics are appended when
+               they have something to add — not knowing whether a server is reporting is no reason to withhold
+               the CPU number that WAS collected. */
+            ServerCardStatus.Unknown => WithReason(UnknownStatus, "; ", s),
+
+            /* Online and stale: the band is the headline. A healthy card gets an all-clear rather than
+               BuildReason's "Needs attention" fallback, which is written for a ranking that only ever holds
+               problem servers and on a grid showing EVERY server would say the opposite of the truth. */
+            _ => band == FleetHealthBand.Healthy
+                ? "Healthy — every metric on this card is inside its threshold"
+                : WithReason(ServerHealthClassifier.BandLabel(band), " — ", s),
+        };
+    }
+
+    /// <summary>
+    /// A headline plus what the card can actually name — or the headline alone when it can name nothing.
+    ///
+    /// <para>Every arm that appends a reason goes through here, because a card CAN sit outside Healthy with
+    /// nothing to say: a Blocking band raised by a long max-wait while the reason's own gate wants a non-zero
+    /// event count, for one. Appending unguarded produces "Warning — Needs attention", which tells the reader
+    /// exactly what they already knew and is how the ranking-only fallback reaches a card at all. Two arms had
+    /// their own copy of the append and only one of them was guarded, which is the same lesson as
+    /// <see cref="ServerCardStatus"/> one level down.</para>
+    /// </summary>
+    private static string WithReason(string headline, string separator, ServerSummaryItem s)
+    {
+        var reason = BuildReason(s);
+
+        return reason == UnspecifiedReason ? headline : headline + separator + reason;
     }
 
     /// <summary>The words behind StatusDisplay's "Unknown" — a card whose freshness was never classified.</summary>
