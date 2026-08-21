@@ -9,10 +9,8 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO;
 using System.Linq;
 using System.Net;
-using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using System.Windows;
@@ -210,40 +208,96 @@ public partial class SettingsWindow : Window
         UpdateCollectionStatus();
     }
 
+    /// <summary>
+    /// #2433: one read of settings.json, ten writers mutating the SAME document, one write, and therefore
+    /// one truthful answer about whether anything reached disk.
+    ///
+    /// <para>Each of the ten used to open, parse and rewrite the whole document itself — ten read/parse/write
+    /// cycles for one click of Save — and each swallowed its own write failure into the log. Seven of them
+    /// returned <c>void</c> and so could not report anything by construction; the three that returned
+    /// something returned whether the BOXES validated, which is a different question from whether the save
+    /// happened. So "Settings saved." was shown whether or not a byte was written, and a partial save —
+    /// SMTP written, alerts not — was a reachable state that no single sentence could describe.</para>
+    ///
+    /// <para>Folding them into one write removes that state rather than describing it, which is why this
+    /// shape was chosen over giving each writer a bool. The writers no longer read or write anything: they
+    /// mutate the document they are handed, and the question "did this Save work?" now has exactly one
+    /// answer for the button to report.</para>
+    ///
+    /// <para>The read is <see cref="App.SettingsRootForWrite"/>, which throws only when settings.json could
+    /// not be parsed AND could not be copied aside (#2425). That throw used to land in ten separate catches
+    /// that each logged and let the toast claim success; it is the narrow residue #2433 was filed for, and
+    /// it now stops the save and says so.</para>
+    /// </summary>
     private async void SaveButton_Click(object sender, RoutedEventArgs e)
     {
-        var (mcpChanged, mcpValid) = await SaveMcpSettingsAsync();
-        SaveDefaultTimeRange();
-        SaveConnectionTimeout();
-        SaveCsvSeparator();
-        SaveColorTheme();
-        SaveTimeDisplayMode();
-        SaveCheckForUpdates();
-        bool alertsValid = SaveAlertSettings();
-        SaveSmtpSettings();
-        bool webhooksValid = SaveWebhookSettings();
+        JsonNode root;
+        try
+        {
+            root = App.SettingsRootForWrite();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Settings", $"Failed to save settings: {ex.Message}");
+            MessageBox.Show(
+                $"Nothing was saved.\n\n{ex.Message}",
+                "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        var (mcpChanged, mcpValid) = await SaveMcpSettingsAsync(root);
+        SaveDefaultTimeRange(root);
+        SaveConnectionTimeout(root);
+        SaveCsvSeparator(root);
+        SaveColorTheme(root);
+        SaveTimeDisplayMode(root);
+        SaveCheckForUpdates(root);
+        bool alertsValid = SaveAlertSettings(root);
+        SaveSmtpSettings(root);
+        bool webhooksValid = SaveWebhookSettings(root);
+
+        bool written = App.WriteSettingsDocument(root, "settings");
 
         _saved = true;
         if (mcpChanged) McpSettingsChanged = true;
 
-        if (!alertsValid || !mcpValid || !webhooksValid) return;
+        switch (SettingsSaveReport.Classify(written, mcpChanged, alertsValid, mcpValid, webhooksValid))
+        {
+            case SettingsSaveOutcome.NothingWritten:
+                MessageBox.Show(
+                    "Your settings could not be written to settings.json, so nothing was saved and the "
+                    + "changes on this page will be gone when the window closes. The application log says "
+                    + "why.",
+                    "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
 
-        var message = mcpChanged
-            ? "Settings saved. MCP changes take effect after restarting the application."
-            : "Settings saved.";
-        MessageBox.Show(message, "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
+            case SettingsSaveOutcome.WrittenWithObjections:
+                /* The objecting writer has already raised its own dialog naming what it rejected, and the
+                   rest of the document DID reach disk. Adding a second dialog here would either repeat it
+                   or contradict it. */
+                return;
+
+            case SettingsSaveOutcome.SavedAndMcpNeedsRestart:
+                MessageBox.Show(
+                    "Settings saved. MCP changes take effect after restarting the application.",
+                    "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+
+            default:
+                MessageBox.Show("Settings saved.", "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+        }
     }
 
-    private async Task<(bool Changed, bool Valid)> SaveMcpSettingsAsync()
+    /// <summary>
+    /// Mutates the MCP keys on the shared document (#2433). <c>Valid</c> means the port survived
+    /// validation and the bind probe — NOT that a write happened, which is
+    /// <see cref="SaveButton_Click"/>'s single question now and no longer this method's to guess at.
+    /// </summary>
+    private async Task<(bool Changed, bool Valid)> SaveMcpSettingsAsync(JsonNode root)
     {
-        var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
-
         try
         {
-            /* #2425: the shared read, which copies an unparseable settings.json aside before this whole-
-               document rewrite can replace it, and throws into the catch below when it cannot. */
-            JsonNode root = App.SettingsRootForWrite();
-
             var oldEnabled = root["mcp_enabled"]?.GetValue<bool>() ?? false;
             var oldPort = root["mcp_port"]?.GetValue<int>() ?? 5151;
             var newEnabled = McpEnabledCheckBox.IsChecked == true;
@@ -283,9 +337,6 @@ public partial class SettingsWindow : Window
                 portValid = false;
             }
 
-            var options = new JsonSerializerOptions { WriteIndented = true };
-            File.WriteAllText(settingsPath, root.ToJsonString(options));
-
             if (!portValid)
             {
                 MessageBox.Show(
@@ -297,8 +348,16 @@ public partial class SettingsWindow : Window
         }
         catch (Exception ex)
         {
+            /* All that is left in here is the bind probe — the read and the write have both moved out. If
+               it threw we do not know whether the port is free, so the MCP keys are left as they were and
+               the caller is told the page did not validate. Reporting Valid = true here was the #2433
+               instance the review bot found, and it is not survivable now that this method writes nothing
+               it could be wrong about. */
             AppLogger.Error("Settings", $"Failed to save MCP settings: {ex.Message}");
-            return (false, true);
+            MessageBox.Show(
+                $"The MCP port could not be checked, so the MCP settings were left unchanged:\n\n{ex.Message}",
+                "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return (false, false);
         }
     }
 
@@ -315,14 +374,12 @@ public partial class SettingsWindow : Window
         };
     }
 
-    /// <summary>
-    /// Delegates to <see cref="App.WriteSetting"/> — the single read/merge/write/catch home for
-    /// settings.json single-value updates (now shared with MainWindow's Overview sort selector). Kept as a
-    /// thin alias so the existing Save* call sites and their JsonNode mutate lambdas are untouched.
-    /// </summary>
-    private static void WriteSetting(string what, Action<JsonNode> mutate) => App.WriteSetting(what, mutate);
+    /* The local WriteSetting alias is gone with #2433: every Save* below now mutates the one document
+       SaveButton_Click opened, rather than opening, parsing and rewriting settings.json for itself.
+       App.WriteSetting survives for the single-value knobs outside this window (MainWindow's Overview sort
+       selector), which really are one read and one write on their own. */
 
-    private void SaveDefaultTimeRange()
+    private void SaveDefaultTimeRange(JsonNode root)
     {
         var hours = DefaultTimeRangeCombo.SelectedIndex switch
         {
@@ -336,7 +393,7 @@ public partial class SettingsWindow : Window
 
         App.DefaultTimeRangeHours = hours;
 
-        WriteSetting("default time range", root => root["default_time_range_hours"] = hours);
+        root["default_time_range_hours"] = hours;
     }
 
     private void CopyMcpCommandButton_Click(object sender, RoutedEventArgs e)
@@ -367,14 +424,14 @@ public partial class SettingsWindow : Window
         ConnectionTimeoutBox.Text = App.ConnectionTimeoutSeconds.ToString();
     }
 
-    private void SaveConnectionTimeout()
+    private void SaveConnectionTimeout(JsonNode root)
     {
         if (int.TryParse(ConnectionTimeoutBox.Text, out var timeout) && timeout >= 5 && timeout <= 60)
         {
             App.ConnectionTimeoutSeconds = timeout;
         }
 
-        WriteSetting("connection timeout", root => root["connection_timeout_seconds"] = App.ConnectionTimeoutSeconds);
+        root["connection_timeout_seconds"] = App.ConnectionTimeoutSeconds;
     }
 
     private void LoadCsvSeparator()
@@ -391,14 +448,14 @@ public partial class SettingsWindow : Window
             CsvSeparatorCombo.SelectedIndex = 0;
     }
 
-    private void SaveCsvSeparator()
+    private void SaveCsvSeparator(JsonNode root)
     {
         if (CsvSeparatorCombo.SelectedItem is ComboBoxItem selected && selected.Tag is string sep)
         {
             App.CsvSeparator = sep;
         }
 
-        WriteSetting("CSV separator", root => root["csv_separator"] = App.CsvSeparator);
+        root["csv_separator"] = App.CsvSeparator;
     }
 
     private bool _isLoadingTheme;
@@ -429,7 +486,7 @@ public partial class SettingsWindow : Window
         _isLoadingTheme = false;
     }
 
-    private void SaveColorTheme()
+    private void SaveColorTheme(JsonNode root)
     {
         if (ColorThemeCombo.SelectedItem is ComboBoxItem selected && selected.Tag is string theme)
         {
@@ -437,7 +494,7 @@ public partial class SettingsWindow : Window
             ThemeManager.Apply(theme);
         }
 
-        WriteSetting("color theme", root => root["color_theme"] = App.ColorTheme);
+        root["color_theme"] = App.ColorTheme;
     }
 
     private void LoadTimeDisplayMode()
@@ -454,7 +511,7 @@ public partial class SettingsWindow : Window
             TimeDisplayModeCombo.SelectedIndex = 0;
     }
 
-    private void SaveTimeDisplayMode()
+    private void SaveTimeDisplayMode(JsonNode root)
     {
         if (TimeDisplayModeCombo.SelectedItem is ComboBoxItem selected && selected.Tag is string mode)
         {
@@ -463,7 +520,7 @@ public partial class SettingsWindow : Window
                 ServerTimeHelper.CurrentDisplayMode = tdm;
         }
 
-        WriteSetting("time display mode", root => root["time_display_mode"] = App.TimeDisplayMode);
+        root["time_display_mode"] = App.TimeDisplayMode;
     }
 
     /// <summary>
@@ -492,11 +549,11 @@ public partial class SettingsWindow : Window
         CheckForUpdatesOnStartupCheckBox.IsChecked = App.CheckForUpdatesOnStartup;
     }
 
-    private void SaveCheckForUpdates()
+    private void SaveCheckForUpdates(JsonNode root)
     {
         App.CheckForUpdatesOnStartup = CheckForUpdatesOnStartupCheckBox.IsChecked == true;
 
-        WriteSetting("update check on startup", root => root["check_for_updates_on_startup"] = App.CheckForUpdatesOnStartup);
+        root["check_for_updates_on_startup"] = App.CheckForUpdatesOnStartup;
     }
 
     private void LoadAlertSettings()
@@ -566,7 +623,12 @@ public partial class SettingsWindow : Window
         UpdateAlertControlStates();
     }
 
-    private bool SaveAlertSettings()
+    /// <summary>
+    /// Mutates the alert keys on the shared document (#2433). The bool still means what it always meant —
+    /// whether every box validated — but it is no longer the only thing the caller has to go on: the write
+    /// itself now reports separately, so a save that threw can no longer come back as <c>true</c>.
+    /// </summary>
+    private bool SaveAlertSettings(JsonNode root)
     {
         App.MinimizeToTray = MinimizeToTrayCheckBox.IsChecked == true;
         App.AlertsEnabled = AlertsEnabledCheckBox.IsChecked == true;
@@ -677,81 +739,66 @@ public partial class SettingsWindow : Window
         else
             validationErrors.Add("Analysis re-notify cooldown must be between 30 and 10080 minutes.");
 
-        var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
-        try
-        {
-            /* #2425: the shared read, which copies an unparseable settings.json aside before this whole-
-               document rewrite can replace it, and throws into the catch below when it cannot. */
-            JsonNode root = App.SettingsRootForWrite();
-
-            root["minimize_to_tray"] = App.MinimizeToTray;
-            root["alerts_enabled"] = App.AlertsEnabled;
-            root["notify_connection_changes"] = App.NotifyConnectionChanges;
-            root["notify_connection_down_at_startup"] = App.NotifyConnectionDownAtStartup;
-            root["connection_refire_minutes"] = App.ConnectionRefireMinutes;
-            root["notify_ag_health"] = App.NotifyAgHealth;
-            root["ag_lag_alert_seconds"] = App.AgLagAlertSeconds;
-            root["ag_redo_queue_alert_kb"] = App.AgRedoQueueAlertKb;
-            root["alert_cpu_enabled"] = App.AlertCpuEnabled;
-            root["alert_cpu_threshold"] = App.AlertCpuThreshold;
-            root["alert_cpu_mode"] = App.AlertCpuMode.ToString();
-            root["alert_blocking_enabled"] = App.AlertBlockingEnabled;
-            root["alert_blocking_threshold"] = App.AlertBlockingThreshold;
-            root["alert_blocking_wait_seconds_threshold"] = App.AlertBlockingWaitSecondsThreshold;
-            root["alert_deadlock_enabled"] = App.AlertDeadlockEnabled;
-            root["alert_deadlock_threshold"] = App.AlertDeadlockThreshold;
-            root["alert_database_state_enabled"] = App.AlertDatabaseStateEnabled;
-            root["alert_poison_wait_enabled"] = App.AlertPoisonWaitEnabled;
-            root["alert_poison_wait_threshold_ms"] = App.AlertPoisonWaitThresholdMs;
-            root["alert_long_running_query_enabled"] = App.AlertLongRunningQueryEnabled;
-            root["alert_long_running_query_threshold_minutes"] = App.AlertLongRunningQueryThresholdMinutes;
-            root["alert_long_running_query_max_results"] = App.AlertLongRunningQueryMaxResults;
-            root["alert_long_running_query_exclude_sp_server_diagnostics"] = App.AlertLongRunningQueryExcludeSpServerDiagnostics;
-            root["alert_long_running_query_exclude_waitfor"] = App.AlertLongRunningQueryExcludeWaitFor;
-            root["alert_long_running_query_exclude_backups"] = App.AlertLongRunningQueryExcludeBackups;
-            root["alert_long_running_query_exclude_misc_waits"] = App.AlertLongRunningQueryExcludeMiscWaits;
-            root["alert_long_running_query_exclude_cdc"] = App.AlertLongRunningQueryExcludeCdc;
-            var dbArray = new System.Text.Json.Nodes.JsonArray();
-            foreach (var db in App.AlertExcludedDatabases) dbArray.Add(db);
-            root["alert_excluded_databases"] = dbArray;
-            root["alert_tempdb_space_enabled"] = App.AlertTempDbSpaceEnabled;
-            root["alert_tempdb_space_threshold_percent"] = App.AlertTempDbSpaceThresholdPercent;
-            root["alert_low_disk_enabled"] = App.AlertLowDiskEnabled;
-            root["alert_low_disk_threshold_percent"] = App.AlertLowDiskThresholdPercent;
-            root["alert_low_disk_threshold_gb"] = App.AlertLowDiskThresholdGb;
-            root["alert_disk_critical_free_percent"] = App.AlertDiskCriticalFreePercent;
-            root["alert_disk_critical_free_gb"] = App.AlertDiskCriticalFreeGb;
-            root["alert_pvs_enabled"] = App.AlertPvsEnabled;
-            root["alert_pvs_threshold_percent"] = App.AlertPvsThresholdPercent;
-            root["alert_pvs_floor_gb"] = App.AlertPvsFloorGb;
-            root["alert_file_growth_enabled"] = App.AlertFileGrowthEnabled;
-            root["alert_file_growth_rise_mb"] = App.AlertFileGrowthRiseMb;
-            root["alert_file_growth_volume_percent"] = App.AlertFileGrowthVolumePercent;
-            root["alert_file_growth_lookback_minutes"] = App.AlertFileGrowthLookbackMinutes;
-            root["alert_long_running_job_enabled"] = App.AlertLongRunningJobEnabled;
-            root["alert_long_running_job_multiplier"] = App.AlertLongRunningJobMultiplier;
-            root["alert_failed_job_enabled"] = App.AlertFailedJobEnabled;
-            root["alert_failed_job_lookback_minutes"] = App.AlertFailedJobLookbackMinutes;
-            root["alert_cooldown_minutes"] = App.AlertCooldownMinutes;
-            root["email_cooldown_minutes"] = App.EmailCooldownMinutes;
-            root["alert_delivery_mode"] = App.AlertDeliveryMode.ToString();
-            root["alert_per_event_max_per_cycle"] = App.AlertPerEventMaxPerCycle;
-            root["mute_rule_default_expiration"] = App.MuteRuleDefaultExpiration;
-            root["log_alert_dismissals"] = App.LogAlertDismissals;
-            root["analysis_enabled"] = App.AnalysisEnabled;
-            root["query_store_backfill_enabled"] = App.QueryStoreBackfillEnabled;
-            root["analysis_notifications_enabled"] = App.AnalysisNotificationsEnabled;
-            root["analysis_interval_minutes"] = App.AnalysisIntervalMinutes;
-            root["analysis_notify_severity"] = App.AnalysisNotifySeverity;
-            root["analysis_notify_cooldown_minutes"] = App.AnalysisNotifyCooldownMinutes;
-
-            var options = new JsonSerializerOptions { WriteIndented = true };
-            File.WriteAllText(settingsPath, root.ToJsonString(options));
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Error("Settings", $"Failed to save alert settings: {ex.Message}");
-        }
+        root["minimize_to_tray"] = App.MinimizeToTray;
+        root["alerts_enabled"] = App.AlertsEnabled;
+        root["notify_connection_changes"] = App.NotifyConnectionChanges;
+        root["notify_connection_down_at_startup"] = App.NotifyConnectionDownAtStartup;
+        root["connection_refire_minutes"] = App.ConnectionRefireMinutes;
+        root["notify_ag_health"] = App.NotifyAgHealth;
+        root["ag_lag_alert_seconds"] = App.AgLagAlertSeconds;
+        root["ag_redo_queue_alert_kb"] = App.AgRedoQueueAlertKb;
+        root["alert_cpu_enabled"] = App.AlertCpuEnabled;
+        root["alert_cpu_threshold"] = App.AlertCpuThreshold;
+        root["alert_cpu_mode"] = App.AlertCpuMode.ToString();
+        root["alert_blocking_enabled"] = App.AlertBlockingEnabled;
+        root["alert_blocking_threshold"] = App.AlertBlockingThreshold;
+        root["alert_blocking_wait_seconds_threshold"] = App.AlertBlockingWaitSecondsThreshold;
+        root["alert_deadlock_enabled"] = App.AlertDeadlockEnabled;
+        root["alert_deadlock_threshold"] = App.AlertDeadlockThreshold;
+        root["alert_database_state_enabled"] = App.AlertDatabaseStateEnabled;
+        root["alert_poison_wait_enabled"] = App.AlertPoisonWaitEnabled;
+        root["alert_poison_wait_threshold_ms"] = App.AlertPoisonWaitThresholdMs;
+        root["alert_long_running_query_enabled"] = App.AlertLongRunningQueryEnabled;
+        root["alert_long_running_query_threshold_minutes"] = App.AlertLongRunningQueryThresholdMinutes;
+        root["alert_long_running_query_max_results"] = App.AlertLongRunningQueryMaxResults;
+        root["alert_long_running_query_exclude_sp_server_diagnostics"] = App.AlertLongRunningQueryExcludeSpServerDiagnostics;
+        root["alert_long_running_query_exclude_waitfor"] = App.AlertLongRunningQueryExcludeWaitFor;
+        root["alert_long_running_query_exclude_backups"] = App.AlertLongRunningQueryExcludeBackups;
+        root["alert_long_running_query_exclude_misc_waits"] = App.AlertLongRunningQueryExcludeMiscWaits;
+        root["alert_long_running_query_exclude_cdc"] = App.AlertLongRunningQueryExcludeCdc;
+        var dbArray = new System.Text.Json.Nodes.JsonArray();
+        foreach (var db in App.AlertExcludedDatabases) dbArray.Add(db);
+        root["alert_excluded_databases"] = dbArray;
+        root["alert_tempdb_space_enabled"] = App.AlertTempDbSpaceEnabled;
+        root["alert_tempdb_space_threshold_percent"] = App.AlertTempDbSpaceThresholdPercent;
+        root["alert_low_disk_enabled"] = App.AlertLowDiskEnabled;
+        root["alert_low_disk_threshold_percent"] = App.AlertLowDiskThresholdPercent;
+        root["alert_low_disk_threshold_gb"] = App.AlertLowDiskThresholdGb;
+        root["alert_disk_critical_free_percent"] = App.AlertDiskCriticalFreePercent;
+        root["alert_disk_critical_free_gb"] = App.AlertDiskCriticalFreeGb;
+        root["alert_pvs_enabled"] = App.AlertPvsEnabled;
+        root["alert_pvs_threshold_percent"] = App.AlertPvsThresholdPercent;
+        root["alert_pvs_floor_gb"] = App.AlertPvsFloorGb;
+        root["alert_file_growth_enabled"] = App.AlertFileGrowthEnabled;
+        root["alert_file_growth_rise_mb"] = App.AlertFileGrowthRiseMb;
+        root["alert_file_growth_volume_percent"] = App.AlertFileGrowthVolumePercent;
+        root["alert_file_growth_lookback_minutes"] = App.AlertFileGrowthLookbackMinutes;
+        root["alert_long_running_job_enabled"] = App.AlertLongRunningJobEnabled;
+        root["alert_long_running_job_multiplier"] = App.AlertLongRunningJobMultiplier;
+        root["alert_failed_job_enabled"] = App.AlertFailedJobEnabled;
+        root["alert_failed_job_lookback_minutes"] = App.AlertFailedJobLookbackMinutes;
+        root["alert_cooldown_minutes"] = App.AlertCooldownMinutes;
+        root["email_cooldown_minutes"] = App.EmailCooldownMinutes;
+        root["alert_delivery_mode"] = App.AlertDeliveryMode.ToString();
+        root["alert_per_event_max_per_cycle"] = App.AlertPerEventMaxPerCycle;
+        root["mute_rule_default_expiration"] = App.MuteRuleDefaultExpiration;
+        root["log_alert_dismissals"] = App.LogAlertDismissals;
+        root["analysis_enabled"] = App.AnalysisEnabled;
+        root["query_store_backfill_enabled"] = App.QueryStoreBackfillEnabled;
+        root["analysis_notifications_enabled"] = App.AnalysisNotificationsEnabled;
+        root["analysis_interval_minutes"] = App.AnalysisIntervalMinutes;
+        root["analysis_notify_severity"] = App.AnalysisNotifySeverity;
+        root["analysis_notify_cooldown_minutes"] = App.AnalysisNotifyCooldownMinutes;
 
         if (validationErrors.Count > 0)
         {
@@ -911,7 +958,12 @@ public partial class SettingsWindow : Window
         UpdateSmtpControlStates();
     }
 
-    private void SaveSmtpSettings()
+    /// <summary>
+    /// Mutates the SMTP keys on the shared document (#2433). Still <c>void</c>, and now honestly so: it
+    /// no longer performs a write, so there is no longer a failure for it to be unable to report. That is
+    /// the difference between removing the partial-save state and describing it.
+    /// </summary>
+    private void SaveSmtpSettings(JsonNode root)
     {
         App.SmtpEnabled = SmtpEnabledCheckBox.IsChecked == true;
         App.SmtpServer = SmtpServerBox.Text?.Trim() ?? "";
@@ -928,29 +980,13 @@ public partial class SettingsWindow : Window
             App.SaveSmtpPassword(SmtpPasswordBox.Password);
         }
 
-        /* Save to settings.json */
-        var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
-        try
-        {
-            /* #2425: the shared read, which copies an unparseable settings.json aside before this whole-
-               document rewrite can replace it, and throws into the catch below when it cannot. */
-            JsonNode root = App.SettingsRootForWrite();
-
-            root["smtp_enabled"] = App.SmtpEnabled;
-            root["smtp_server"] = App.SmtpServer;
-            root["smtp_port"] = App.SmtpPort;
-            root["smtp_use_ssl"] = App.SmtpUseSsl;
-            root["smtp_username"] = App.SmtpUsername;
-            root["smtp_from_address"] = App.SmtpFromAddress;
-            root["smtp_recipients"] = App.SmtpRecipients;
-
-            var options = new JsonSerializerOptions { WriteIndented = true };
-            File.WriteAllText(settingsPath, root.ToJsonString(options));
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Error("Settings", $"Failed to save SMTP settings: {ex.Message}");
-        }
+        root["smtp_enabled"] = App.SmtpEnabled;
+        root["smtp_server"] = App.SmtpServer;
+        root["smtp_port"] = App.SmtpPort;
+        root["smtp_use_ssl"] = App.SmtpUseSsl;
+        root["smtp_username"] = App.SmtpUsername;
+        root["smtp_from_address"] = App.SmtpFromAddress;
+        root["smtp_recipients"] = App.SmtpRecipients;
     }
 
     private void SmtpEnabledCheckBox_Changed(object sender, RoutedEventArgs e)
@@ -1087,8 +1123,10 @@ public partial class SettingsWindow : Window
     /// or body template that cannot produce a valid request — the values are still saved (so the operator
     /// doesn't lose their typing), but they're told, because a broken template silently drops every alert.
     /// Follows <see cref="SaveAlertSettings"/>'s bool contract: the caller suppresses the "Settings saved" toast.
+    /// Mutates the shared document rather than rewriting settings.json itself (#2433), so the bool is about
+    /// the configuration and nothing else.
     /// </summary>
-    private bool SaveWebhookSettings()
+    private bool SaveWebhookSettings(JsonNode root)
     {
         /* Cleartext warning (#1506): an http:// generic-webhook URL carrying headers sends the Authorization
            token in the clear. Confirm before persisting a config that will transmit credentials unencrypted;
@@ -1130,42 +1168,27 @@ public partial class SettingsWindow : Window
         App.SaveWebhookUrl("GenericWebhookHeaders", App.GenericWebhookHeadersJson);
         App.SaveWebhookUrl("PagerDutyWebhook", App.PagerDutyRoutingKey);
 
-        var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
-        try
+        root["teams_webhook_enabled"] = App.TeamsWebhookEnabled;
+        root["teams_proxy_address"] = App.TeamsProxyAddress;
+        root["slack_webhook_enabled"] = App.SlackWebhookEnabled;
+        root["slack_proxy_address"] = App.SlackProxyAddress;
+
+        /* The generic channel's URL + headers are secrets and live in Credential Manager; only these
+           three are safe to persist in settings.json (#1506). The PagerDuty routing key is also a
+           secret and lives in Credential Manager; only the enable flag and EU-region toggle are safe. */
+        root["generic_webhook_enabled"] = App.GenericWebhookEnabled;
+        root["generic_proxy_address"] = App.GenericWebhookProxyAddress;
+        root["generic_body_template"] = App.GenericWebhookBodyTemplate;
+
+        root["pagerduty_webhook_enabled"] = App.PagerDutyWebhookEnabled;
+        root["pagerduty_use_eu_region"] = App.PagerDutyUseEuRegion;
+        root["pagerduty_proxy_address"] = App.PagerDutyProxyAddress;
+
+        /* Remove legacy plaintext webhook URLs from settings.json */
+        if (root is JsonObject obj)
         {
-            /* #2425: the shared read, which copies an unparseable settings.json aside before this whole-
-               document rewrite can replace it, and throws into the catch below when it cannot. */
-            JsonNode root = App.SettingsRootForWrite();
-
-            root["teams_webhook_enabled"] = App.TeamsWebhookEnabled;
-            root["teams_proxy_address"] = App.TeamsProxyAddress;
-            root["slack_webhook_enabled"] = App.SlackWebhookEnabled;
-            root["slack_proxy_address"] = App.SlackProxyAddress;
-
-            /* The generic channel's URL + headers are secrets and live in Credential Manager; only these
-               three are safe to persist in settings.json (#1506). The PagerDuty routing key is also a
-               secret and lives in Credential Manager; only the enable flag and EU-region toggle are safe. */
-            root["generic_webhook_enabled"] = App.GenericWebhookEnabled;
-            root["generic_proxy_address"] = App.GenericWebhookProxyAddress;
-            root["generic_body_template"] = App.GenericWebhookBodyTemplate;
-
-            root["pagerduty_webhook_enabled"] = App.PagerDutyWebhookEnabled;
-            root["pagerduty_use_eu_region"] = App.PagerDutyUseEuRegion;
-            root["pagerduty_proxy_address"] = App.PagerDutyProxyAddress;
-
-            /* Remove legacy plaintext webhook URLs from settings.json */
-            if (root is JsonObject obj)
-            {
-                obj.Remove("teams_webhook_url");
-                obj.Remove("slack_webhook_url");
-            }
-
-            var options = new JsonSerializerOptions { WriteIndented = true };
-            File.WriteAllText(settingsPath, root.ToJsonString(options));
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Error("Settings", $"Failed to save webhook settings: {ex.Message}");
+            obj.Remove("teams_webhook_url");
+            obj.Remove("slack_webhook_url");
         }
 
         if (App.GenericWebhookEnabled)
