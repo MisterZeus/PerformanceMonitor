@@ -372,6 +372,33 @@ public class ServerConnection : INotifyPropertyChanged
     }
 
     /// <summary>
+    /// Like <see cref="ResolveConnectionString"/> but targets an explicitly named database (#2407).
+    ///
+    /// <para>Separate from <see cref="ResolveUtilityConnectionString"/> because it answers a different
+    /// question. That one asks "where is the community proc installed" and is a per-server setting; this one
+    /// asks "which database must the connection be opened in for the read to be legal", which on Azure SQL
+    /// Database is always the database being read — it has no cross-database execution, so a proc taking a
+    /// @database_name parameter can only ever be handed its own.</para>
+    /// </summary>
+    public static string ResolveConnectionStringForDatabase(
+        ServerConnection server,
+        string databaseName,
+        CredentialService credentialService,
+        IProfileLookup? profileLookup)
+    {
+        var baseConnStr = ResolveConnectionString(server, credentialService, profileLookup);
+
+        if (string.IsNullOrWhiteSpace(databaseName))
+            return baseConnStr;
+
+        var builder = new SqlConnectionStringBuilder(baseConnStr)
+        {
+            InitialCatalog = databaseName
+        };
+        return builder.ConnectionString;
+    }
+
+    /// <summary>
     /// Builds the connection string with the given credentials.
     /// Used by tests for the server-self shape; production paths go through
     /// <see cref="ResolveConnectionString"/>, which supplies the resolved tuple.
