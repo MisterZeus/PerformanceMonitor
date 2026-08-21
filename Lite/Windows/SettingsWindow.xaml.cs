@@ -489,8 +489,10 @@ public partial class SettingsWindow : Window
     /// keeps this out of the scope of the <c>LiteSaveAlertSettings_PersistsEveryStaticItAssigns</c>
     /// drift guard, which is correct -- that guard's subject is the alert block.</para>
     ///
-    /// <para>AboutWindow's check stays unconditional on purpose. Opening Help &gt; About IS asking, so
-    /// the setting that governs the unsolicited call has no claim on the one the user requested.</para>
+    /// <para>AboutWindow's check stays unconditional on purpose. Opening About IS asking, so the setting
+    /// that governs the unsolicited call has no claim on the one the user requested. The tooltip says so,
+    /// and says it as "the sidebar's About button" rather than the "Help &gt; About" the title-bar and tray
+    /// strings claim, because Lite has no Help menu -- About is a sidebar button beside Settings.</para>
     /// </summary>
     private void LoadCheckForUpdates()
     {

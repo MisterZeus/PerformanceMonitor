@@ -172,7 +172,7 @@
                      alerting. Turning alerts off must not gray this out or claim it depends on them. -->
                 <CheckBox x:Name="CheckForUpdatesOnStartupCheckBox" Content="Check GitHub for a new version at startup" Margin="0,8,0,0"
                           Foreground="{DynamicResource ForegroundBrush}"
-                          ToolTip="Off = Lite never contacts github.com on its own. Help &gt; About still checks when you open it, and installs in place from there."/>
+                          ToolTip="Off = Lite never contacts github.com on its own. The sidebar's About button still checks when you open it, and installs in place from there."/>
                 <CheckBox x:Name="AlertsEnabledCheckBox" Content="Enable notifications" Margin="0,8,0,0"
                           Foreground="{DynamicResource ForegroundBrush}" Checked="AlertsEnabledCheckBox_Changed" Unchecked="AlertsEnabledCheckBox_Changed"/>
                 <CheckBox x:Name="NotifyConnectionCheckBox" Content="Connection lost / restored" Margin="20,6,0,0"
