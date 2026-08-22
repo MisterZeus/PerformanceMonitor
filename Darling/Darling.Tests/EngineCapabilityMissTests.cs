@@ -34,6 +34,12 @@ namespace Darling.Tests;
 /// <c>TempDbStatsCollector</c>'s), and its failure would say "update the list" rather than "look at the
 /// gate". What is worth pinning is that the derivation distinguishes an ENGINE gap from the fixable facts
 /// that are not one.</para>
+///
+/// <para><b>What none of it proves, and where that lives now.</b> Every gate this class can reach is fixed at
+/// test time, so every assertion here would hold just as well against a hard-coded set of gaps that happened
+/// to match today's gates — measured, not assumed: swapping the sweep for exactly such a list leaves this
+/// entire class green. <c>CollectorEngineCapabilityMovingGateTests</c> is the half that MOVES a gate and
+/// watches the answer move with it (#2518).</para>
 /// </summary>
 public sealed class CollectorEngineCapabilityTests
 {
@@ -221,6 +227,11 @@ public sealed class CollectorEngineCapabilityTests
     /// target shape would still answer correctly for today's Azure gates and would start over-claiming the
     /// moment a version- or msdb-shaped gate mattered, which is the failure
     /// <see cref="AFixableGate_IsNotReportedAsAnEngineGap"/> would then report from a distance.
+    /// <para>This is the FORWARD direction only, and it is a hand-written list: it says the sweep varies
+    /// these dimensions, not that these dimensions are everything the gates read. The converse lives in
+    /// <c>CollectorEngineCapabilitySweepDimensionTests</c>, which derives both halves — the facts read out of
+    /// each gate's IL, the facts varied out of the sweep's own output — so a gate written on an unswept fact
+    /// fails the build instead of silently manufacturing a permanent gap (#2518).</para>
     /// </summary>
     [Fact]
     public void TheSweep_VariesEveryDimensionTheGatesRead()
