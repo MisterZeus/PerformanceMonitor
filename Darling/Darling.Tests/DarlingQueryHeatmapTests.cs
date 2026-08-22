@@ -18,6 +18,7 @@ using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -75,9 +76,16 @@ public sealed class DarlingQueryHeatmapSurfaceAndSqlTests
             .ToArray();
 
         Assert.Equal(
-            new[] { "server_name", "hours_back", "metric", "database_name", "bucket_minutes", "limit" },
+            new[] { "server_name", "hours_back", "metric", "database_name", "bucket_minutes", "limit", "as_of" },
             p.Select(x => x.Item1).ToArray());
         Assert.All(p, x => Assert.True(x.Item2, $"{x.Item1} must be optional"));
+
+        /* #2495's anchor is LAST and shares the one description constant. Pinned by identity rather than by
+           name so the parameter cannot drift into a second wording of the same idea on one SKU. */
+        var anchor = method.GetParameters().Single(x => x.Name == "as_of");
+        Assert.Equal(
+            McpHelpers.AsOfDescription,
+            anchor.GetCustomAttribute<DescriptionAttribute>()!.Description);
     }
 
     /// <summary>
