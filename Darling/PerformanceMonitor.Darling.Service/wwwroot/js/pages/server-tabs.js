@@ -7,8 +7,13 @@
  */
 
 /*
- * The server page's TAB REGISTRY — the web port of the desktop viewer's per-server TabControl
+ * The server page's TAB REGISTRIES — the web port of the desktop viewer's per-server TabControl
  * (Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.xaml, ~65 TabItems across 38 partials).
+ *
+ * There are TWO, and serverTabsFor(card) picks between them from the fleet card's server-derived `is_postgres`
+ * (#2530). SERVER_TABS is the SQL Server registry and also the default for a card that makes no engine claim —
+ * the name is kept for that second job, because "no claim" has always rendered these tabs and still should.
+ * POSTGRES_TABS is the six-tab PostgreSQL registry; its own header says why six is the answer and not twelve.
  *
  * Every entry is `{ id, label, note?, build(server, ctx) }` and `build` returns an array of nodes, almost all of
  * them PANEL DESCRIPTORS run through the unmodified renderPanel (the #1563 seam): a `read` naming an MCP tool
@@ -33,7 +38,7 @@
  * here (query text, XML) build a <pre> through el() and never touch innerHTML.
  */
 
-import { el, readTool, mount, truncate, loadingStrip, errorStrip, emptyStrip, disclosure, noticeStrip } from "../util.js";
+import { el, readTool, mount, truncate, loadingStrip, errorStrip, emptyStrip, disclosure, noticeStrip, fmtMs } from "../util.js";
 import { renderPanel, VIZ } from "../panels.js";
 import { renderLineChart, SERIES_COLORS } from "../charts.js";
 
@@ -53,6 +58,29 @@ function xmlDisclosure(text) {
   return disclosure("XML capture (" + String(text).length.toLocaleString() + " chars)", el("pre", { class: "code" }, [text]), {
     max: 60,
   });
+}
+
+/**
+ * An array-valued cell — a blocking chain's databases, a lock cycle's PIDs. The generic path stringifies an
+ * array, which is nearly right for a populated one and renders an EMPTY one as a blank cell rather than as the
+ * "—" every other absent value on the page uses, so the two absences would not look alike.
+ */
+function listCell(values) {
+  return document.createTextNode(Array.isArray(values) && values.length ? values.join(", ") : "—");
+}
+
+/**
+ * A duration cell that honours the PostgreSQL collectors' −1 "not applicable" sentinel.
+ *
+ * −1 is deliberate on that side — 0 would read as "started this instant", which is a measurement rather than
+ * an absence — and it reaches the wire, because the reader coalesces the NULL rather than propagating it. The
+ * shared ms formatter would print "−1 ms", which reads as a measurement again, one row further on.
+ */
+function sentinelDuration(key) {
+  return (row) => {
+    const value = row[key];
+    return document.createTextNode(value == null || value < 0 ? "—" : fmtMs(value));
+  };
 }
 
 /* ─────────────────────────── composites ─────────────────────────── */
@@ -424,9 +452,18 @@ function table(title, read, params, rowsKey, columns, subtitle, emptyText, span 
   return renderPanel({ title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, span });
 }
 
-/** A stat-tile panel over a read's top-level object (dotted keys reach into a nested summary). */
-function stat(title, read, params, stats, subtitle, span = 1) {
-  return renderPanel({ title, subtitle, read, params, viz: "stat", stats, span });
+/**
+ * A stat-tile panel over a read's top-level object (dotted keys reach into a nested summary).
+ *
+ * `emptyText` is OPTIONAL here where table()'s and line()'s are required, and the asymmetry is the honest one:
+ * a read that always returns its summary object cannot reach the empty case, and forcing a sentence onto all
+ * thirty of those would be noise around the handful that need it. What needs it is a read whose HEALTHY answer
+ * is a data body carrying prose and none of the summary keys — get_pg_xmin_horizon's {status:"no_holder",
+ * finding} is the type — which is data, not the {status,message} envelope, so it reaches vizStat and renders
+ * as a row of em-dashes. vizStat spends this at exactly the all-null case; see the guard there.
+ */
+function stat(title, read, params, stats, subtitle, span = 1, emptyText) {
+  return renderPanel({ title, subtitle, read, params, viz: "stat", stats, span, emptyText });
 }
 
 /**
@@ -1272,9 +1309,401 @@ export const SERVER_TABS = [
   },
 ];
 
-/** The tab for an id, falling back to the first (Overview) — an unknown/absent id is a deep link, not an error. */
-export function findServerTab(id) {
-  return SERVER_TABS.find((t) => t.id === id) || SERVER_TABS[0];
+/* ─────────────────────────── the PostgreSQL tabs ─────────────────────────── */
+
+/**
+ * The PostgreSQL registry (#2530). SIX tabs against the SQL Server registry's twelve, and the difference is the
+ * design rather than a shortfall: parity was explicitly not the constraint. Bloat, wraparound, the xmin horizon
+ * and autovacuum have no SQL Server analogue and are what actually pages a PostgreSQL DBA; tempdb, Query Store,
+ * trace flags, plan cache and the system_health ring buffer have no PostgreSQL analogue, and rendering them at a
+ * PostgreSQL target is the defect this registry removes rather than a shape to reproduce.
+ *
+ * Every get_pg_* read the service serves lands on exactly one of these tabs, and a pin asserts it in both
+ * directions — derived from the dispatch, so a NEW PostgreSQL read cannot ship reachable only through MCP,
+ * which is how the first eight spent three releases. It has already caught one: #2539's
+ * get_pg_database_stats landed on dev while this was in review, and the pin refused the merge until the
+ * Activity tab showed it.
+ *
+ * THE ENGINE-NEUTRAL BORROWING, and why it is only three reads. get_collection_health, get_collection_log and
+ * get_analysis_findings read the collection log and the findings store — neither is a SQL Server collector's
+ * output — so they answer a PostgreSQL target honestly and are the same panels the SQL Server Overview and
+ * Collection Health tabs build. Nothing else is shared. get_server_summary and get_daily_summary LOOK
+ * engine-neutral and are not: they roll up SQL Server wait types, memory pressure and deadlocks, and at a
+ * PostgreSQL target they answer `unavailable` with a sentence about a collector that will never run.
+ */
+export const POSTGRES_TABS = [
+  {
+    id: "overview",
+    label: "Overview",
+    build: (server, ctx) => [
+      /* The vitals are the three Tier 0 outage predictors plus the backlog that feeds two of them, as tiles
+         rather than the tables the owning tabs carry: the question on a triage screen is "is anything wrong",
+         not "which table". Each read is fetched again by the tab that owns it — the same deliberate duplication
+         the SQL Server Overview makes with file I/O and findings. The cost is one read per tab actually opened;
+         the alternative is an Overview that cannot answer its own question. */
+      stat(
+        "Freeze Headroom",
+        "get_pg_wraparound_risk",
+        { server, hours: ctx.hours },
+        PG_WRAPAROUND_STATS,
+        ctx.label,
+        1,
+        "No freeze-headroom samples in this window."
+      ),
+      stat(
+        "xmin Horizon",
+        "get_pg_xmin_horizon",
+        { server, hours: ctx.hours },
+        PG_XMIN_STATS,
+        ctx.label,
+        1,
+        "Nothing held the xmin horizon back in this window — the healthy state, and the reason this tile is a sentence rather than three em-dashes."
+      ),
+      /* The counts are over the rows RETURNED, not over the database: the read ranks worst-first and caps at
+         `limit`, and table_count / past_threshold_count / growing_count are all computed after that cap. So the
+         subtitle says "worst 20" and the labels say "of those" — a tile reading "20 tables" on a server with
+         4,000 tables behind on vacuum would be the most reassuring wrong number on the page. */
+      stat(
+        "Autovacuum Backlog",
+        "get_pg_autovacuum_health",
+        { server, hours: ctx.hours, limit: 20 },
+        PG_AUTOVACUUM_STATS,
+        ctx.label + ", worst 20 tables",
+        1,
+        "No table has dead tuples, pending analyze work, inserts since its last vacuum, or autovacuum disabled. The collector records only tables with pending work, so this is the healthy answer rather than missing data."
+      ),
+      stat(
+        "Replication Slots",
+        "get_pg_replication_slots",
+        { server, hours: ctx.hours },
+        PG_SLOT_STATS,
+        ctx.label,
+        1,
+        "This server has no replication slots. A slot is the thing that retains WAL indefinitely, so none is one fewer way to fill a disk."
+      ),
+      table(
+        "Analysis Findings",
+        "get_analysis_findings",
+        { server, hours: ctx.hours },
+        "findings",
+        FINDING_COLUMNS,
+        ctx.label,
+        "No findings in this window. On a PostgreSQL target the analysis pass writes the three Tier 0 outage predictors — wraparound, the xmin horizon and replication-slot retention — and nothing else yet, so an empty grid here is narrower than it looks."
+      ),
+      /* The SQL Server registry gives collection health a tab of its own. Six tabs is not enough to spend one
+         on it, and on a PostgreSQL target it is the FIRST question anyone asks — eight collectors, several of
+         them gated off by major version or by Aurora-ness — so it lands on the Overview instead. One read,
+         three panels, for the reason fanout exists. */
+      ...fanout("get_collection_health", { server }, [
+        { title: "Sweep Pressure", subtitle: "trailing 7 days", viz: "stat", stats: SWEEP_STATS },
+        {
+          title: "Collectors",
+          subtitle: "trailing 7 days",
+          viz: "table",
+          rowsKey: "collectors",
+          columns: COLLECTOR_COLUMNS,
+          emptyText: "No collection log rows for this server yet.",
+        },
+        {
+          title: "Heaviest Collectors",
+          subtitle: "trailing 7 days",
+          viz: "table",
+          rowsKey: "sweep_pressure.heaviest_collectors",
+          columns: HEAVIEST_COLUMNS,
+          emptyText: "No per-collector timings recorded yet.",
+        },
+      ]),
+      table(
+        "Collection Log",
+        "get_collection_log",
+        { server, hours: ctx.hours, limit: 200 },
+        "runs",
+        COLLECTION_LOG_COLUMNS,
+        "individual runs, newest first, over the selected window",
+        "No collector runs in the selected window. A collector gated off for this engine writes no log row at all rather than a zero-row success, so an absence here is the gate working."
+      ),
+    ],
+  },
+
+  {
+    id: "activity",
+    label: "Activity",
+
+    /* HALF of this tab is Aurora-only, and only half. get_pg_blocking runs everywhere — including on
+       standbys, where a recovery conflict is blocking that happens nowhere else — while get_pg_top_queries
+       is fed by pg_statement_stats, whose AppliesTo gate is target.IsAurora, so it reads
+       aurora_stat_statements() and has no core-PostgreSQL equivalent in any version. Same treatment as the
+       Waits tab, for the same reason: the panel self-explains via not_collected, and the note says so before
+       the reader clicks. Saying it here rather than only in the panel matters more on THIS tab than on
+       Waits, because the rest of the tab does fill, so a reader could reasonably read one empty grid among
+       three as a fault. */
+    note:
+      "The blocking panels are collected at every PostgreSQL target, standbys included. Top Query Shapes is " +
+      "not: it comes from Amazon Aurora's aurora_stat_statements(), which core PostgreSQL has in no version, " +
+      "so on a stock PostgreSQL target that one panel is permanently empty and says so in its own words " +
+      "while the two above it keep working.",
+    build: (server, ctx) => [
+      /* One read, three panels, and the FIRST of them is the denominator. get_pg_blocking is a periodic SAMPLE,
+         not an event log: PostgreSQL records nothing unless asked, so "no chains" is ambiguous between a quiet
+         server and a collector that never ran, and only the capture counts separate them. Showing the chains
+         without the counts is the shape of answer this read was built to refuse. */
+      ...fanout("get_pg_blocking", { server, hours: ctx.hours, limit: 50 }, [
+        {
+          title: "Blocking Sampling",
+          subtitle: ctx.label + ", the denominator behind the two grids below",
+          viz: "stat",
+          stats: PG_BLOCKING_STATS,
+          span: 2,
+        },
+        {
+          title: "Blocking Chains",
+          subtitle: ctx.label + ", root blocker attributed",
+          viz: "table",
+          rowsKey: "chains",
+          columns: PG_BLOCKING_CHAIN_COLUMNS,
+          emptyText:
+            "No blocking chain was sampled in this window. Read that against the capture count above: with captures and no chains, nobody was blocked at any moment the collector looked.",
+        },
+        {
+          title: "Lock Cycles",
+          subtitle: ctx.label + ", mutual waits with no root",
+          viz: "table",
+          rowsKey: "cycles",
+          columns: PG_BLOCKING_CYCLE_COLUMNS,
+          emptyText:
+            "No lock cycle was sampled in this window — the healthy state. A cycle has no root blocker to attribute, which is why it is a separate grid rather than a chain with a missing root.",
+        },
+      ]),
+      table(
+        "Top Query Shapes",
+        "get_pg_top_queries",
+        { server, hours: ctx.hours, limit: 20 },
+        "queries",
+        PG_TOP_QUERY_COLUMNS,
+        ctx.label + ", by total execution time",
+        "No query statistics in this window."
+      ),
+      /* Directly UNDER the query shapes, because that is the question it answers (#2539). A statement whose
+         time makes no sense from its row count usually spilled, and pg_stat_database's temp counters are the
+         only evidence of that we collect — the statement stats themselves cannot see it. The deadlock and
+         rollback counters ride along because they come from the same free read; the raw blks_hit / blks_read
+         columns do not, because `cache_hit_pct` and the read's own `cache_finding` say what they are for
+         without a third and fourth column of block counts to be misread as a workload measure. */
+      ...fanout("get_pg_database_stats", { server, hours: ctx.hours, limit: 20 }, [
+        {
+          title: "Database Activity",
+          subtitle: ctx.label + ", totals over the databases returned",
+          viz: "stat",
+          stats: PG_DATABASE_STATS,
+          span: 2,
+          emptyText: "No database recorded transactions, block accesses, temp files or deadlocks in this window.",
+        },
+        {
+          title: "By Database",
+          subtitle: ctx.label + ", biggest spiller first",
+          viz: "table",
+          rowsKey: "databases",
+          columns: PG_DATABASE_COLUMNS,
+          emptyText:
+            "No per-database activity in this window. These are windowed DIFFERENCES, so a single snapshot is not enough — the panel above says which of the two it is.",
+        },
+      ]),
+    ],
+  },
+
+  {
+    id: "vacuum",
+    label: "Vacuum",
+    note:
+      "Three reads, one tab, on purpose. An old xmin horizon starves vacuum of anything it is allowed to " +
+      "reclaim; starved vacuum falls behind on freezing; freezing falling behind is what ends in wraparound. " +
+      "Read alone each panel looks survivable — a holder here, a backlog there, plenty of XIDs left — and " +
+      "together they are one escalating story, in the order they are shown. Splitting them across three tabs " +
+      "would hide the only thing about them worth seeing.",
+    build: (server, ctx) => [
+      /* Ordered by CAUSE, not by severity: horizon, then backlog, then headroom. */
+      ...fanout("get_pg_xmin_horizon", { server, hours: ctx.hours }, [
+        {
+          title: "What Holds the Horizon",
+          subtitle: ctx.label,
+          viz: "stat",
+          stats: PG_XMIN_STATS,
+          span: 2,
+          emptyText:
+            "Nothing held the xmin horizon back in this window — the healthy state. Vacuum can reclaim everything it finds.",
+        },
+        {
+          title: "Horizon Holders",
+          subtitle: ctx.label + ", every cause seen, not only the current winner",
+          viz: "table",
+          rowsKey: "holders",
+          columns: PG_XMIN_COLUMNS,
+          emptyText:
+            "No holder in this window. Four unrelated causes produce the same symptom — a long-running session, a replication slot, standby feedback, a prepared transaction — so this grid names the cause rather than repeating that the horizon is old.",
+        },
+      ]),
+      ...fanout("get_pg_autovacuum_health", { server, hours: ctx.hours, limit: 20 }, [
+        {
+          title: "Autovacuum Backlog",
+          subtitle: ctx.label + ", worst 20 tables",
+          viz: "stat",
+          stats: PG_AUTOVACUUM_STATS,
+          span: 2,
+          emptyText:
+            "No table has dead tuples, pending analyze work, inserts since its last vacuum, or autovacuum disabled — the healthy answer.",
+        },
+        {
+          title: "Tables Behind",
+          subtitle: ctx.label + ", ranked by how far past each table's own threshold",
+          viz: "table",
+          rowsKey: "tables",
+          columns: PG_AUTOVACUUM_COLUMNS,
+          emptyText:
+            "No table is behind on vacuum or analyze. The collector records only tables with pending work, so an empty grid is the healthy case rather than a collector that has not run.",
+        },
+      ]),
+      ...fanout("get_pg_wraparound_risk", { server, hours: ctx.hours }, [
+        {
+          title: "Freeze Headroom",
+          subtitle: ctx.label,
+          viz: "stat",
+          stats: PG_WRAPAROUND_STATS,
+          span: 1,
+          emptyText: "No freeze-headroom samples in this window.",
+        },
+        {
+          /* The percentages above mean nothing without these four, and they are constants the READ ships, so
+             that the browser is not the third place in this repo that decides where the failsafe engages. */
+          title: "Where the Thresholds Are",
+          subtitle: "PostgreSQL's own, not ours",
+          viz: "stat",
+          stats: PG_WRAPAROUND_THRESHOLD_STATS,
+          span: 1,
+        },
+        {
+          title: "Per-Database Headroom",
+          subtitle: ctx.label + ", XID and MultiXact freeze headroom",
+          viz: "table",
+          rowsKey: "databases",
+          columns: PG_WRAPAROUND_COLUMNS,
+          emptyText:
+            "No per-database freeze headroom in this window. Both counters are tracked: a database can be comfortable on XIDs and in trouble on MultiXacts, which is why they are separate columns rather than one worst-of.",
+        },
+      ]),
+    ],
+  },
+
+  {
+    id: "waits",
+    label: "Waits",
+    /* THE DECISION, argued in the PR: this tab is SHOWN at every PostgreSQL target, including the stock ones
+       where its read can never have content. get_pg_wait_stats reads aurora_stat_system_waits(), which core
+       PostgreSQL has in no version, so on `postgres` the panel is permanently empty — and it is permanently
+       empty WITH A SENTENCE, because #2532 taught the read to answer that state with `not_collected` naming
+       the server, the engine, the collector and the exact Aurora surface, and saying "and never will". A panel
+       that explains itself is not the defect #2530 was filed about; twelve unexplained blank SQL Server tabs
+       were. Hiding it would buy a tidier stock-PostgreSQL page at the price of a tab set that changes shape
+       between two PostgreSQL servers in one fleet, and of making the one Aurora-specific capability we have
+       invisible to the operator best placed to want it. */
+    note:
+      "Wait-event sampling on PostgreSQL is an Amazon Aurora feature: it comes from " +
+      "aurora_stat_system_waits(), which core PostgreSQL has in no version. On a stock PostgreSQL target this " +
+      "tab is permanently empty and the panel says so in its own words. The tab is here anyway so that the tab " +
+      "set does not change shape between two PostgreSQL servers in the same fleet.",
+    build: (server, ctx) => [
+      table(
+        "Wait Events",
+        "get_pg_wait_stats",
+        { server, hours: ctx.hours, limit: 20 },
+        "waits",
+        PG_WAIT_COLUMNS,
+        ctx.label + ", background-worker and client-idle waits already excluded by the collector",
+        "No wait events in this window."
+      ),
+    ],
+  },
+
+  {
+    id: "io",
+    label: "I/O",
+    note:
+      "PostgreSQL reports I/O by BACKEND TYPE, object and context rather than by file, so there is no " +
+      "per-file grid here and the shape is deliberately not the SQL Server one. On Aurora the whole write side " +
+      "is NULL — backends there do not write data files, storage does — so the write columns read as blank " +
+      "rather than as zero, which would claim a measurement never taken.",
+    build: (server, ctx) => [
+      ...fanout("get_pg_io_stats", { server, hours: ctx.hours, limit: 20 }, [
+        {
+          title: "I/O Summary",
+          subtitle: ctx.label + ", differenced across the window",
+          viz: "stat",
+          stats: PG_IO_SUMMARY_STATS,
+          span: 2,
+          emptyText: "No I/O activity recorded in this window.",
+        },
+        {
+          title: "By Backend, Object and Context",
+          subtitle: ctx.label + ", busiest by read time first",
+          viz: "table",
+          rowsKey: "combinations",
+          columns: PG_IO_COLUMNS,
+          emptyText:
+            "No I/O in this window. pg_stat_io needs PostgreSQL 16 or newer; on an older major the collector does not run at all, and the Collection Health panels on the Overview tab are where that shows.",
+        },
+      ]),
+    ],
+  },
+
+  {
+    id: "replication",
+    label: "Replication",
+    build: (server, ctx) => [
+      ...fanout("get_pg_replication_slots", { server, hours: ctx.hours }, [
+        {
+          title: "Slot Summary",
+          subtitle: ctx.label,
+          viz: "stat",
+          stats: PG_SLOT_STATS,
+          span: 2,
+          emptyText:
+            "This server has no replication slots. A slot is the thing that retains WAL indefinitely, so none is one fewer way to fill a disk.",
+        },
+        {
+          title: "Slots",
+          subtitle: ctx.label + ", most WAL retained first",
+          viz: "table",
+          rowsKey: "slots",
+          columns: PG_SLOT_COLUMNS,
+          emptyText:
+            "No replication slots on this server. An inactive slot retains WAL forever and is the usual way a PostgreSQL instance fills its disk with nobody watching, so an empty grid here is good news.",
+        },
+      ]),
+    ],
+  },
+];
+
+/**
+ * The tab registry for a fleet card — the ONE place the engine branch lives.
+ *
+ * Only a POSITIVE PostgreSQL claim moves a server off the SQL Server registry. `is_postgres` is derived
+ * server-side from `collect.servers.engine_kind` (#2530) and is false for a NULL kind, for a token this build
+ * does not recognise, and for a card that never arrived — every one of which means "no claim", not "SQL
+ * Server". Defaulting an unclaimed server to the SQL Server tabs is the pre-#2530 behaviour, unchanged, and it
+ * is the right default while the claim is absent: a PostgreSQL target stamps its kind on its first connect, so
+ * the unclaimed population is servers that have not connected since the rung landed, and guessing PostgreSQL
+ * from an absence would break every one of them. The browser does not re-derive the boolean (R1) — the card
+ * carries it, decoded on the server through MonitoredEngineKind.
+ */
+export function serverTabsFor(card) {
+  return card && card.is_postgres === true ? POSTGRES_TABS : SERVER_TABS;
+}
+
+/** The tab for an id within a registry, falling back to the first (Overview) — an unknown/absent id is a deep
+ *  link, not an error. `overview`, `activity`, `waits` and `io` exist in BOTH registries, so those deep links
+ *  survive a server turning out to be the other engine; the rest fall back rather than break. */
+export function findServerTab(id, tabs) {
+  const registry = tabs || SERVER_TABS;
+  return registry.find((t) => t.id === id) || registry[0];
 }
 
 /** The tab's note as a rendered strip, or null. Kept here so the shell has no opinion about its wording. */
@@ -2073,4 +2502,272 @@ const HEAVIEST_COLUMNS = [
   { key: "frequency_minutes", label: "Every (min)", format: "num1" },
   { key: "amortized_ms_per_minute", label: "ms/min", format: "num1" },
   { key: "pct_of_sweep_budget_per_run", label: "% of sweep", format: "num1" },
+];
+
+/* ─────────────────────────── PostgreSQL stat descriptors ─────────────────────────── */
+
+/* Severity reaches these tiles and grids as the read's own token — `critical_far_past_threshold`,
+   `warning_inactive_and_growing`, `ok`. It is NOT translated here. Two lexicons for one vocabulary drift, and
+   the one that drifts is never the one being read; the tokens are also what the MCP surface already hands an
+   agent, so an operator reading the screen and an agent reading the tool see the same word. */
+
+const PG_WRAPAROUND_STATS = [
+  { key: "worst_database", label: "Closest to wraparound", format: "text", small: true },
+  { key: "worst_severity", label: "Severity", format: "text", small: true },
+  { key: "worst_pct_toward_wraparound", label: "Toward wraparound (%)", format: "num2" },
+];
+
+/* PostgreSQL's own thresholds, shipped by the read as constants. They are here because a percentage with no
+   scale is not a measurement: 74.5% sounds comfortable and is where the failsafe engages. */
+const PG_WRAPAROUND_THRESHOLD_STATS = [
+  { key: "thresholds.failsafe_engages_around_pct", label: "Failsafe engages (%)", format: "num1" },
+  { key: "thresholds.server_warnings_begin_around_pct", label: "Server warns (%)", format: "num1" },
+  { key: "thresholds.writes_stop_at_pct", label: "Writes stop (%)", format: "num2" },
+  {
+    key: "thresholds.anti_wraparound_vacuum_forced_at_pct_of_freeze_max_age",
+    label: "Forced vacuum (% of freeze_max_age)",
+    format: "num1",
+  },
+];
+
+const PG_XMIN_STATS = [
+  { key: "winning_source", label: "Holding the horizon", format: "text", small: true },
+  { key: "winning_holder", label: "Holder", format: "text", small: true },
+  { key: "winning_xmin_age", label: "xmin age (XIDs)", format: "int" },
+];
+
+const PG_SLOT_STATS = [
+  { key: "slot_count", label: "Slots", format: "int" },
+  { key: "inactive_count", label: "Inactive", format: "int" },
+  { key: "total_retained_wal_gb", label: "Retained WAL (GB)", format: "num2" },
+  { key: "worst_slot", label: "Worst slot", format: "text", small: true },
+  { key: "worst_severity", label: "Severity", format: "text", small: true },
+];
+
+const PG_AUTOVACUUM_STATS = [
+  { key: "table_count", label: "Tables returned", format: "int" },
+  { key: "past_threshold_count", label: "Past threshold (of those)", format: "int" },
+  { key: "growing_count", label: "Still growing (of those)", format: "int" },
+  { key: "autovacuum_disabled_count", label: "Autovacuum off (of those)", format: "int" },
+  { key: "worst_table", label: "Worst table", format: "text", small: true },
+  { key: "worst_severity", label: "Severity", format: "text", small: true },
+];
+
+/* The denominator tiles. captures_total is the number of times the collector LOOKED; without it a zero-row
+   chain grid cannot be told from a collector that never ran, and both are an absence of rows. */
+const PG_BLOCKING_STATS = [
+  { key: "captures_total", label: "Captures", format: "int" },
+  { key: "captures_with_blocking", label: "With blocking", format: "int" },
+  { key: "pct_of_captures_with_blocking", label: "Of captures (%)", format: "num1" },
+  { key: "worst_chain_victims", label: "Worst chain victims", format: "int" },
+  { key: "worst_chain_root_state", label: "Root state", format: "text", small: true },
+  { key: "cycles_sampled", label: "Cycles", format: "int" },
+];
+
+/* Every total here is summed over the rows the read's LIMIT let through, and the read names that in the
+   field itself (`cache_hit_pct_of_returned`), so the labels do too rather than promising a cluster figure the
+   number structurally is not. `limit_reached` is what turns that caveat into something a reader can act on. */
+const PG_DATABASE_STATS = [
+  { key: "database_count", label: "Databases returned", format: "int" },
+  { key: "total_temp_files", label: "Temp files", format: "int" },
+  { key: "total_temp_bytes", label: "Temp bytes", format: "int" },
+  { key: "top_spiller", label: "Biggest spiller", format: "text", small: true },
+  { key: "total_deadlocks", label: "Deadlocks", format: "int" },
+  { key: "cache_hit_pct_of_returned", label: "Cache hit % (of returned)", format: "num2" },
+  { key: "limit_reached", label: "Limit reached", format: "bool" },
+  /* Named on the tile rather than only per row: every total beside it is a LOWER BOUND when this is true,
+     and a reader has to see that before drawing a conclusion from any of them. */
+  { key: "statistics_were_reset_in_window", label: "Stats reset in window", format: "bool" },
+];
+
+const PG_IO_SUMMARY_STATS = [
+  { key: "combination_count", label: "Combinations", format: "int" },
+  { key: "total_reads", label: "Reads", format: "int" },
+  { key: "total_read_time_ms", label: "Read time", format: "ms" },
+  { key: "busiest_by_read_time", label: "Busiest", format: "text", small: true },
+  { key: "write_counters_tracked_anywhere", label: "Write counters tracked", format: "bool" },
+];
+
+/* ─────────────────────────── PostgreSQL column descriptors ─────────────────────────── */
+
+const PG_WAIT_COLUMNS = [
+  { key: "wait_type", label: "Type" },
+  { key: "wait_event", label: "Event" },
+  { key: "total_wait_time_ms", label: "Total Wait", format: "ms" },
+  { key: "waits", label: "Waits", format: "int" },
+  /* num2 rather than ms: the average is routinely well under a millisecond, and fmtMs rounds those to "0 ms",
+     which reads as "no wait" rather than as the small number it is. */
+  { key: "avg_wait_time_ms", label: "Avg Wait (ms)", format: "num2" },
+  { key: "pct_of_total_wait", label: "% of Wait", format: "num1" },
+];
+
+/* queryid, calls and the three time columns are the answer; the block counters are not on this grid. Temp
+   blocks written IS, because a spill is the explanation for a statement whose time makes no sense from its
+   row count, and it is the one counter PostgreSQL exposes that changes what you would do next. */
+const PG_TOP_QUERY_COLUMNS = [
+  { key: "queryid", label: "Query ID", mono: true },
+  { key: "calls", label: "Calls", format: "int" },
+  { key: "total_exec_time_ms", label: "Total", format: "ms" },
+  { key: "avg_exec_time_ms", label: "Avg", format: "ms" },
+  /* A high-water mark over the whole retained history, not a window maximum — the read says so, and the label
+     says so here, because a "Max" beside two window-scoped columns would otherwise be read as one of them. */
+  { key: "max_exec_time_ms", label: "Max (all time)", format: "ms" },
+  { key: "pct_of_total_time", label: "% of Time", format: "num1" },
+  { key: "rows_returned", label: "Rows", format: "int" },
+  { key: "temp_blks_written", label: "Temp Blocks Written", format: "int" },
+  { key: "wal_bytes", label: "WAL (bytes)", format: "int" },
+  { key: "max_exec_peakmem_bytes", label: "Peak Mem (bytes)", format: "int" },
+  { key: "query_text", label: "Query", wrap: true, render: (row) => codeDisclosure(row.query_text) },
+];
+
+const PG_BLOCKING_CHAIN_COLUMNS = [
+  { key: "captured_at", label: "When", format: "time" },
+  { key: "root_pid", label: "Root PID", format: "int" },
+  { key: "databases", label: "Databases", render: (row) => listCell(row.databases) },
+  { key: "root_username", label: "User" },
+  { key: "root_application", label: "Application", wrap: true },
+  { key: "root_state", label: "Root State" },
+  { key: "root_is_idle_in_transaction", label: "Idle in Txn", format: "bool" },
+  { key: "root_xact_duration_ms", label: "Txn Age", render: sentinelDuration("root_xact_duration_ms") },
+  { key: "total_victims", label: "Victims", format: "int" },
+  { key: "direct_victims", label: "Direct", format: "int" },
+  { key: "max_chain_depth", label: "Depth", format: "int" },
+  { key: "worst_victim_wait_ms", label: "Worst Wait", render: sentinelDuration("worst_victim_wait_ms") },
+  /* Null here means "cannot tell how many samples this root appeared in", not one — the read carries the
+     reason in samples_as_root_note, which is why this renders as "—" rather than as 1. */
+  { key: "samples_as_root", label: "Samples as Root", format: "int" },
+  { key: "root_query", label: "Root Query", wrap: true, render: (row) => codeDisclosure(row.root_query) },
+  { key: "recommended_action", label: "Action", wrap: true },
+];
+
+const PG_BLOCKING_CYCLE_COLUMNS = [
+  { key: "captured_at", label: "When", format: "time" },
+  { key: "participant_count", label: "Participants", format: "int" },
+  { key: "pids", label: "PIDs", render: (row) => listCell(row.pids) },
+  { key: "database", label: "Database" },
+  { key: "application", label: "Application", wrap: true },
+  { key: "blocked_behind_count", label: "Queued Behind", format: "int" },
+  { key: "blocked_behind_pids", label: "Queued PIDs", render: (row) => listCell(row.blocked_behind_pids) },
+  { key: "finding", label: "Finding", wrap: true },
+];
+
+const PG_AUTOVACUUM_COLUMNS = [
+  { key: "database_name", label: "Database" },
+  { key: "table_name", label: "Table" },
+  { key: "severity", label: "Severity" },
+  { key: "dead_tuples", label: "Dead Tuples", format: "int" },
+  { key: "vacuum_threshold", label: "Vacuum At", format: "int" },
+  /* The headline number: 1.0 means autovacuum should be triggering right now. Null where the table has never
+     been analyzed or the collector had no threshold to report — a ratio invented there would rank a table
+     nothing is known about above tables that have been measured. */
+  { key: "threshold_ratio", label: "× Vacuum Threshold", format: "num2" },
+  { key: "dead_tuples_growing", label: "Growing", format: "bool" },
+  { key: "dead_tuple_change", label: "Change", format: "int" },
+  { key: "mods_since_analyze", label: "Mods Since Analyze", format: "int" },
+  { key: "analyze_threshold_ratio", label: "× Analyze Threshold", format: "num2" },
+  { key: "inserts_since_vacuum", label: "Inserts Since Vacuum", format: "int" },
+  { key: "autovacuum_disabled", label: "AV Disabled", format: "bool" },
+  { key: "never_autovacuumed", label: "Never AV'd", format: "bool" },
+  { key: "total_gb", label: "Size (GB)", format: "num2" },
+  { key: "last_autovacuum", label: "Last Autovacuum", format: "time" },
+  { key: "last_autoanalyze", label: "Last Autoanalyze", format: "time" },
+];
+
+/* Both counters, side by side and never merged into a worst-of: XIDs and MultiXacts wrap independently, a
+   database can be comfortable on one and in trouble on the other, and the remedies differ. */
+const PG_WRAPAROUND_COLUMNS = [
+  { key: "database_name", label: "Database" },
+  { key: "severity", label: "Severity" },
+  { key: "frozen_xid_age", label: "Frozen XID Age", format: "int" },
+  { key: "xids_remaining", label: "XIDs Left", format: "int" },
+  { key: "pct_toward_wraparound", label: "% to Wraparound", format: "num2" },
+  { key: "pct_toward_emergency_vacuum", label: "% to Emergency Vacuum", format: "num1" },
+  { key: "window_peak_frozen_xid_age", label: "Peak Age (window)", format: "int" },
+  { key: "freezing_is_keeping_up", label: "Keeping Up", format: "bool" },
+  { key: "min_multixid_age", label: "MultiXact Age", format: "int" },
+  { key: "multixids_remaining", label: "MultiXacts Left", format: "int" },
+  { key: "pct_toward_multixact_wraparound", label: "% to MultiXact Wraparound", format: "num2" },
+  { key: "pct_toward_multixact_emergency", label: "% to MultiXact Emergency", format: "num1" },
+  { key: "allows_connections", label: "Connectable", format: "bool" },
+  { key: "measured_at", label: "Measured", format: "time" },
+];
+
+/* Every cause, not only the current winner. Four unrelated things produce "autovacuum runs, reports success,
+   reclaims nothing", each with a different fix, so `source` and `remedy` are the columns that matter and
+   `xmin_age` on its own is the one that leaves the reader where they started. */
+const PG_XMIN_COLUMNS = [
+  { key: "source", label: "Source" },
+  { key: "is_currently_winning", label: "Winning", format: "bool" },
+  { key: "xmin_age", label: "xmin Age", format: "int" },
+  { key: "peak_xmin_age", label: "Peak Age", format: "int" },
+  { key: "holder", label: "Holder", wrap: true },
+  { key: "detail", label: "Detail", wrap: true },
+  { key: "samples_as_winner", label: "Samples Winning", format: "int" },
+  { key: "samples", label: "Samples", format: "int" },
+  { key: "pct_of_window_winning", label: "% of Window", format: "num1" },
+  { key: "measured_at", label: "Measured", format: "time" },
+  { key: "remedy", label: "Remedy", wrap: true },
+];
+
+const PG_IO_COLUMNS = [
+  { key: "backend_type", label: "Backend" },
+  { key: "object_type", label: "Object" },
+  { key: "context", label: "Context" },
+  { key: "context_meaning", label: "Means", wrap: true },
+  { key: "reads", label: "Reads", format: "int" },
+  { key: "read_time_ms", label: "Read Time", format: "ms" },
+  { key: "avg_read_ms", label: "Avg Read (ms)", format: "num2" },
+  { key: "pct_of_total_read_time", label: "% of Read Time", format: "num1" },
+  { key: "hits", label: "Hits", format: "int" },
+  { key: "hit_pct", label: "Hit %", format: "num1" },
+  { key: "extends", label: "Extends", format: "int" },
+  { key: "evictions", label: "Evictions", format: "int" },
+  { key: "reuses", label: "Reuses", format: "int" },
+  /* Blank rather than zero on Aurora, where backends do not write data files and pg_stat_io's whole write side
+     is NULL. The read preserves the NULL and the "bool" beside it says which it is, so a blank cell here is
+     "not measured" and never "measured zero". */
+  { key: "writes", label: "Writes", format: "int" },
+  { key: "write_time_ms", label: "Write Time", format: "ms" },
+  { key: "write_counters_tracked", label: "Writes Tracked", format: "bool" },
+  { key: "stats_reset", label: "Stats Reset", format: "time" },
+];
+
+/* The read's own `*_finding` prose travels beside each number, because none of these three is actionable
+   from the figure alone — a 99% cache hit ratio is meaningless without knowing the working set, and a
+   rollback ratio is a fault only against what the application is supposed to do. */
+const PG_DATABASE_COLUMNS = [
+  { key: "database", label: "Database" },
+  { key: "temp_files", label: "Temp Files", format: "int" },
+  { key: "temp_bytes", label: "Temp Bytes", format: "int" },
+  { key: "avg_temp_file_bytes", label: "Avg Temp File (bytes)", format: "int" },
+  { key: "spill_finding", label: "Spills", wrap: true },
+  { key: "cache_hit_pct", label: "Cache Hit %", format: "num2" },
+  { key: "cache_finding", label: "Cache", wrap: true },
+  { key: "deadlocks", label: "Deadlocks", format: "int" },
+  { key: "xact_commit", label: "Commits", format: "int" },
+  { key: "xact_rollback", label: "Rollbacks", format: "int" },
+  { key: "rollback_pct", label: "Rollback %", format: "num2" },
+  { key: "rollback_finding", label: "Rollbacks", wrap: true },
+  /* The reset evidence. Without it every total in the row is a lower bound and nothing on screen says so. */
+  { key: "counters_were_reset", label: "Reset", format: "bool" },
+  { key: "reset_note", label: "Reset Note", wrap: true },
+  { key: "sample_count", label: "Samples", format: "int" },
+];
+
+const PG_SLOT_COLUMNS = [
+  { key: "slot_name", label: "Slot" },
+  { key: "severity", label: "Severity" },
+  { key: "slot_type", label: "Type" },
+  { key: "plugin", label: "Plugin" },
+  { key: "database_name", label: "Database" },
+  { key: "is_active", label: "Active", format: "bool" },
+  { key: "wal_status", label: "WAL Status" },
+  { key: "retained_wal_gb", label: "Retained WAL (GB)", format: "num2" },
+  { key: "retained_wal_growth_gb_per_hour", label: "Growth (GB/h)", format: "num2" },
+  { key: "safe_wal_size_bytes", label: "Safe WAL (bytes)", format: "int" },
+  { key: "xmin_age", label: "xmin Age", format: "int" },
+  { key: "catalog_xmin_age", label: "Catalog xmin Age", format: "int" },
+  { key: "inactive_since", label: "Inactive Since", format: "time" },
+  { key: "invalidation_reason", label: "Invalidated", wrap: true },
+  { key: "conflicting", label: "Conflicting", format: "bool" },
 ];

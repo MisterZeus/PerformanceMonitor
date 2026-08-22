@@ -264,9 +264,11 @@ public sealed class MonitoredEngineKindStoreTests
 
     /// <summary>
     /// The serialized contract, which is what <c>docs/uat-onboarding.md</c> §3.4 named as the blocker: the
-    /// card the browser and <c>get_fleet_overview</c> both receive carries the raw token AND the two derived
-    /// booleans. Raw because a UI that LABELS the engine needs the word; derived because a UI that CHOOSES a
-    /// tab set should not have to know the vocabulary's spelling.
+    /// card the browser and <c>get_fleet_overview</c> both receive carries the raw token, the two derived
+    /// booleans, and the token's DESCRIPTION. Raw because a consumer may want the vocabulary itself; derived
+    /// because a UI that CHOOSES a tab set should not have to know the vocabulary's spelling; described
+    /// because a UI that LABELS the engine should not have to own a second copy of the words — which the web
+    /// server page briefly did, in three JavaScript string comparisons, before this field existed.
     ///
     /// <para>The unknown card is asserted alongside deliberately: <c>engine_kind</c> must serialize as JSON
     /// null with both booleans false, so a browser sees "no signal" rather than a default that reads as a
@@ -289,6 +291,7 @@ public sealed class MonitoredEngineKindStoreTests
         JsonAssert.Contains("\"engine_kind\": \"aurora-postgres\"", auroraJson);
         JsonAssert.Contains("\"is_postgres\": true", auroraJson);
         JsonAssert.Contains("\"is_aurora\": true", auroraJson);
+        JsonAssert.Contains("\"engine_description\": \"Aurora PostgreSQL\"", auroraJson);
 
         /* A PostgreSQL target has no SQL Server edition at all, and the card says so rather than reporting a
            zero that would read as an edition. */
@@ -299,6 +302,30 @@ public sealed class MonitoredEngineKindStoreTests
         JsonAssert.Contains("\"engine_kind\": null", unknownJson);
         JsonAssert.Contains("\"is_postgres\": false", unknownJson);
         JsonAssert.Contains("\"is_aurora\": false", unknownJson);
+        /* NULL, not "an unrecognised engine". A surface showing this has nothing to say about a server whose
+           engine was never stamped, and the describer's absent-token wording would read as a finding about the
+           server rather than about the store. The distinction only exists because the DESCRIPTION is composed
+           where the token is decoded; a browser mapping tokens itself would have had to invent it. */
+        JsonAssert.Contains("\"engine_description\": null", unknownJson);
+
+        /* And the third answer, which is neither of the two above: a token this build has never heard of — a
+           store written by a NEWER build. The booleans stay false, because an unknown token is not a claim
+           about either engine. The DESCRIPTION is the token itself rather than DescribeEngineKind's
+           "an unrecognised engine": that phrase is worded to sit mid-sentence in the capability messages and
+           reads as the wrong part of speech as a UI label, and the token is the more useful of the two anyway,
+           being the string an operator would search their own store for. */
+        var future = new FleetServerCard
+        {
+            ServerId = 3,
+            DisplayName = "future",
+            ServerName = "future",
+            EngineKind = "cockroach",
+        };
+        var futureJson = System.Text.Json.JsonSerializer.Serialize(future, DarlingFleetReader.JsonOptions);
+        JsonAssert.Contains("\"engine_kind\": \"cockroach\"", futureJson);
+        JsonAssert.Contains("\"engine_description\": \"cockroach\"", futureJson);
+        JsonAssert.Contains("\"is_postgres\": false", futureJson);
+        JsonAssert.Contains("\"is_aurora\": false", futureJson);
     }
 
     /* ---------------- gated live E2E: the UPGRADE, not just a fresh store ---------------- */

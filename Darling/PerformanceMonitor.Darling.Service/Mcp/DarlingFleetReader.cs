@@ -820,6 +820,35 @@ public sealed class FleetServerCard
     /// targets and SQL Server tabs to SQL Server targets branches on THIS.</para></summary>
     [JsonPropertyName("engine_kind")] public string? EngineKind { get; init; }
 
+    /// <summary>How <see cref="EngineKind"/> reads in a sentence — "SQL Server", "PostgreSQL", "Aurora
+    /// PostgreSQL" — or null when the store has made no claim.
+    ///
+    /// <para>On the card because <see cref="MonitoredEngineKind.DescribeEngineKind"/> is deliberately the
+    /// single copy of those words, and a browser mapping three tokens to three strings itself would be a
+    /// second table in a language the first cannot be shared with. The web server page had exactly that for
+    /// the length of one review round.</para>
+    ///
+    /// <para>DERIVED rather than assigned, so it cannot be forgotten: every card is built by an object
+    /// initializer, and a settable field would be null on any card whose builder did not think of it —
+    /// including one added later on a path nobody re-reads.</para>
+    ///
+    /// <para><b>Three answers, and the third is the interesting one.</b> An ABSENT kind is null: a surface has
+    /// nothing to say about a server whose engine was never stamped, and no badge is better than a badge
+    /// describing the store's silence as a property of the server. A RECOGNISED token gets
+    /// <see cref="MonitoredEngineKind.DescribeEngineKind"/>'s words. A token this build has never heard of —
+    /// a store written by a NEWER build — gets the token back verbatim, NOT the describer's
+    /// "an unrecognised engine": that phrase is worded to sit mid-sentence in the capability messages, and as
+    /// a label beside "SQL Server" and "Aurora PostgreSQL" it reads as the wrong part of speech. The raw token
+    /// is also the more useful of the two, being the string an operator would search their own store for. It
+    /// is deliberately not mapped onto a default, which is the whole reason the describer refuses to guess in
+    /// the first place.</para>
+    /// </summary>
+    [JsonPropertyName("engine_description")]
+    public string? EngineDescription =>
+        string.IsNullOrWhiteSpace(EngineKind) ? null
+        : MonitoredEngineKind.IsKnown(EngineKind) ? MonitoredEngineKind.DescribeEngineKind(EngineKind)
+        : EngineKind.Trim();
+
     /// <summary>True when this server is PostgreSQL (Aurora or stock) — derived from
     /// <see cref="EngineKind"/>, so a consumer never has to know the token vocabulary. False when the kind is
     /// unknown: absence of a claim, not a claim of SQL Server.</summary>
