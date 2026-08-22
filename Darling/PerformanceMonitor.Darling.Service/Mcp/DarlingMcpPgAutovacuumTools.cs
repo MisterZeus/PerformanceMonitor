@@ -80,6 +80,16 @@ public sealed class DarlingMcpPgAutovacuumTools
 
             if (rows.Count == 0)
             {
+                /* "No table on this server has dead tuples" is the healthy answer for a PostgreSQL target
+                   and a fabricated one for a SQL Server target — the collector has never run there. Ask the
+                   engine before making the claim (#2532). */
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_autovacuum_stats");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return JsonSerializer.Serialize(new
                 {
                     server = resolved.ServerName,

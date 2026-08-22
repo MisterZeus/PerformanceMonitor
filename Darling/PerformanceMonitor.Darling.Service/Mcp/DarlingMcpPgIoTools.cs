@@ -69,6 +69,16 @@ public sealed class DarlingMcpPgIoTools
 
             if (rows.Count == 0)
             {
+                /* Ask the engine BEFORE offering the idle-server reading (#2532). "No combination recorded
+                   activity" is a statement about a PostgreSQL instance; said about a SQL Server target it
+                   is not a weak answer but a false one, and it is the one an agent asking by name gets. */
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_io_stats");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return JsonSerializer.Serialize(new
                 {
                     server = resolved.ServerName,

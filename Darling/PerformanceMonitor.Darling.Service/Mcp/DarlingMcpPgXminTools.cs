@@ -79,6 +79,16 @@ public sealed class DarlingMcpPgXminTools
                holder" is a real finding that redirects the investigation rather than a dead end. */
             if (rows.Count == 0)
             {
+                /* ...but only when this server COULD have a horizon. On a SQL Server target "nothing is
+                   holding back the xmin horizon" is a confident all-clear about a mechanism that does not
+                   exist there, which is the same defect one engine over (#2532). */
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_xmin_horizon");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return JsonSerializer.Serialize(new
                 {
                     server = resolved.ServerName,

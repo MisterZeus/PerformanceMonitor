@@ -50,11 +50,19 @@ namespace PerformanceMonitor.Collectors;
 /// connector stamps 0, and the edition axis therefore (correctly) declines to claim anything about it. Kind
 /// is the coarser and more permanent fact of the two: an edition can change under an operator (a migration
 /// to Azure SQL Database, an upgrade), while a target's DIALECT is what decides whether a collector's query
-/// text could ever be sent at it. The kind axis is answered by the engine half of the collectors' own
-/// dispatch gate (<see cref="CollectorCatalog.EngineMatches(ICollectorSchemaInfo, CollectorTargetInfo)"/>)
-/// for exactly the reason the edition axis asks <see cref="CollectorCatalog.AppliesTo(ICollectorSchemaInfo,
-/// CollectorTargetInfo)"/>: a hand-kept list of "what PostgreSQL does not have" would go stale in the
-/// direction that keeps passing.</para>
+/// text could ever be sent at it. Both axes are answered by asking
+/// <see cref="CollectorCatalog.AppliesTo(ICollectorSchemaInfo, CollectorTargetInfo)"/> — the collectors' own
+/// dispatch gate — over every target shape the axis permits, for the same reason: a hand-kept list of "what
+/// PostgreSQL does not have" would go stale in the direction that keeps passing.</para>
+///
+/// <para><b>Each axis sweeps what it does not fix (#2532).</b> The edition sweep fixes the two Azure flags
+/// and varies msdb access, RDS-ness and the SQL major version; the kind sweep fixes
+/// <see cref="CollectorTargetInfo.IsAurora"/> on the PostgreSQL side and varies the PostgreSQL version floors
+/// and the recovery state. Same discipline both times: a fact an operator can change is never allowed to
+/// produce a "never will", and a fact nothing can change is what a permanence claim is made of. That is why
+/// <c>pg_wait_stats</c> — reading <c>aurora_stat_system_waits()</c>, which core PostgreSQL has in no version
+/// — is a permanent gap on stock PostgreSQL, while <c>pg_stat_io</c>'s PG16 floor and the writer-only
+/// autovacuum read are not and keep the <c>unavailable</c> vocabulary.</para>
 /// </summary>
 public static class CollectorEngineCapability
 {
@@ -92,8 +100,10 @@ public static class CollectorEngineCapability
     /// falls out of date makes a message vaguer, never wrong. A collector with no entry still gets a correct
     /// message through the fallback in <see cref="NotCollectedMessage"/>.
     /// <para>Public so the tests can hold it to the catalog: every key must be a real collector name, and
-    /// every key must be a collector that is genuinely gated off SOMEWHERE, so an entry cannot outlive the
-    /// gate that gave it a reason to exist.</para>
+    /// every key must be either a collector its OWN gate shuts out somewhere or one a shipped read asks the
+    /// capability question about, so an entry cannot outlive the reason it exists. The "its own gate" half
+    /// deliberately excludes the DIALECT gap every collector now has on every other engine — a check that
+    /// counted that would pass for any name anyone typed.</para>
     /// </summary>
     public static readonly IReadOnlyDictionary<string, string> CapturePathByCollector =
         new Dictionary<string, string>(StringComparer.Ordinal)
@@ -144,6 +154,20 @@ public static class CollectorEngineCapability
             ["database_size_stats"] = "the per-database file size and space usage",
             ["index_object_stats"] = "the per-index usage, size and contention statistics",
             ["server_properties"] = "the SERVERPROPERTY instance properties",
+            /* The PostgreSQL side of the same table (#2532). The first two read an Aurora-only surface, so
+               they are permanent gaps on stock PostgreSQL — the mirror of the twelve above, which are
+               permanent gaps on Azure SQL Database. The other six are here because their reads ask the
+               capability question on the DIALECT axis: a SQL Server target asked get_pg_xmin_horizon used
+               to be told nothing was holding its horizon back, which is a confident all-clear about a
+               mechanism that engine does not have. */
+            ["pg_wait_stats"] = "the aurora_stat_system_waits() cumulative wait counters",
+            ["pg_statement_stats"] = "the aurora_stat_statements() per-statement history",
+            ["pg_blocking"] = "the pg_blocking_pids() lock-wait samples",
+            ["pg_io_stats"] = "the pg_stat_io per-backend I/O counters",
+            ["pg_autovacuum_stats"] = "the pg_stat_user_tables autovacuum backlog",
+            ["pg_replication_slots"] = "the pg_replication_slots WAL-retention snapshot",
+            ["pg_wraparound_stats"] = "the per-database transaction-ID freeze headroom",
+            ["pg_xmin_horizon"] = "the xmin-horizon holders behind vacuum",
         };
 
     /// <summary>
@@ -202,11 +226,140 @@ public static class CollectorEngineCapability
         }
     }
 
+    /// <summary>
+    /// The PostgreSQL major versions swept when asking whether ANY target of an engine KIND runs a collector
+    /// (#2532). Same shape and same reasoning as <see cref="MajorVersionSweep"/> one engine over: 0 is
+    /// "unknown, assume newest" and 99 is above any floor, with the real majors carried so a gate written as
+    /// a RANGE is answered rather than by whichever representative value happened to be picked.
+    /// <para>13 is the floor because that is the oldest major any monitored target could plausibly be; the
+    /// list is deliberately generous, since a major MISSING from it can only make the derivation claim a gap
+    /// that a real target does not have.</para>
+    /// </summary>
+    private static readonly int[] PostgresMajorVersionSweep = { 0, 13, 14, 15, 16, 17, 99 };
+
+    /// <summary>
+    /// The <c>server_version_num</c> values swept alongside the major. Carried as its OWN dimension rather
+    /// than derived from the major, because the gates that will read it are MINOR-version gates
+    /// (<c>aurora_stat_resource_usage()</c> needs 16.9+/17.5+ and is absent on 17.4), and a sweep that
+    /// derived the minor from the major would answer every such gate from one arbitrary minor.
+    /// <para><b>The cross product includes incoherent pairs</b> — major 16 alongside version 170005 — and
+    /// that is deliberate. A superset of the real target shapes can only ever find MORE shapes that pass a
+    /// gate, so its error direction is under-claiming: a gate satisfiable only by a combination no real
+    /// server has would be reported as collected, and the read keeps its <c>unavailable</c> vocabulary. The
+    /// opposite error — a shape that no sweep produces, so a gate matches nothing and the derivation
+    /// announces a permanent gap — is the one this whole mechanism exists to prevent, and a superset cannot
+    /// make it.</para>
+    /// </summary>
+    private static readonly int[] PostgresVersionNumSweep = { 0, 160008, 160009, 170004, 170005, 999999 };
+
+    /// <summary>
+    /// Every target shape an engine KIND permits, for the exhaustive gate sweep — the engine-kind twin of
+    /// <see cref="TargetsWithEngineEdition"/> (#2532).
+    ///
+    /// <para><b>What the kind fixes, and what it must not.</b> On the PostgreSQL side the kind fixes exactly
+    /// one fact: <see cref="CollectorTargetInfo.IsAurora"/>, which is what separates the two PostgreSQL
+    /// tokens and is not something an operator can change — a stock PostgreSQL server does not become Aurora.
+    /// Everything else varies, because none of it is implied by the kind and all of it is FIXABLE: an upgrade
+    /// moves <see cref="CollectorTargetInfo.PostgresMajorVersion"/> and
+    /// <see cref="CollectorTargetInfo.PostgresVersionNum"/> past a floor, and a connection to the writer
+    /// moves <see cref="CollectorTargetInfo.IsInRecovery"/>. Claiming permanence over any of those would be
+    /// the #2511 over-claim one engine over.</para>
+    ///
+    /// <para><b>The SQL Server arm varies the Azure flags</b>, where
+    /// <see cref="TargetsWithEngineEdition"/> fixes them — because the KIND does not decide an edition. That
+    /// is what keeps the two axes from answering each other's question: a collector gated off on Azure SQL
+    /// Database still runs on some SQL Server, so it is not a kind gap, and the edition axis is left to say
+    /// so with the edition named. The impossible both-Azure-flags shape is generated rather than skipped, for
+    /// the superset reason above and because skipping it would break the full-cross-product property that
+    /// makes conjunctive gates answerable.</para>
+    ///
+    /// <para><b>An unknown, absent or unrecognised kind yields NOTHING.</b> Callers must ask
+    /// <see cref="MonitoredEngineKind.IsKnown"/> first; an empty sweep read as "no shape runs it" would turn
+    /// silence into the most confident claim in the vocabulary.</para>
+    ///
+    /// <para><b>Adding a field to <see cref="CollectorTargetInfo"/> that a PostgreSQL gate reads means adding
+    /// it here too.</b> A fact this sweep never varies sits at its CLR default in every shape, so a gate
+    /// written on it fails all of them and the derivation reports a permanent engine gap for a collector that
+    /// runs. <c>EveryFactAPostgresGateReads_IsVariedBySweepOrFixedByKind</c> decodes every PostgreSQL gate's
+    /// IL and fails the build when it happens — the twin of the #2518 guard on the edition axis.</para>
+    /// </summary>
+    public static IEnumerable<CollectorTargetInfo> TargetsWithEngineKind(string? engineKind)
+    {
+        switch (MonitoredEngineKind.EngineOf(engineKind))
+        {
+            case CollectorTargetEngine.PostgreSql:
+                var isAurora = MonitoredEngineKind.IsAurora(engineKind);
+
+                foreach (var major in PostgresMajorVersionSweep)
+                {
+                    foreach (var versionNum in PostgresVersionNumSweep)
+                    {
+                        foreach (var isInRecovery in new[] { false, true })
+                        {
+                            yield return new CollectorTargetInfo
+                            {
+                                Engine = CollectorTargetEngine.PostgreSql,
+                                IsAurora = isAurora,
+                                PostgresMajorVersion = major,
+                                PostgresVersionNum = versionNum,
+                                IsInRecovery = isInRecovery,
+                            };
+                        }
+                    }
+                }
+
+                break;
+
+            case CollectorTargetEngine.SqlServer:
+                foreach (var major in MajorVersionSweep)
+                {
+                    foreach (var hasMsdbAccess in new[] { true, false })
+                    {
+                        foreach (var isAwsRds in new[] { false, true })
+                        {
+                            foreach (var isAzureSqlDb in new[] { false, true })
+                            {
+                                foreach (var isAzureManagedInstance in new[] { false, true })
+                                {
+                                    yield return new CollectorTargetInfo
+                                    {
+                                        Engine = CollectorTargetEngine.SqlServer,
+                                        IsAzureSqlDb = isAzureSqlDb,
+                                        IsAzureManagedInstance = isAzureManagedInstance,
+                                        IsAwsRds = isAwsRds,
+                                        HasMsdbAccess = hasMsdbAccess,
+                                        SqlMajorVersion = major,
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+
+                break;
+        }
+    }
+
     /// <summary>A bare SQL Server target, for the engine half of the dispatch gate alone.</summary>
     private static readonly CollectorTargetInfo SqlServerProbe = new() { Engine = CollectorTargetEngine.SqlServer };
 
     /// <summary>The same, one engine over — for the engine-KIND axis (#2530).</summary>
     private static readonly CollectorTargetInfo PostgresProbe = new() { Engine = CollectorTargetEngine.PostgreSql };
+
+    /// <summary>
+    /// The bare probe for an engine kind, or <c>null</c> for a kind this build does not recognise. Used only
+    /// to ask which of the two reasons a kind gap has — a foreign DIALECT, which the dispatch gate's engine
+    /// half stops, or the collector's own gate — so the message can name the real one. The gap itself is
+    /// decided by <see cref="IsCollectedOnEngineKind(ICollectorSchemaInfo, string?)"/> over the sweep, never
+    /// here.
+    /// </summary>
+    private static CollectorTargetInfo? ProbeForKind(string? engineKind) =>
+        MonitoredEngineKind.EngineOf(engineKind) switch
+        {
+            CollectorTargetEngine.PostgreSql => PostgresProbe,
+            CollectorTargetEngine.SqlServer => SqlServerProbe,
+            _ => null,
+        };
 
     /// <summary>The closing sentence both axes end on. One copy, because the two messages have to agree
     /// about what a permanent gap is; a second wording would eventually say something subtly different about
@@ -275,9 +428,8 @@ public static class CollectorEngineCapability
     }
 
     /// <summary>
-    /// True when <paramref name="collectorName"/>'s query dialect can be sent at a server of this engine
-    /// KIND — the second axis (#2530), and the one that separates a PostgreSQL target from a SQL Server that
-    /// has never connected.
+    /// True when SOME server of this engine KIND runs <paramref name="collectorName"/> — the second axis
+    /// (#2530), and the one that separates a PostgreSQL target from a SQL Server that has never connected.
     /// <para>An absent, unrecognised, or unclassifiable kind answers TRUE, as does an unknown collector name
     /// — the same true-on-miss default the edition axis carries, for the same reason: nothing to ask means
     /// nothing to claim.</para>
@@ -294,38 +446,51 @@ public static class CollectorEngineCapability
     /// reason the edition axis's does: by name this can only ever be handed a gate that ships, so nothing
     /// asserted through it could distinguish a derivation from a list that happens to match.
     ///
-    /// <para><b>Why only the ENGINE half of the dispatch gate, and not a sweep.</b> The edition axis sweeps
-    /// every target shape an edition permits and claims a gap only when NO shape runs, because the facts it
-    /// sweeps — msdb access, RDS, version — are fixable and a permanence claim over them would be the
-    /// over-claim #2511 removed. On this axis there is nothing to sweep: a target's dialect is not a fact an
-    /// operator can move, so <see cref="CollectorCatalog.EngineMatches(ICollectorSchemaInfo,
-    /// CollectorTargetInfo)"/> — the collectors' own engine gate, which is what actually stops the dispatch
-    /// — is the whole answer. It is still DERIVED: flip a definition's
-    /// <see cref="ICollectorSchemaInfo.TargetEngine"/> and this answer flips with it, which is what
-    /// <c>CollectorEngineCapabilityMovingGateTests</c> demonstrates rather than assumes.</para>
+    /// <para><b>The whole dispatch gate, over a sweep (#2532).</b> #2530 asked only
+    /// <see cref="CollectorCatalog.EngineMatches(ICollectorSchemaInfo, CollectorTargetInfo)"/> — the engine
+    /// half — and deliberately left the collectors' own <c>AppliesTo</c> out of it, because a gate on a
+    /// FIXABLE fact must never be reported as permanent. That is still the rule; what changed is that the
+    /// sweep now separates the fixable facts from the one the kind fixes, so the question can be asked in
+    /// full: <i>is there any target of this engine kind, under any combination of the facts the kind does not
+    /// decide, for which this collector runs?</i> <see cref="TargetsWithEngineKind"/> varies the PostgreSQL
+    /// version floors and the recovery state — an upgrade and a writer connection move those — and fixes
+    /// <see cref="CollectorTargetInfo.IsAurora"/>, which nothing moves. So <c>pg_stat_io</c>'s PG16 floor and
+    /// the writer-only autovacuum read keep the <c>unavailable</c> vocabulary, while <c>pg_wait_stats</c>
+    /// reading <c>aurora_stat_system_waits()</c> is a permanent gap on stock PostgreSQL, which is what it
+    /// is.</para>
     ///
-    /// <para><b>What this deliberately does NOT claim.</b> The PostgreSQL collectors' own
-    /// <see cref="ICollectorDefinition{TRow}.AppliesTo"/> gates — Aurora-only surfaces, the PG16 floor on
-    /// <c>pg_stat_io</c>, the writer-only autovacuum read — are the fixable/variable half on this side of the
-    /// fence, and are left to the <c>unavailable</c> vocabulary exactly as msdb access is on the SQL Server
-    /// side. Making <c>pg_wait_stats</c> a permanent gap on STOCK PostgreSQL is a real and available claim
-    /// (Aurora-ness is fixed by the kind the way the Azure flags are fixed by the edition), and it wants the
-    /// PostgreSQL twin of the #2518 sweep-dimension guard before it ships — filed rather than smuggled in
-    /// here, because a sweep without that guard over-claims silently, which is the failure this whole
-    /// mechanism exists to avoid.</para>
+    /// <para>It is still DERIVED in both directions: flip a definition's
+    /// <see cref="ICollectorSchemaInfo.TargetEngine"/> and the dialect answer flips with it; shut its
+    /// <c>AppliesTo</c> on Aurora-ness and the stock-PostgreSQL answer flips with that. Both are demonstrated
+    /// by moving a gate rather than asserted about the shipped ones
+    /// (<c>CollectorEngineCapabilityMovingGateTests</c>), and
+    /// <c>EveryFactAPostgresGateReads_IsVariedBySweepOrFixedByKind</c> is what stops the sweep quietly
+    /// leaving a fact at its default and manufacturing a gap for a collector that runs (#2518's twin).</para>
+    ///
+    /// <para><b>An unknown kind still claims nothing</b>, and the check is explicit rather than falling out
+    /// of an empty sweep: <see cref="TargetsWithEngineKind"/> yields no shapes for a token this build does
+    /// not recognise, and "no shape runs it" would otherwise read as the most confident claim in the
+    /// vocabulary instead of the silence it has to be.</para>
     /// </summary>
     public static bool IsCollectedOnEngineKind(ICollectorSchemaInfo definition, string? engineKind)
     {
-        var probe = MonitoredEngineKind.EngineOf(engineKind) switch
+        /* Not known to be anything — the pre-#2530 state of every row, of every store an older service
+           wrote, and of every token a newer one writes. No claim, which is the same silence
+           UnknownEngineEdition keeps. */
+        if (!MonitoredEngineKind.IsKnown(engineKind))
         {
-            CollectorTargetEngine.PostgreSql => PostgresProbe,
-            CollectorTargetEngine.SqlServer => SqlServerProbe,
-            /* Not known to be anything — the pre-#2530 state of every row, and of every store an older
-               service wrote. No claim, which is the same silence UnknownEngineEdition keeps. */
-            _ => null,
-        };
+            return true;
+        }
 
-        return probe is null || CollectorCatalog.EngineMatches(definition, probe);
+        foreach (var target in TargetsWithEngineKind(engineKind))
+        {
+            if (CollectorCatalog.AppliesTo(definition, target))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -363,11 +528,30 @@ public static class CollectorEngineCapability
                starts with a vowel — an indefinite article in the template would read "a Aurora PostgreSQL".
                Article agreement belongs in the template or nowhere, never in a per-entry special case that
                the next entry gets wrong; the same reasoning the capture-path phrasing already follows. */
-            return $"{serverName} runs {MonitoredEngineKind.DescribeEngineKind(engineKind)}. The " +
-                   $"{collectorName} collector is written against " +
-                   $"{DescribeTargetEngine(definition.TargetEngine)} and the dispatch gate's engine half never " +
-                   $"sends it at another engine, so this server does not collect " +
-                   $"{CapturePathOf(collectorName)}, and never will. {PermanentGapEpilogue}";
+            var engine = $"{serverName} runs {MonitoredEngineKind.DescribeEngineKind(engineKind)}. ";
+
+            /* TWO reasons a collector is a kind gap, and they must not be described with one sentence
+               (#2532). A DIALECT mismatch is stopped by the dispatch gate's engine half before the
+               collector's own gate is consulted at all; a same-dialect gap — pg_wait_stats on stock
+               PostgreSQL — is the collector's own AppliesTo, exactly as on the edition axis. Saying "written
+               against PostgreSQL and never sent at another engine" about a PostgreSQL collector on a
+               PostgreSQL server would be plainly false to the one operator best placed to notice. */
+            if (ProbeForKind(engineKind) is { } probe && !CollectorCatalog.EngineMatches(definition, probe))
+            {
+                return engine +
+                       $"The {collectorName} collector is written against " +
+                       $"{DescribeTargetEngine(definition.TargetEngine)} and the dispatch gate's engine half never " +
+                       $"sends it at another engine, so this server does not collect " +
+                       $"{CapturePathOf(collectorName)}, and never will. {PermanentGapEpilogue}";
+            }
+
+            /* Deliberately the edition axis's own wording, verbatim past the engine name: the two are the
+               same finding — the collector's own gate excludes every target of this shape — and two
+               spellings of it would eventually disagree about whether it is worth chasing. */
+            return engine +
+                   $"The {collectorName} collector does not run on that engine — its own AppliesTo gate " +
+                   $"excludes it — so this server does not collect {CapturePathOf(collectorName)}, and never " +
+                   $"will. {PermanentGapEpilogue}";
         }
 
         if (IsCollectedOnEngineEdition(definition, engineEdition))

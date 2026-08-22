@@ -322,25 +322,88 @@ public sealed class CollectorEngineCapabilityMovingGateTests
     }
 
     /// <summary>
-    /// The kind axis reads the ENGINE half of the dispatch gate and nothing else — a definition's own
-    /// <c>AppliesTo</c> cannot make it claim a gap, however tightly shut.
+    /// A gate SHUT everywhere is a kind gap on both PostgreSQL tokens; a gate on a fact the sweep varies is
+    /// a gap on neither. This is the assertion #2532 replaced: until then the kind axis asked only the
+    /// ENGINE half of the dispatch gate, and a definition's own <c>AppliesTo</c> could not make it claim
+    /// anything at all.
     ///
-    /// <para>That is a deliberate narrowing, not an oversight, and it is the same discipline the edition
-    /// axis applies to msdb access: <c>AppliesTo</c> on the PostgreSQL side reads Aurora-ness, version
-    /// floors and recovery state, and none of those are decided by the engine kind alone. Letting a shut
-    /// gate speak here would report "never will" for a collector an upgrade or a writer connection
-    /// enables — the confident-and-wrong message this whole mechanism exists to delete.</para>
+    /// <para><b>Why that narrowing was right then and wrong now.</b> The discipline it protected — never
+    /// report a FIXABLE gate as permanent — is unchanged and is the whole subject of this file. What it
+    /// lacked was a sweep: with no way to separate "excluded on every target of this kind" from "excluded on
+    /// the one target shape somebody happened to construct", the only safe answer was to decline. Now
+    /// <see cref="CollectorEngineCapability.TargetsWithEngineKind"/> varies the PostgreSQL version floors and
+    /// the recovery state and fixes only <see cref="CollectorTargetInfo.IsAurora"/>, so the fixable gates
+    /// answer TRUE on their own merits rather than by the axis refusing to look — which is what the second
+    /// half of this test is for, and what
+    /// <c>EveryFactAPostgresGateReads_IsVariedBySweepOrFixedByKind</c> keeps true as gates are added.</para>
     /// </summary>
     [Fact]
-    public void AShutAppliesToGate_IsNotAnEngineKindGap()
+    public void AShutAppliesToGate_IsAnEngineKindGap_ButAFixableOneIsNot()
     {
         var postgres = new SyntheticCollector { Gate = _ => false, TargetEngine = CollectorTargetEngine.PostgreSql };
 
-        Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(postgres, MonitoredEngineKind.Postgres));
+        Assert.False(CollectorEngineCapability.IsCollectedOnEngineKind(postgres, MonitoredEngineKind.Postgres));
+        Assert.False(CollectorEngineCapability.IsCollectedOnEngineKind(postgres, MonitoredEngineKind.AuroraPostgres));
+
+        /* ...and the engine half still speaks, so a PostgreSQL definition is a gap on SQL Server for the
+           dialect reason rather than for this one. */
+        Assert.False(CollectorEngineCapability.IsCollectedOnEngineKind(postgres, MonitoredEngineKind.SqlServer));
+
+        /* The half that keeps the narrowing's point: a gate reading a fact an operator can move is not a
+           permanent gap on EITHER token. An upgrade crosses the floor; a writer connection leaves recovery.
+           A sweep that stopped varying either of these would report both of them as "never will". */
+        foreach (var fixableGate in new Func<CollectorTargetInfo, bool>[]
+                 {
+                     target => target.PostgresMajorVersion >= 16,
+                     target => target.PostgresVersionNum >= 170005,
+                     target => !target.IsInRecovery,
+                     target => target.IsInRecovery,
+                 })
+        {
+            postgres.Gate = fixableGate;
+            Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(postgres, MonitoredEngineKind.Postgres));
+            Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(postgres, MonitoredEngineKind.AuroraPostgres));
+        }
+
+        /* And the one fact the KIND fixes: Aurora-ness. Nothing an operator does turns a stock PostgreSQL
+           server into an Aurora one, so this is the only PostgreSQL gate shape that produces a permanent
+           gap — and it produces it on exactly one of the two tokens, in each direction. */
+        postgres.Gate = target => target.IsAurora;
+        Assert.False(CollectorEngineCapability.IsCollectedOnEngineKind(postgres, MonitoredEngineKind.Postgres));
         Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(postgres, MonitoredEngineKind.AuroraPostgres));
 
-        /* ...and the engine half still speaks, so the assertion above is not vacuous. */
-        Assert.False(CollectorEngineCapability.IsCollectedOnEngineKind(postgres, MonitoredEngineKind.SqlServer));
+        postgres.Gate = target => !target.IsAurora;
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(postgres, MonitoredEngineKind.Postgres));
+        Assert.False(CollectorEngineCapability.IsCollectedOnEngineKind(postgres, MonitoredEngineKind.AuroraPostgres));
+    }
+
+    /// <summary>
+    /// The SQL Server side of the same question, and the reason the two axes do not answer each other's:
+    /// a collector gated off on Azure SQL Database is NOT a kind gap on <c>sqlserver</c>, because it runs on
+    /// every other SQL Server there is. The edition axis is what says so, with the edition named.
+    ///
+    /// <para>This is what <see cref="CollectorEngineCapability.TargetsWithEngineKind"/> varying the two Azure
+    /// flags buys, and it is the property that would break silently if the SQL Server arm of that sweep ever
+    /// fixed them the way <see cref="CollectorEngineCapability.TargetsWithEngineEdition"/> does: every
+    /// Azure-gated collector would become a permanent gap on every SQL Server, and the message would stop
+    /// naming the edition that is actually responsible.</para>
+    /// </summary>
+    [Fact]
+    public void AnAzureOnlyGate_IsNotAKindGapOnSqlServer_ButIsStillAnEditionGap()
+    {
+        var collector = new SyntheticCollector
+        {
+            Gate = target => !target.IsAzureSqlDb,
+            TargetEngine = CollectorTargetEngine.SqlServer,
+        };
+
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(collector, MonitoredEngineKind.SqlServer));
+        Assert.False(CollectorEngineCapability.IsCollectedOnEngineEdition(collector, AzureSqlDb));
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition(collector, Enterprise));
+
+        /* A gate shut on every SQL Server shape IS a kind gap, so the assertion above is not vacuous. */
+        collector.Gate = _ => false;
+        Assert.False(CollectorEngineCapability.IsCollectedOnEngineKind(collector, MonitoredEngineKind.SqlServer));
     }
 
     /// <summary>
@@ -408,11 +471,99 @@ public sealed class CollectorEngineCapabilityMovingGateTests
         foreach (var pgToken in new[] { MonitoredEngineKind.Postgres, MonitoredEngineKind.AuroraPostgres })
         {
             Assert.All(sqlServer, c => Assert.False(CollectorEngineCapability.IsCollectedOnEngineKind(c, pgToken)));
-            Assert.All(postgres, c => Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(c, pgToken)));
         }
 
         Assert.All(sqlServer, c => Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(c, MonitoredEngineKind.SqlServer)));
         Assert.All(postgres, c => Assert.False(CollectorEngineCapability.IsCollectedOnEngineKind(c, MonitoredEngineKind.SqlServer)));
+
+        /* Aurora is a strict superset of the surfaces the PostgreSQL collectors read, so every one of them
+           applies there. This is the half that would break if a new collector were written against something
+           Aurora removes rather than adds. */
+        Assert.All(postgres, c => Assert.True(
+            CollectorEngineCapability.IsCollectedOnEngineKind(c, MonitoredEngineKind.AuroraPostgres),
+            $"{c.Name} is reported as a permanent gap on Aurora PostgreSQL"));
+
+        /* Stock PostgreSQL is where the Aurora-only surfaces become a real gap (#2532), so the two tokens
+           genuinely differ — counted from the catalog rather than listed, and asserted as a PROPER subset so
+           neither "everything is a gap" nor "nothing is" passes. */
+        var stockGaps = postgres
+            .Where(c => !CollectorEngineCapability.IsCollectedOnEngineKind(c, MonitoredEngineKind.Postgres))
+            .Select(c => c.Name)
+            .ToArray();
+
+        Assert.NotEmpty(stockGaps);
+        Assert.True(stockGaps.Length < postgres.Length,
+            "every PostgreSQL collector is reported as a permanent gap on stock PostgreSQL, which would mean " +
+            "the sweep stopped producing shapes rather than that the gates changed: " + string.Join(", ", stockGaps));
+    }
+
+    /// <summary>
+    /// The measurement #2532 was filed on, named: <c>aurora_stat_system_waits()</c> is an Aurora built-in
+    /// that core PostgreSQL has no equivalent of in any version, so <c>pg_wait_stats</c> can never run on a
+    /// stock PostgreSQL target — and runs perfectly well on the Aurora one, which is the whole fleet today.
+    ///
+    /// <para>The three collectors beside it are the control. <c>pg_io_stats</c> carries a PG16 floor and
+    /// <c>pg_autovacuum_stats</c> a writer-only gate; both are FIXABLE, both keep the <c>unavailable</c>
+    /// vocabulary that sends an operator to look, and a sweep that stopped varying either fact would report
+    /// them here as "never will". <c>pg_blocking</c> has no gate at all.</para>
+    /// </summary>
+    [Fact]
+    public void AuroraOnlySurfaces_ArePermanentGapsOnStockPostgres_AndTheFixableGatesAreNot()
+    {
+        foreach (var auroraOnly in new[] { "pg_wait_stats", "pg_statement_stats" })
+        {
+            Assert.False(CollectorEngineCapability.IsCollectedOnEngineKind(auroraOnly, MonitoredEngineKind.Postgres), auroraOnly);
+            Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(auroraOnly, MonitoredEngineKind.AuroraPostgres), auroraOnly);
+        }
+
+        foreach (var fixable in new[] { "pg_io_stats", "pg_autovacuum_stats", "pg_blocking" })
+        {
+            Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(fixable, MonitoredEngineKind.Postgres), fixable);
+            Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(fixable, MonitoredEngineKind.AuroraPostgres), fixable);
+        }
+    }
+
+    /// <summary>
+    /// The two shapes of kind gap say different things, because they ARE different things: a foreign dialect
+    /// is stopped by the dispatch gate's engine half before the collector's own gate is consulted, while
+    /// <c>pg_wait_stats</c> on stock PostgreSQL is that collector's own <c>AppliesTo</c>. One sentence for
+    /// both would tell a PostgreSQL operator that a PostgreSQL collector is not written for PostgreSQL,
+    /// which is the sort of wrong that costs a reader their trust in the rest of the message.
+    /// </summary>
+    [Fact]
+    public void TheKindMessage_NamesTheRealReason_DialectOrTheCollectorsOwnGate()
+    {
+        var dialect = CollectorEngineCapability.NotCollectedMessage(
+            "aurora-01", CollectorEngineCapability.UnknownEngineEdition, MonitoredEngineKind.AuroraPostgres, "wait_stats");
+
+        Assert.NotNull(dialect);
+        Assert.Contains("aurora-01 runs Aurora PostgreSQL.", dialect, StringComparison.Ordinal);
+        Assert.Contains("is written against SQL Server", dialect, StringComparison.Ordinal);
+        Assert.Contains("the dispatch gate's engine half never sends it at another engine", dialect, StringComparison.Ordinal);
+
+        var ownGate = CollectorEngineCapability.NotCollectedMessage(
+            "pg-01", CollectorEngineCapability.UnknownEngineEdition, MonitoredEngineKind.Postgres, "pg_wait_stats");
+
+        Assert.NotNull(ownGate);
+        Assert.Contains("pg-01 runs PostgreSQL.", ownGate, StringComparison.Ordinal);
+        Assert.Contains("its own AppliesTo gate excludes it", ownGate, StringComparison.Ordinal);
+        Assert.Contains("the aurora_stat_system_waits() cumulative wait counters", ownGate, StringComparison.Ordinal);
+        Assert.Contains("and never will.", ownGate, StringComparison.Ordinal);
+
+        /* The dialect sentence must NOT appear on the own-gate message: it is the specific falsehood this
+           split exists to prevent. */
+        Assert.DoesNotContain("is written against PostgreSQL", ownGate, StringComparison.Ordinal);
+        Assert.DoesNotContain("dispatch gate's engine half", ownGate, StringComparison.Ordinal);
+        Assert.DoesNotContain("check that collection is running", ownGate, StringComparison.OrdinalIgnoreCase);
+
+        /* No EngineEdition claim about a PostgreSQL server, on either shape. */
+        Assert.DoesNotContain("EngineEdition", dialect, StringComparison.Ordinal);
+        Assert.DoesNotContain("EngineEdition", ownGate, StringComparison.Ordinal);
+
+        /* And the same read on the engine that DOES have the surface says nothing at all, so the read keeps
+           its own miss vocabulary. */
+        Assert.Null(CollectorEngineCapability.NotCollectedMessage(
+            "aurora-01", CollectorEngineCapability.UnknownEngineEdition, MonitoredEngineKind.AuroraPostgres, "pg_wait_stats"));
     }
 
     /// <summary>
@@ -507,58 +658,93 @@ public sealed class CollectorEngineCapabilitySweepDimensionTests
         TargetFacts.ToDictionary(property => property.Name, StringComparer.Ordinal);
 
     /// <summary>
-    /// How the sweep treats a fact. Derived by RUNNING the sweep and looking at what it produces, never
+    /// The two PostgreSQL tokens the store can record, which are the KIND axis's domain the way
+    /// <see cref="AllEngineEditions"/> is the edition axis's (#2532). Taken from the vocabulary rather than
+    /// typed out, so a third PostgreSQL flavour is in scope the moment it is added — and filtered by dialect
+    /// rather than by name, so it stays right if the tokens are ever renamed.
+    /// </summary>
+    private static readonly string[] PostgresKinds = MonitoredEngineKind.All
+        .Where(kind => MonitoredEngineKind.EngineOf(kind) == CollectorTargetEngine.PostgreSql)
+        .ToArray();
+
+    /// <summary>
+    /// How a sweep treats a fact. Derived by RUNNING the sweep and looking at what it produces, never
     /// declared — a declared role would be the hand-maintained list this test exists to replace.
     /// </summary>
     private enum SweepRole
     {
-        /// <summary>The sweep produces more than one value for it within a single edition.</summary>
+        /// <summary>The sweep produces more than one value for it within a single axis value.</summary>
         VariedBySweep,
 
-        /// <summary>Constant within an edition, but different between editions — the edition decides it.</summary>
-        FixedByEdition,
+        /// <summary>Constant within one axis value, but different between them — the axis decides it.</summary>
+        FixedByAxis,
 
-        /// <summary>The engine discriminator itself. Fixed at SQL Server because that is the question.</summary>
+        /// <summary>The engine discriminator itself. Fixed by the question rather than swept.</summary>
         EngineDiscriminator,
 
-        /// <summary>The same value in every shape of every edition — a gate reading it can only ever see one
-        /// answer, so a gate reading it is where over-claiming begins.</summary>
+        /// <summary>The same value in every shape of every axis value — a gate reading it can only ever see
+        /// one answer, so a gate reading it is where over-claiming begins.</summary>
         ConstantEverywhere,
     }
 
-    private static SweepRole RoleOf(PropertyInfo fact)
+    /// <summary>
+    /// The role a fact plays across one axis, given the shapes that axis produces for each of its values.
+    /// Parameterised over the shape families rather than hard-wired to an axis, because the two axes ask the
+    /// identical question of different sweeps and a second copy of this arithmetic is exactly the kind of
+    /// near-duplicate that drifts (#2532).
+    /// </summary>
+    private static SweepRole RoleOf(PropertyInfo fact, IReadOnlyList<CollectorTargetInfo[]> shapesPerAxisValue)
     {
         /* The engine is the precondition of the whole question, not a dimension of it: "does any target of
-           this SQL Server engine edition run this collector" fixes the engine by construction. Recognised by
-           TYPE rather than by name, so it stays recognised if the property is ever renamed. */
+           this engine edition / engine kind run this collector" fixes the engine by construction. Recognised
+           by TYPE rather than by name, so it stays recognised if the property is ever renamed. */
         if (fact.PropertyType == typeof(CollectorTargetEngine))
         {
             return SweepRole.EngineDiscriminator;
         }
 
-        var perEdition = AllEngineEditions
-            .Select(edition => CollectorEngineCapability.TargetsWithEngineEdition(edition)
-                .Select(fact.GetValue)
-                .Distinct()
-                .ToArray())
+        var perValue = shapesPerAxisValue
+            .Select(shapes => shapes.Select(fact.GetValue).Distinct().ToArray())
             .ToArray();
 
-        if (perEdition.Any(values => values.Length > 1))
+        if (perValue.Any(values => values.Length > 1))
         {
             return SweepRole.VariedBySweep;
         }
 
-        return perEdition.Select(values => values[0]).Distinct().Count() > 1
-            ? SweepRole.FixedByEdition
+        return perValue.Select(values => values[0]).Distinct().Count() > 1
+            ? SweepRole.FixedByAxis
             : SweepRole.ConstantEverywhere;
     }
 
+    /// <summary>The shapes the EDITION sweep produces, one array per engine edition.</summary>
+    private static CollectorTargetInfo[][] EditionShapes() => AllEngineEditions
+        .Select(edition => CollectorEngineCapability.TargetsWithEngineEdition(edition).ToArray())
+        .ToArray();
+
+    /// <summary>The shapes the KIND sweep produces, one array per PostgreSQL token.</summary>
+    private static CollectorTargetInfo[][] PostgresKindShapes() => PostgresKinds
+        .Select(kind => CollectorEngineCapability.TargetsWithEngineKind(kind).ToArray())
+        .ToArray();
+
+    private static SweepRole EditionRoleOf(PropertyInfo fact) => RoleOf(fact, EditionShapes());
+
+    private static SweepRole PostgresKindRoleOf(PropertyInfo fact) => RoleOf(fact, PostgresKindShapes());
+
     /// <summary>fact name → the SQL Server collectors whose <c>AppliesTo</c> reads it, decoded from IL.</summary>
-    private static SortedDictionary<string, SortedSet<string>> FactsReadBySqlServerGates()
+    private static SortedDictionary<string, SortedSet<string>> FactsReadBySqlServerGates() =>
+        FactsReadByGatesOf(CollectorTargetEngine.SqlServer);
+
+    /// <summary>The same, for the PostgreSQL definitions — the whole difference between the two guards, as
+    /// #2532 said it would be.</summary>
+    private static SortedDictionary<string, SortedSet<string>> FactsReadByPostgresGates() =>
+        FactsReadByGatesOf(CollectorTargetEngine.PostgreSql);
+
+    private static SortedDictionary<string, SortedSet<string>> FactsReadByGatesOf(CollectorTargetEngine engine)
     {
         var byFact = new SortedDictionary<string, SortedSet<string>>(StringComparer.Ordinal);
 
-        foreach (var definition in CollectorCatalog.All.Where(c => c.TargetEngine == CollectorTargetEngine.SqlServer))
+        foreach (var definition in CollectorCatalog.All.Where(c => c.TargetEngine == engine))
         {
             foreach (var fact in FactsReadByGateOf(definition))
             {
@@ -720,7 +906,7 @@ public sealed class CollectorEngineCapabilitySweepDimensionTests
         var read = FactsReadBySqlServerGates();
 
         var overClaiming = read
-            .Where(entry => RoleOf(FactByName[entry.Key]) == SweepRole.ConstantEverywhere)
+            .Where(entry => EditionRoleOf(FactByName[entry.Key]) == SweepRole.ConstantEverywhere)
             .Select(entry => $"  {entry.Key} — read by {string.Join(", ", entry.Value)}")
             .ToArray();
 
@@ -809,7 +995,7 @@ public sealed class CollectorEngineCapabilitySweepDimensionTests
         foreach (var edition in AllEngineEditions)
         {
             var shapes = CollectorEngineCapability.TargetsWithEngineEdition(edition).ToArray();
-            var varied = TargetFacts.Where(fact => RoleOf(fact) == SweepRole.VariedBySweep).ToArray();
+            var varied = TargetFacts.Where(fact => EditionRoleOf(fact) == SweepRole.VariedBySweep).ToArray();
 
             Assert.NotEmpty(varied);
 
@@ -844,12 +1030,12 @@ public sealed class CollectorEngineCapabilitySweepDimensionTests
     [Fact]
     public void EveryTargetFact_LandsInExactlyOneDerivedRole()
     {
-        var roles = TargetFacts.ToDictionary(fact => fact.Name, RoleOf, StringComparer.Ordinal);
+        var roles = TargetFacts.ToDictionary(fact => fact.Name, EditionRoleOf, StringComparer.Ordinal);
 
         Assert.NotEmpty(roles);
         Assert.Single(roles, role => role.Value == SweepRole.EngineDiscriminator);
         Assert.Contains(roles, role => role.Value == SweepRole.VariedBySweep);
-        Assert.Contains(roles, role => role.Value == SweepRole.FixedByEdition);
+        Assert.Contains(roles, role => role.Value == SweepRole.FixedByAxis);
 
         /* The two Azure flags are the edition-fixed pair, and they follow the edition in OPPOSITE directions
            — asserted here because "fixed by edition" is otherwise satisfied by a flag that is fixed at the
@@ -861,5 +1047,186 @@ public sealed class CollectorEngineCapabilitySweepDimensionTests
 
         Assert.All(azureShapes, shape => Assert.True(shape.IsAzureSqlDb && !shape.IsAzureManagedInstance));
         Assert.All(miShapes, shape => Assert.True(shape.IsAzureManagedInstance && !shape.IsAzureSqlDb));
+    }
+
+    /* ───────── the same guard, one engine over (#2532) ───────── */
+
+    /// <summary>
+    /// THE assertion, PostgreSQL side. Every <see cref="CollectorTargetInfo"/> fact a PostgreSQL gate reads
+    /// is a fact <see cref="CollectorEngineCapability.TargetsWithEngineKind"/> either varies or fixes by the
+    /// kind — so no PostgreSQL gate can be answered by a single defaulted value.
+    ///
+    /// <para><b>Why this had to land before the axis did.</b> #2530 deliberately shipped only the ENGINE half
+    /// of the dispatch gate on this axis, because a sweep without this guard over-claims silently: a fact the
+    /// sweep leaves at its CLR default fails every shape, and the derivation announces a permanent,
+    /// unfixable engine gap for a collector that runs perfectly well — on the very engine whose support this
+    /// work exists to make credible. #2532 made that the explicit prerequisite, and this is it.</para>
+    ///
+    /// <para><b>Nothing here is a list.</b> The facts come out of the gates' IL (the same decoder the edition
+    /// half uses, filtered to the PostgreSQL definitions) and the roles come out of running the sweep. Fix
+    /// the SWEEP, never this test — there is no name to add here instead.</para>
+    /// </summary>
+    [Fact]
+    public void EveryFactAPostgresGateReads_IsVariedBySweepOrFixedByKind()
+    {
+        var read = FactsReadByPostgresGates();
+
+        var overClaiming = read
+            .Where(entry => PostgresKindRoleOf(FactByName[entry.Key]) == SweepRole.ConstantEverywhere)
+            .Select(entry => $"  {entry.Key} — read by {string.Join(", ", entry.Value)}")
+            .ToArray();
+
+        Assert.True(
+            overClaiming.Length == 0,
+            "A PostgreSQL collector's AppliesTo gate reads a CollectorTargetInfo fact that " +
+            "CollectorEngineCapability.TargetsWithEngineKind never varies. Every swept target therefore " +
+            "carries that fact's default, every one of them fails the gate, and the capability derivation " +
+            "reports a PERMANENT engine gap on both PostgreSQL tokens for a collector that runs perfectly " +
+            "well — the confident-and-wrong message #2511 exists to delete, one engine over.\n\n" +
+            "Fix the SWEEP, not this test: add the fact to TargetsWithEngineKind (varying it, or deriving it " +
+            "from the engine kind the way IsAurora is). There is no list here to add a name to.\n\n" +
+            string.Join("\n", overClaiming));
+    }
+
+    /// <summary>
+    /// The PostgreSQL half of the scan reads the gates the source actually carries — the same non-vacuity
+    /// floor the SQL Server half has, and for the same reason: a source-decoding guard that matches nothing
+    /// passes for free and converts an open question into false confidence.
+    /// </summary>
+    [Fact]
+    public void ThePostgresGateScan_ReadsTheGatesTheSourceActuallyCarries()
+    {
+        var definitions = CollectorCatalog.All
+            .Where(c => c.TargetEngine == CollectorTargetEngine.PostgreSql)
+            .ToArray();
+
+        Assert.True(
+            definitions.Length >= 8,
+            $"only {definitions.Length} PostgreSQL definitions found — the catalog walk is broken, not the catalog");
+
+        var read = FactsReadByPostgresGates();
+
+        /* The three facts today's PostgreSQL gates are written on. A floor, not an expected-set pin. */
+        Assert.Contains(nameof(CollectorTargetInfo.IsAurora), read.Keys);
+        Assert.Contains(nameof(CollectorTargetInfo.IsInRecovery), read.Keys);
+        Assert.Contains(nameof(CollectorTargetInfo.PostgresMajorVersion), read.Keys);
+
+        var byName = CollectorCatalog.All.ToDictionary(c => c.Name, StringComparer.Ordinal);
+
+        /* The collector #2532 was filed on: one fact, exactly the one its source names. */
+        Assert.Equal(
+            new[] { nameof(CollectorTargetInfo.IsAurora) },
+            FactsReadByGateOf(byName["pg_wait_stats"]).ToArray());
+
+        /* A version floor and a recovery gate, so the decoder is discriminating rather than reporting
+           IsAurora for everything. */
+        Assert.Equal(
+            new[] { nameof(CollectorTargetInfo.PostgresMajorVersion) },
+            FactsReadByGateOf(byName["pg_io_stats"]).ToArray());
+
+        Assert.Equal(
+            new[] { nameof(CollectorTargetInfo.IsInRecovery) },
+            FactsReadByGateOf(byName["pg_autovacuum_stats"]).ToArray());
+
+        /* And a gate that reads nothing at all — without this, "reports every fact for every collector"
+           would satisfy every assertion above. */
+        Assert.Empty(FactsReadByGateOf(byName["pg_blocking"]));
+
+        /* No SQL Server fact leaks into the PostgreSQL scan. The two halves differ only by the filter, so a
+           filter that stopped filtering would look exactly like a guard that was working. */
+        Assert.DoesNotContain(nameof(CollectorTargetInfo.IsAzureSqlDb), read.Keys);
+        Assert.DoesNotContain(nameof(CollectorTargetInfo.HasMsdbAccess), read.Keys);
+        Assert.DoesNotContain(nameof(CollectorTargetInfo.SqlMajorVersion), read.Keys);
+    }
+
+    /// <summary>
+    /// The kind sweep is the FULL cross product of the dimensions it varies, for the reason the edition
+    /// sweep is: the claim being made is "no target of this kind, under any COMBINATION of the other facts",
+    /// and a sweep that moved one axis at a time would report a conjunctive gate as a permanent gap because
+    /// the one shape that satisfies it was never generated.
+    /// </summary>
+    [Fact]
+    public void TheKindSweep_IsTheFullCrossProductOfTheDimensionsItVaries()
+    {
+        Assert.NotEmpty(PostgresKinds);
+
+        foreach (var kind in PostgresKinds)
+        {
+            var shapes = CollectorEngineCapability.TargetsWithEngineKind(kind).ToArray();
+            var varied = TargetFacts.Where(fact => PostgresKindRoleOf(fact) == SweepRole.VariedBySweep).ToArray();
+
+            Assert.NotEmpty(varied);
+            Assert.All(shapes, shape => Assert.Equal(CollectorTargetEngine.PostgreSql, shape.Engine));
+
+            var expected = varied.Aggregate(
+                1,
+                (total, fact) => total * shapes.Select(fact.GetValue).Distinct().Count());
+
+            Assert.Equal(expected, shapes.Length);
+
+            var fingerprints = shapes
+                .Select(shape => string.Join("|", varied.Select(fact => fact.GetValue(shape))))
+                .ToArray();
+
+            Assert.Equal(shapes.Length, fingerprints.Distinct(StringComparer.Ordinal).Count());
+        }
+    }
+
+    /// <summary>
+    /// Every fact lands in exactly one derived role on the KIND axis too, and the roles are non-degenerate:
+    /// <see cref="CollectorTargetInfo.IsAurora"/> is the one the kind fixes — in OPPOSITE directions for the
+    /// two tokens, so "fixed by the kind" is not satisfied by a flag stuck at the wrong value — and the
+    /// version and recovery facts are the ones it varies.
+    ///
+    /// <para>A kind sweep that collapsed to one shape per token would slide every fact into
+    /// <see cref="SweepRole.ConstantEverywhere"/> and answer every question from a single target, with a gap
+    /// set that still looked plausible. This is the whole-type view that says so.</para>
+    /// </summary>
+    [Fact]
+    public void EveryTargetFact_LandsInExactlyOneDerivedKindRole()
+    {
+        var roles = TargetFacts.ToDictionary(fact => fact.Name, PostgresKindRoleOf, StringComparer.Ordinal);
+
+        Assert.NotEmpty(roles);
+        Assert.Single(roles, role => role.Value == SweepRole.EngineDiscriminator);
+        Assert.Contains(roles, role => role.Value == SweepRole.VariedBySweep);
+
+        Assert.Equal(SweepRole.FixedByAxis, roles[nameof(CollectorTargetInfo.IsAurora)]);
+        Assert.Equal(SweepRole.VariedBySweep, roles[nameof(CollectorTargetInfo.IsInRecovery)]);
+        Assert.Equal(SweepRole.VariedBySweep, roles[nameof(CollectorTargetInfo.PostgresMajorVersion)]);
+        Assert.Equal(SweepRole.VariedBySweep, roles[nameof(CollectorTargetInfo.PostgresVersionNum)]);
+
+        var stock = CollectorEngineCapability.TargetsWithEngineKind(MonitoredEngineKind.Postgres).ToArray();
+        var aurora = CollectorEngineCapability.TargetsWithEngineKind(MonitoredEngineKind.AuroraPostgres).ToArray();
+
+        Assert.NotEmpty(stock);
+        Assert.NotEmpty(aurora);
+        Assert.All(stock, shape => Assert.False(shape.IsAurora));
+        Assert.All(aurora, shape => Assert.True(shape.IsAurora));
+    }
+
+    /// <summary>
+    /// A kind this build does not recognise produces NO shapes, and the capability answer treats that as
+    /// silence rather than as "no shape runs it".
+    ///
+    /// <para>This is the one place an empty sweep would be catastrophic instead of merely wrong: read as a
+    /// gap set, an empty sweep makes every collector a permanent gap on every unknown token — which is
+    /// exactly the row a store written by a NEWER service leaves behind, and exactly the guarantee #2530
+    /// was told to keep.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("something-a-newer-build-writes")]
+    public void AnUnrecognisedKind_SweepsNothing_AndStillClaimsNothing(string? engineKind)
+    {
+        Assert.Empty(CollectorEngineCapability.TargetsWithEngineKind(engineKind));
+
+        Assert.All(
+            CollectorCatalog.All,
+            definition => Assert.True(
+                CollectorEngineCapability.IsCollectedOnEngineKind(definition, engineKind),
+                $"{definition.Name} was claimed as a permanent gap on an unrecognised engine kind"));
     }
 }

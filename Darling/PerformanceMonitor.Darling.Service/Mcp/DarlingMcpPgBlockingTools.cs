@@ -150,6 +150,20 @@ public sealed class DarlingMcpPgBlockingTools
 
             if (chains.Count == 0)
             {
+                /* THREE, once the store knows the engine (#2532). "No captures exist, check the collector"
+                   is the right advice on a PostgreSQL target and the wrong cause on a SQL Server one, where
+                   there is no collector to check. Asked only when there are no captures at all: a window
+                   with captures is a window this collector ran in, so the engine cannot be in question. */
+                if (captures.CapturesTotal == 0)
+                {
+                    var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
+                        postgres, resolved.ServerId, resolved.ServerName, "pg_blocking");
+                    if (gated != null)
+                    {
+                        return gated;
+                    }
+                }
+
                 /* Two very different empty answers, and conflating them would be the whole failure mode of
                    a sampled signal. No captures at all means the collector never ran — nothing is known
                    about this window either way. Captures with no blocking is a real all-clear, bounded by
