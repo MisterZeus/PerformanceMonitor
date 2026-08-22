@@ -72,6 +72,32 @@ LIMIT 50";
     }
 
     /// <summary>
+    /// Whether this server has EVER recorded a wait sample, ignoring any window.
+    /// <para>Lets an empty get_wait_types say WHICH kind of nothing it found. "No wait types in the last N
+    /// hours" is true both of a quiet window and of a server nothing has been stored for, and those want
+    /// opposite responses — widen the window, versus go find out why collection is not running. Reads
+    /// <c>v_wait_stats</c>, the same source <see cref="GetDistinctWaitTypesAsync"/> reads. Deliberately
+    /// does NOT apply the ignored-wait-type exclusion the read applies: the question here is whether the
+    /// COLLECTOR has stored anything, not whether anything survives the display filter. Darling's twin is
+    /// <c>DarlingDataReader.HasAnyWaitStatAsync</c>; the two must stay in step so a user moving between the
+    /// SKUs is not told a different story about the same state.</para>
+    /// </summary>
+    public async Task<bool> HasAnyWaitStatAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT 1
+FROM v_wait_stats
+WHERE server_id = $1
+LIMIT 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return await command.ExecuteScalarAsync() is not null and not DBNull;
+    }
+
+    /// <summary>
     /// Gets the distinct wait types that have been collected for a server.
     /// </summary>
     public async Task<List<string>> GetDistinctWaitTypesAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)

@@ -73,6 +73,24 @@ public sealed class McpWaitTools
             if (hoursError != null) return hoursError;
 
             var types = await dataService.GetDistinctWaitTypesAsync(resolved.ServerId, hours_back);
+
+            if (types.Count == 0)
+            {
+                /*
+                    An empty list said nothing about which nothing this is. A server that collected and was
+                    quiet in THIS window wants the window widened; a server nothing has been stored for
+                    wants somebody to look at collection, and widening will never fill it. Same words as
+                    Darling's twin.
+                */
+                return await dataService.HasAnyWaitStatAsync(resolved.ServerId)
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"No wait types recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
+                    : McpHelpers.Status(
+                        "unavailable",
+                        $"No wait stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — nothing has been stored for this server at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.");
+            }
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,

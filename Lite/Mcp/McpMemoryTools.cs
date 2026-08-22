@@ -98,6 +98,20 @@ public sealed class McpMemoryTools
         try
         {
             var rows = await dataService.GetLatestMemoryClerksAsync(resolved.ServerId);
+
+            if (rows.Count == 0)
+                /*
+                    ONE branch here, deliberately, and it is the reason this read gets no existence probe.
+                    The read is "every clerk at MAX(collection_time)", so zero rows back is logically the
+                    same statement as zero rows in the table — any probe against that source would agree
+                    with the read by construction. What the caller needs told is that an empty clerk list is
+                    NEVER a quiet period, because on a live SQL Server it cannot be. Same words as Darling's
+                    twin.
+                */
+                return McpHelpers.Status(
+                    "unavailable",
+                    $"No memory-clerk snapshot is available for {resolved.ServerName}. This read returns the LATEST snapshot rather than a window, so an empty result is never a quiet period — a live SQL Server always has memory clerks. It means nothing the memory_clerks collector stored is still retained, either because it has not run for this server or because its rows have aged out. Check get_collection_health and get_collection_log for the memory_clerks collector.");
+
             var result = rows.Select(r => new
             {
                 clerk_type = r.ClerkType,

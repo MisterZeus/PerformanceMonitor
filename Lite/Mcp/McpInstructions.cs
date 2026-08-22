@@ -47,7 +47,7 @@ internal static class McpInstructions
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
         | `get_wait_stats` | Top wait types aggregated over time period | `server_name`, `hours_back` (default 24), `limit` (default 20) |
-        | `get_wait_types` | Lists distinct wait types observed (use before `get_wait_trend`) | `server_name`, `hours_back` |
+        | `get_wait_types` | Lists distinct wait types observed (use before `get_wait_trend`). An empty result distinguishes a quiet window (`empty`, widen `hours_back`) from a server no wait stats have ever been stored for (`unavailable`) | `server_name`, `hours_back` |
         | `get_wait_trend` | Time-series for a specific wait type | `wait_type` (required), `server_name`, `hours_back` |
         | `get_waiting_tasks` | Currently/recently waiting queries with details | `server_name`, `hours_back` (default 1), `limit` |
 
@@ -93,7 +93,7 @@ internal static class McpInstructions
         |------|---------|----------------|
         | `get_memory_stats` | Latest memory snapshot: physical, buffer pool, plan cache | `server_name` |
         | `get_memory_trend` | Memory usage over time | `server_name`, `hours_back` |
-        | `get_memory_clerks` | Top memory consumers by clerk type | `server_name` |
+        | `get_memory_clerks` | Top memory consumers by clerk type. An empty result is `unavailable`, never a quiet period — a live SQL Server always has clerks, so nothing retained means the collector has not run or its rows aged out | `server_name` |
         | `get_memory_grants` | Active/recent memory grants (detect grant pressure) | `server_name`, `hours_back` (default 1), `limit` |
         | `get_resource_semaphore` | Latest resource-semaphore snapshot: workspace memory vs target/max ceiling, waiter/timeout/forced-grant pressure | `server_name`, `hours_back` (default 24) |
         | `get_memory_pressure_events` | Ring buffer memory pressure notifications (sp_pressuredetector source) | `server_name`, `hours_back` |
@@ -127,7 +127,7 @@ internal static class McpInstructions
         |------|---------|----------------|
         | `get_alert_history` | Recent alert history: what fired, when, email status | `hours_back` (default 24), `limit` (default 50) |
         | `get_alert_settings` | Every alert group's enable flag and thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, PVS, file growth, failed jobs, database state), plus cooldown, excluded databases, delivery mode, analysis cadence and SMTP configuration | none |
-        | `get_mute_rules` | Configured mute rules that suppress specific recurring alerts (still logged) | `enabled_only` (default true) |
+        | `get_mute_rules` | Configured mute rules that suppress specific recurring alerts (still logged). An empty result distinguishes no rule ever written from rules that exist but have all lapsed, with the configured count in `hints` | `enabled_only` (default true) |
 
         ### Job Tools
         | Tool | Purpose | Key Parameters |
@@ -195,7 +195,7 @@ internal static class McpInstructions
         |------|---------|----------------|
         | `analyze_server` | Runs the inference engine: scores facts, traverses relationship graph, returns evidence-backed findings with severity and recommended next tools. A remediable finding also carries `remediation_command` — the full copy-paste T-SQL remediation (identical to the viewer card), with a two-sided risk-disclosure header on destructive changes; advisory only, never executed. Force-plan findings additionally carry `structured_remediation`: the verdict as machine-readable fields (eligible + named blockers), evidence, and split force/unforce/verify SQL | `server_name`, `hours_back` (default 4) |
         | `get_analysis_facts` | Exposes raw scored facts from the collect+score pipeline — every observation the engine sees with base severity, amplifiers, and metadata | `server_name`, `hours_back` (default 4), `source` (filter), `min_severity` |
-        | `compare_analysis` | Compares two time periods (e.g., peak vs off-peak, before vs after a change) showing severity deltas for each fact | `server_name`, `hours_back` (default 4), `baseline_hours_back` (default 28) |
+        | `compare_analysis` | Compares two time periods (e.g., peak vs off-peak, before vs after a change) showing severity deltas for each fact. When NEITHER window produced facts the result is `unavailable` rather than an all-zero comparison, because "nothing to compare" is not "nothing changed"; when only ONE window is empty the payload carries a `caveat` saying so, since every fact then counts as new or resolved by default | `server_name`, `hours_back` (default 4), `baseline_hours_back` (default 28) |
         | `audit_config` | Edition-aware configuration audit: evaluates CTFP, MAXDOP, max memory, and max worker threads against best practices | `server_name` |
         | `get_analysis_findings` | Retrieves persisted findings from previous analysis runs, deduplicated to one entry per diagnostic chain (`story_path_hash` + `incident_id`): the latest occurrence plus `occurrences`/`first_seen`/`last_seen`/`peak_severity` spanning the window; each remediable finding carries `remediation_command` — the full copy-paste T-SQL remediation (identical to the viewer card), rendered from the persisted action, advisory only and never executed; force-plan findings additionally carry `structured_remediation` (verdict + evidence + split artifacts, machine-readable) | `server_name`, `hours_back` (default 24) |
         | `mute_analysis_finding` | Mutes a finding pattern by story_path_hash so it won't appear in future runs | `story_path_hash` (required), `server_name`, `reason` |

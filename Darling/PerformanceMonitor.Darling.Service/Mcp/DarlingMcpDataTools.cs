@@ -162,6 +162,23 @@ public sealed class DarlingMcpDataTools
             var types = await DarlingDataReader.GetDistinctWaitTypesAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
 
+            if (types.Count == 0)
+            {
+                /*
+                    An empty list said nothing about which nothing this is. A server that collected and was
+                    quiet in THIS window wants the window widened; a server nothing has been stored for
+                    wants somebody to look at collection, and widening will never fill it. Probed only here,
+                    against the SAME source the read walks.
+                */
+                return await DarlingDataReader.HasAnyWaitStatAsync(postgres, resolved.ServerId)
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"No wait types recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
+                    : McpHelpers.Status(
+                        "unavailable",
+                        $"No wait stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — nothing has been stored for this server at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.");
+            }
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
@@ -281,6 +298,20 @@ public sealed class DarlingMcpDataTools
         try
         {
             var rows = await DarlingDataReader.GetLatestMemoryClerksAsync(postgres, resolved.ServerId);
+
+            if (rows.Count == 0)
+                /*
+                    ONE branch here, deliberately, and it is the reason this read gets no existence probe.
+                    The read is "every clerk at MAX(collection_time)", so zero rows back is logically the
+                    same statement as zero rows in the table — any probe against that source would agree
+                    with the read by construction and tell the caller nothing it did not already have. What
+                    the caller does need is to be told that an empty clerk list is NEVER a quiet period,
+                    because on a live SQL Server it cannot be: the DMV always has clerks.
+                */
+                return McpHelpers.Status(
+                    "unavailable",
+                    $"No memory-clerk snapshot is available for {resolved.ServerName}. This read returns the LATEST snapshot rather than a window, so an empty result is never a quiet period — a live SQL Server always has memory clerks. It means nothing the memory_clerks collector stored is still retained, either because it has not run for this server or because its rows have aged out. Check get_collection_health and get_collection_log for the memory_clerks collector.");
+
             var result = rows.Select(r => new
             {
                 clerk_type = r.ClerkType,
