@@ -112,7 +112,7 @@ public partial class LocalDataService
     /// Returns UTC time for collection_time queries (most tables store collection_time in UTC).
     /// When fromDate/toDate are provided, they should already be in UTC.
     /// </summary>
-    private static (DateTime startTime, DateTime endTime) GetTimeRange(int hoursBack, DateTime? fromDate, DateTime? toDate)
+    private static (DateTime startTime, DateTime endTime) GetTimeRange(int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime? asOfUtc = null)
     {
         if (fromDate.HasValue && toDate.HasValue)
         {
@@ -122,16 +122,26 @@ public partial class LocalDataService
             return (startUtc, endUtc);
         }
 
+        /*
+            #2495: asOfUtc moves the END of the hoursBack window off "now" so a caller can ask about a
+            past incident. It is deliberately NOT expressed as fromDate/toDate -- those are SERVER-LOCAL
+            (converted back to UTC just above), while the MCP anchor is UTC, and routing a UTC instant
+            through that branch would silently shift the window by the monitored server's offset.
+        */
+        var anchor = asOfUtc ?? DateTime.UtcNow;
+
         /* Use UTC directly since collection_time is stored in UTC */
-        return (DateTime.UtcNow.AddHours(-hoursBack), DateTime.UtcNow);
+        return (anchor.AddHours(-hoursBack), anchor);
     }
 
     /// <summary>
     /// Gets the time range in server local time (for tables like cpu_utilization_stats.sample_time).
     /// </summary>
-    private static (DateTime startTime, DateTime endTime) GetTimeRangeServerLocal(int hoursBack, DateTime? fromDate, DateTime? toDate)
+    private static (DateTime startTime, DateTime endTime) GetTimeRangeServerLocal(int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime? asOfUtc = null)
     {
-        var serverNow = DateTime.UtcNow.AddMinutes(ServerTimeHelper.UtcOffsetMinutes);
+        /* The anchor arrives in UTC (see GetTimeRange) and is carried into server-local here, so both
+           families answer the same instant even though they window on differently-based columns. */
+        var serverNow = (asOfUtc ?? DateTime.UtcNow).AddMinutes(ServerTimeHelper.UtcOffsetMinutes);
 
         if (fromDate.HasValue && toDate.HasValue)
         {

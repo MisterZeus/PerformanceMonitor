@@ -268,7 +268,8 @@ public sealed class McpHealthTools
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows to return, newest first. Default 200.")] int limit = 200)
+        [Description("Maximum rows to return, newest first. Default 200.")] int limit = 200,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -277,12 +278,20 @@ public sealed class McpHealthTools
         var invalidLimit = McpHelpers.ValidateTop(limit);
         if (invalidLimit != null) return invalidLimit;
 
+        /* ResolveAsOf here, deliberately NOT ValidateWindow. These three reads have never capped
+           hours_back -- they Math.Abs() it and window on the result -- so routing them through the
+           shared validator would impose the 168-hour ceiling every other read carries, and take reach
+           away from exactly the read whose premise is looking FURTHER back than the default. The anchor
+           is validated because it is new; the span keeps the behaviour callers already have. */
+        var anchorError = McpHelpers.ResolveAsOf(as_of, out var windowEnd);
+        if (anchorError != null) return anchorError;
+
         try
         {
             var hours = Math.Abs(hours_back);
 
             /* Over-fetch by one so truncation is observed, not inferred -- see Darling's twin. */
-            var rows = await dataService.GetRecentCollectionLogAsync(resolved.ServerId, hours, maxRows: limit + 1);
+            var rows = await dataService.GetRecentCollectionLogAsync(resolved.ServerId, hours, maxRows: limit + 1, asOfUtc: windowEnd);
             var truncated = rows.Count > limit;
             if (truncated) rows = rows.Take(limit).ToList();
 
@@ -346,18 +355,27 @@ public sealed class McpHealthTools
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 4.")] int hours_back = 4,
-        [Description("Limit the blocked-session series to one database. Omit for all databases.")] string? database_name = null)
+        [Description("Limit the blocked-session series to one database. Omit for all databases.")] string? database_name = null,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
+
+        /* ResolveAsOf here, deliberately NOT ValidateWindow. These three reads have never capped
+           hours_back -- they Math.Abs() it and window on the result -- so routing them through the
+           shared validator would impose the 168-hour ceiling every other read carries, and take reach
+           away from exactly the read whose premise is looking FURTHER back than the default. The anchor
+           is validated because it is new; the span keeps the behaviour callers already have. */
+        var anchorError = McpHelpers.ResolveAsOf(as_of, out var windowEnd);
+        if (anchorError != null) return anchorError;
 
         try
         {
             var hours = Math.Abs(hours_back);
             var filter = string.IsNullOrWhiteSpace(database_name) ? null : new[] { database_name };
 
-            var waits = await dataService.GetWaitingTaskTrendAsync(resolved.ServerId, hours);
-            var blocked = await dataService.GetBlockedSessionTrendAsync(resolved.ServerId, hours, databaseNames: filter);
+            var waits = await dataService.GetWaitingTaskTrendAsync(resolved.ServerId, hours, asOfUtc: windowEnd);
+            var blocked = await dataService.GetBlockedSessionTrendAsync(resolved.ServerId, hours, databaseNames: filter, asOfUtc: windowEnd);
 
             if (waits.Count == 0 && blocked.Count == 0)
             {
@@ -405,16 +423,25 @@ public sealed class McpHealthTools
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24)
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
+        /* ResolveAsOf here, deliberately NOT ValidateWindow. These three reads have never capped
+           hours_back -- they Math.Abs() it and window on the result -- so routing them through the
+           shared validator would impose the 168-hour ceiling every other read carries, and take reach
+           away from exactly the read whose premise is looking FURTHER back than the default. The anchor
+           is validated because it is new; the span keeps the behaviour callers already have. */
+        var anchorError = McpHelpers.ResolveAsOf(as_of, out var windowEnd);
+        if (anchorError != null) return anchorError;
+
         try
         {
             var hours = Math.Abs(hours_back);
-            var blocking = await dataService.GetBlockingDurationStatsAsync(resolved.ServerId, hours);
-            var deadlocks = await dataService.GetDeadlockSeverityStatsAsync(resolved.ServerId, hours);
+            var blocking = await dataService.GetBlockingDurationStatsAsync(resolved.ServerId, hours, asOfUtc: windowEnd);
+            var deadlocks = await dataService.GetDeadlockSeverityStatsAsync(resolved.ServerId, hours, asOfUtc: windowEnd);
 
             if (blocking.Count == 0 && deadlocks.Count == 0)
             {

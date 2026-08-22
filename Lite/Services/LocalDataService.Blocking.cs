@@ -73,12 +73,12 @@ GROUP BY collection_time";
     /// <summary>
     /// Gets recent deadlock events for a server.
     /// </summary>
-    public async Task<List<DeadlockRow>> GetRecentDeadlocksAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<DeadlockRow>> GetRecentDeadlocksAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 SELECT
@@ -173,13 +173,13 @@ ORDER BY bucket";
     /// <summary>
     /// Gets query snapshots (currently running queries) for a server.
     /// </summary>
-    public async Task<List<QuerySnapshotRow>> GetLatestQuerySnapshotsAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
+    public async Task<List<QuerySnapshotRow>> GetLatestQuerySnapshotsAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetLatestQuerySnapshotsAsync", "v_query_snapshots latest");
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -313,12 +313,12 @@ SELECT
     /// <summary>
     /// Gets recent blocked process reports from the XE-based collector.
     /// </summary>
-    public async Task<List<BlockedProcessReportRow>> GetRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
+    public async Task<List<BlockedProcessReportRow>> GetRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -665,12 +665,12 @@ ORDER BY bucket";
     /// Uses blocked_process_reports from Extended Events for more reliable detection.
     /// Falls back to blocking_snapshots if no XE data available.
     /// </summary>
-    public async Task<List<TrendPoint>> GetBlockingTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
+    public async Task<List<TrendPoint>> GetBlockingTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         /* Use blocked_process_reports from XE session - more reliable than point-in-time snapshots
@@ -717,12 +717,12 @@ ORDER BY bucket";
     /// <summary>
     /// Gets deadlock trend (count of deadlocks per minute bucket).
     /// </summary>
-    public async Task<List<TrendPoint>> GetDeadlockTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<TrendPoint>> GetDeadlockTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 SELECT
@@ -774,8 +774,8 @@ ORDER BY bucket";
     /// same state.</para>
     /// </summary>
     public Task<List<CollectorCaptureCount>> GetBlockingCaptureCountsAsync(
-        int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null) =>
-        GetCaptureCountsAsync(serverId, hoursBack, "collector_name IN ('blocked_process_report', 'dmv_blocking_snapshot')", fromDate, toDate);
+        int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null) =>
+        GetCaptureCountsAsync(serverId, hoursBack, "collector_name IN ('blocked_process_report', 'dmv_blocking_snapshot')", fromDate, toDate, asOfUtc);
 
     /// <summary>
     /// Successful runs of the deadlock collector inside the window. One capture path here, not two —
@@ -783,8 +783,8 @@ ORDER BY bucket";
     /// fallback to count.
     /// </summary>
     public Task<List<CollectorCaptureCount>> GetDeadlockCaptureCountsAsync(
-        int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null) =>
-        GetCaptureCountsAsync(serverId, hoursBack, "collector_name = 'deadlocks'", fromDate, toDate);
+        int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null) =>
+        GetCaptureCountsAsync(serverId, hoursBack, "collector_name = 'deadlocks'", fromDate, toDate, asOfUtc);
 
     /// <summary>
     /// Whether either blocking collector has EVER run successfully for this server, ignoring any window.
@@ -818,12 +818,12 @@ ORDER BY bucket";
        point of asking both is that their answers are compared. Darling's twin takes explicit bounds
        for the same reason. */
     private async Task<List<CollectorCaptureCount>> GetCaptureCountsAsync(
-        int serverId, int hoursBack, string collectorPredicate, DateTime? fromDate = null, DateTime? toDate = null)
+        int serverId, int hoursBack, string collectorPredicate, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 SELECT

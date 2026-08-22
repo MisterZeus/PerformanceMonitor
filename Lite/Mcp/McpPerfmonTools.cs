@@ -60,22 +60,23 @@ public sealed class McpPerfmonTools
         ServerManager serverManager,
         [Description("The exact counter name, e.g. 'Batch Requests/sec'.")] string counter_name,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24)
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var hoursError = McpHelpers.ValidateHoursBack(hours_back);
+            var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var points = await dataService.GetPerfmonTrendAsync(resolved.ServerId, counter_name, hours_back);
+            var points = await dataService.GetPerfmonTrendAsync(resolved.ServerId, counter_name, hours_back, asOfUtc: windowEnd);
             if (points.Count == 0)
             {
                 /* No points can mean three different things to a caller. Distinguish them so an LLM
                    doesn't read a bad counter name as "this metric looks fine." */
-                var collected = await dataService.GetDistinctPerfmonCountersAsync(resolved.ServerId, hours_back);
+                var collected = await dataService.GetDistinctPerfmonCountersAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
                 /* Page Life Expectancy is the counter people reach for by habit; it is intentionally
                    not collected, so an empty trend would otherwise be misread as "PLE looks fine." */
