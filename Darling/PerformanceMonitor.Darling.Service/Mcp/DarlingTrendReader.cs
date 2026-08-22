@@ -64,11 +64,9 @@ internal static class DarlingTrendReader
     public sealed record FileIoLatencyTrendPoint(
         DateTime CollectionTime, string DatabaseName, double AvgReadLatencyMs, double AvgWriteLatencyMs);
 
-    /// <summary>One query-duration / execution-count trend point: the per-second rate (elapsed ms/sec) plus
-    /// executions/sec (Lite's <c>QueryTrendPoint</c> shape).</summary>
     /// <summary>
-    /// One point on a Performance-Trends chart. <c>Value</c> is the per-second rate the chart plots
-    /// (elapsed ms/sec).
+    /// One query-duration / execution-count trend point, shared by the three Performance-Trends siblings:
+    /// the per-second rate (elapsed ms/sec) plus executions/sec (Lite's <c>QueryTrendPoint</c> shape).
     /// <para><c>ExecutionCount</c> and <c>ExecutionsPerSecond</c> are the SAME quantity - executions per
     /// second - and both are here because the first one shipped truncated to a long. On a server doing
     /// three executions a second that rounds harmlessly; on a quiet one doing 0.4 it reports ZERO, which
