@@ -29,12 +29,20 @@ namespace Darling.Tests;
 /// come from the artifacts themselves, never a transcribed copy, so the check cannot drift into agreeing with a
 /// stale list of its own.</para>
 ///
+/// <para><b>Two registries since #2530.</b> <c>SERVER_TABS</c> is the SQL Server set and the default for a
+/// server whose engine the store makes no claim about; <c>POSTGRES_TABS</c> is the six-tab PostgreSQL set, and
+/// <c>serverTabsFor(card)</c> is the only thing that chooses. Several pins below scan ONE registry's region of
+/// the file rather than the whole file, because the two sets have different rules — a <c>get_pg_*</c> read is
+/// correct in one and a defect in the other — and a whole-file scan cannot tell them apart.</para>
+///
 /// <para>This repository carries no JavaScript test runner, so the scan is a text scan over the shipped module
 /// (the <see cref="FleetPageAttentionFilterTests"/> / <see cref="ViewerGridPayloadColumnOrderPinTests"/>
 /// pattern). Behaviour was verified separately by running the shipped modules under a minimal DOM shim with a
-/// stubbed fetch across four response shapes (empty envelope, error, data-with-no-rows, data-with-rows): every
-/// tab built without throwing at three time ranges, and every request the page actually issued was checked
-/// against <c>CatalogDescriptors</c> for parameter-key validity. See the PR.</para>
+/// stubbed fetch across four response shapes (empty envelope, error, data-with-no-rows, and the awkward
+/// data-carrying-a-<c>finding</c>-and-no-summary-keys body several PostgreSQL reads answer their healthy case
+/// with): every tab of BOTH registries built without throwing at three time ranges, every request the page
+/// actually issued was recorded, and all eight <c>get_pg_*</c> reads were asserted to have been genuinely
+/// FETCHED from the PostgreSQL registry and from neither tab of the SQL Server one. See the PR.</para>
 /// </summary>
 public sealed class ServerPageTabsTests
 {
@@ -245,28 +253,108 @@ public sealed class ServerPageTabsTests
     }
 
     /// <summary>
-    /// No PostgreSQL read appears on the server page, and this is a guard rather than an oversight.
+    /// Every PostgreSQL read the service serves is reachable from the PostgreSQL registry, and from nowhere
+    /// else. Both directions matter and they fail differently.
     ///
-    /// <para>The web dashboard's per-server surface is fed by <c>/api/fleet</c>, and its tab registry
-    /// (<c>SERVER_TABS</c>) is a FLAT list applied to every server — nothing in <c>server-tabs.js</c> branches
-    /// on the engine. So a <c>get_pg_*</c> panel added to these tabs today would render for every server in
-    /// the fleet, permanently empty on the ~all of them that are SQL Server.</para>
+    /// <para><b>The direction this replaces.</b> Until #2530 the registry was a FLAT list applied to every
+    /// server, so a <c>get_pg_*</c> panel added to it rendered at every SQL Server in the fleet, permanently
+    /// empty on ~all of them — and the pin that stood here refused any PostgreSQL read at all, which was the
+    /// right guard while no engine branch existed. It does now, so the guard becomes a PLACEMENT rule: a
+    /// PostgreSQL read in <c>SERVER_TABS</c> is the same defect it always was.</para>
     ///
-    /// <para><b>The PAYLOAD half of that blocker is gone (#2530).</b> The card now carries
-    /// <c>engine_kind</c>, <c>is_postgres</c> and <c>is_aurora</c> beside <c>engine_edition</c>, so the
-    /// browser CAN tell a PostgreSQL target from a SQL Server one. What is still missing is the branch that
-    /// reads it: until the registry is engine-aware, this stays red on the first PostgreSQL panel someone
-    /// adds, which is the right order for the two halves to land in.</para>
+    /// <para><b>The direction that is new, and the one that would otherwise rot.</b> These eight reads spent
+    /// three releases served, documented and reachable only through MCP, because nothing anywhere failed when
+    /// a read had no screen. So the pin is derived from the DISPATCH, not from a list here: add a ninth
+    /// <c>get_pg_*</c> read and this goes red naming it, which is the only mechanism that stops the graphical
+    /// surface silently falling behind the reads a second time. If a new read genuinely should not have a
+    /// panel, that is a decision to write down here, not one to make by omission.</para>
     /// </summary>
     [Fact]
-    public void NoPostgresRead_IsOnTheServerPage_UntilTheTabRegistryBranchesOnTheEngine()
+    public void EveryPostgresRead_IsReachableFromThePostgresRegistry_AndFromNoOtherTab()
     {
-        var pg = ReadNamesIn(ServerTabsJs).Where(n => n.StartsWith("get_pg_", StringComparison.Ordinal)).ToArray();
+        var js = ServerTabsJs;
+        var served = DarlingWebEndpoints.BuildReadDispatch().Keys
+            .Where(n => n.StartsWith("get_pg_", StringComparison.Ordinal))
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+        Assert.NotEmpty(served);
+
+        var onPg = ReadNamesIn(RegistryRegion(js, "POSTGRES_TABS"));
+        var missing = served.Where(n => !onPg.Contains(n)).ToArray();
         Assert.True(
-            pg.Length == 0,
-            "the tab registry is a flat list with no engine branch, so these would render on every SQL Server " +
-            "too (the fleet card carries is_postgres since #2530 — what is missing is the branch that reads " +
-            "it): " + string.Join(", ", pg));
+            missing.Length == 0,
+            "the service serves these PostgreSQL reads and no PostgreSQL tab shows them, so they are reachable " +
+            "only through MCP — which is the whole of #2530: " + string.Join(", ", missing));
+
+        var strays = ReadNamesIn(RegistryRegion(js, "SERVER_TABS"))
+            .Where(n => n.StartsWith("get_pg_", StringComparison.Ordinal))
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+        Assert.True(
+            strays.Length == 0,
+            "these PostgreSQL reads are in the SQL Server registry, which is applied to every SQL Server in " +
+            "the fleet — each would render permanently empty there: " + string.Join(", ", strays));
+
+        /* And the PostgreSQL registry borrows exactly three SQL-Server-named reads. All three read the
+           collection log or the findings store rather than a SQL Server collector's output, so they answer a
+           PostgreSQL target honestly; anything else added here would be a panel that cannot fill. Named
+           explicitly, because the reads that LOOK engine-neutral and are not (get_server_summary,
+           get_daily_summary) are the ones someone reaches for first. */
+        var neutral = new[] { "get_analysis_findings", "get_collection_health", "get_collection_log" };
+        var unexpected = onPg
+            .Where(n => !n.StartsWith("get_pg_", StringComparison.Ordinal) && !neutral.Contains(n, StringComparer.Ordinal))
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+        Assert.True(
+            unexpected.Length == 0,
+            "the PostgreSQL registry names SQL Server reads beyond the three engine-neutral ones — each of " +
+            "these answers a PostgreSQL target with a sentence about a collector that will never run: " +
+            string.Join(", ", unexpected));
+    }
+
+    /// <summary>
+    /// The engine branch, and the asymmetry that makes it safe.
+    ///
+    /// <para>Only a POSITIVE PostgreSQL claim moves a server off the SQL Server registry. <c>is_postgres</c> is
+    /// derived server-side from <c>collect.servers.engine_kind</c> and is false for a NULL kind, for a token
+    /// this build does not recognise, and for a card that never arrived — none of which is evidence for either
+    /// engine. Falling back to the SQL Server tabs there is the pre-#2530 behaviour, unchanged, and the
+    /// alternative (guessing PostgreSQL from an absence) would break every server that has simply not connected
+    /// since the rung landed. The <c>=== true</c> is load-bearing: a truthy non-boolean must not pass.</para>
+    ///
+    /// <para><b>Nothing in the browser re-derives an engine fact (R1).</b> The registry comes from
+    /// <c>is_postgres</c>, which the server derives through <see cref="MonitoredEngineKind"/>; the header's
+    /// engine badge comes from <c>engine_description</c>, which the server WORDS through the same class. The
+    /// second of those is the one that nearly went wrong: three tokens mapped to three words in JavaScript
+    /// looks harmless and is a second description table, which is exactly what
+    /// <c>DescribeEngineKind</c>'s own comment says drifts.</para>
+    /// </summary>
+    [Fact]
+    public void TheTabSet_SwitchesOnlyOnAPositivePostgresClaim()
+    {
+        var js = ServerTabsJs;
+
+        Assert.Contains("export function serverTabsFor(card) {", js, StringComparison.Ordinal);
+        Assert.Contains("return card && card.is_postgres === true ? POSTGRES_TABS : SERVER_TABS;", js, StringComparison.Ordinal);
+
+        /* The shell asks that function and maps whatever it hands back. It never reads the boolean, never reads
+           the token, and never spells either engine's name — the card carries all three already. */
+        Assert.Contains("const tabs = serverTabsFor(card);", ServerJs, StringComparison.Ordinal);
+        Assert.DoesNotContain("card.is_postgres", ServerJs, StringComparison.Ordinal);
+        Assert.DoesNotContain("card.engine_kind", ServerJs, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"aurora-postgres\"", ServerJs, StringComparison.Ordinal);
+        Assert.Contains("card.engine_description", ServerJs, StringComparison.Ordinal);
+        Assert.DoesNotContain("engine_kind ===", js, StringComparison.Ordinal);
+
+        /* And the words on that badge are MonitoredEngineKind's, DERIVED on the card rather than assigned by
+           whichever builder happened to remember — with null for an absent kind, so the browser shows no badge
+           rather than "an unrecognised engine" at every server that has not connected since the rung landed. */
+        var reader = ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingFleetReader.cs"));
+        Assert.Contains(
+            "string.IsNullOrWhiteSpace(EngineKind) ? null : MonitoredEngineKind.DescribeEngineKind(EngineKind);",
+            reader,
+            StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -277,8 +365,11 @@ public sealed class ServerPageTabsTests
     [Fact]
     public void TheSubTabBar_IsBuiltFromTheRegistry_AndTheRouterCarriesTheTab()
     {
-        /* One source of truth for the bar: it maps the registry rather than listing ids. */
-        Assert.Contains("SERVER_TABS.map((t) =>", ServerJs, StringComparison.Ordinal);
+        /* One source of truth for the bar: it maps the registry it was HANDED rather than listing ids or
+           reaching for one of the two by name — that argument is what makes the bar engine-aware (#2530). */
+        Assert.Contains("function subtabBar(server, active, tabs) {", ServerJs, StringComparison.Ordinal);
+        Assert.Contains("tabs.map((t) =>", ServerJs, StringComparison.Ordinal);
+        Assert.DoesNotContain("SERVER_TABS.map(", ServerJs, StringComparison.Ordinal);
         Assert.Contains("\"#/server/\" + encodeURIComponent(server) + \"/\" + t.id", ServerJs, StringComparison.Ordinal);
 
         /* And the router parses that second segment back out and hands it to the page. */
@@ -290,18 +381,25 @@ public sealed class ServerPageTabsTests
         Assert.Contains("decodeURIComponent(rest.slice(0, slash))", AppJs, StringComparison.Ordinal);
         Assert.Contains("if (slash < 0) return { name: \"server\", param: decodeURIComponent(rest) };", AppJs, StringComparison.Ordinal);
 
-        /* An unknown id resolves to a tab rather than throwing, which is what keeps a stale bookmark working. */
-        Assert.Contains("SERVER_TABS.find((t) => t.id === id) || SERVER_TABS[0]", ServerTabsJs, StringComparison.Ordinal);
+        /* An unknown id resolves to a tab rather than throwing, which is what keeps a stale bookmark working.
+           The fallback is now WITHIN the registry the card chose — a PostgreSQL id at a SQL Server server lands
+           on that registry's Overview rather than on a tab from the other set. */
+        Assert.Contains("const registry = tabs || SERVER_TABS;", ServerTabsJs, StringComparison.Ordinal);
+        Assert.Contains("return registry.find((t) => t.id === id) || registry[0];", ServerTabsJs, StringComparison.Ordinal);
 
-        /* Ids are unique — two tabs sharing one id makes the second unreachable and the bar's active state lie. */
-        var ids = Regex.Matches(ServerTabsJs, "^\\s{4}id: \"([a-z-]+)\",$", RegexOptions.Multiline)
-            .Select(m => m.Groups[1].Value)
-            .ToArray();
-        /* An exact count, not a floor. A floor would have let the prose in the CHANGELOG, the commit and this
-           file drift from the registry — which it did, at "eleven" against twelve, before this pin existed. */
-        Assert.Equal(12, ids.Length);
-        Assert.Equal(ids.Length, ids.Distinct(StringComparer.Ordinal).Count());
-        Assert.Equal("overview", ids[0]); // the fallback tab must be the first one
+        /* Ids are unique WITHIN a registry — two tabs sharing one id makes the second unreachable and the bar's
+           active state lie. ACROSS registries they may and do collide (overview, activity, waits, io), which is
+           deliberate: those are the deep links that survive a server turning out to be the other engine. */
+        foreach (var (registry, expected) in new[] { ("SERVER_TABS", 12), ("POSTGRES_TABS", 6) })
+        {
+            var ids = TabIdsIn(RegistryRegion(ServerTabsJs, registry));
+            /* An exact count, not a floor. A floor would have let the prose in the CHANGELOG, the commit and
+               this file drift from the registry — which it did, at "eleven" against twelve, before this pin
+               existed, and the same prose now carries a second number to drift. */
+            Assert.Equal(expected, ids.Length);
+            Assert.Equal(ids.Length, ids.Distinct(StringComparer.Ordinal).Count());
+            Assert.Equal("overview", ids[0]); // the fallback tab must be the first one, in both
+        }
     }
 
     /// <summary>
@@ -375,6 +473,19 @@ public sealed class ServerPageTabsTests
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js"));
         Assert.Contains("desc.emptyText || \"No rows in this window.\"", panels, StringComparison.Ordinal);
         Assert.Contains("if (!points.length && desc.emptyText) return emptyStrip(desc.emptyText);", panels, StringComparison.Ordinal);
+
+        /* And vizStat's twin of that guard (#2530). Several PostgreSQL reads answer their HEALTHY case with a
+           data body carrying prose under `finding` and NONE of the summary keys — get_pg_xmin_horizon's
+           {status:"no_holder", finding} is the type. That is not the {status,message} envelope, so
+           classifyResponse calls it data, it reaches a viz, and a tile set over keys the body does not have
+           renders as a row of em-dashes that says nothing. All-null is the only state where the descriptor's
+           sentence beats the tiles, so that is exactly when it wins; a descriptor with no emptyText — every
+           stored view, and every SQL Server tile on this page — falls through unchanged. */
+        Assert.Contains(
+            "if (desc.emptyText && stats.every((s) => getPath(data, s.key) == null)) return emptyStrip(desc.emptyText);",
+            panels,
+            StringComparison.Ordinal);
+        Assert.Contains("function stat(title, read, params, stats, subtitle, span = 1, emptyText) {", js, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -415,25 +526,32 @@ public sealed class ServerPageTabsTests
         }
 
         var problems = new List<string>();
-        var ids = Regex.Matches(js, "^    id: \"([a-z-]+)\",$", RegexOptions.Multiline).ToArray();
 
-        for (var i = 0; i < ids.Length; i++)
+        /* Per REGISTRY, not over the whole file. The blocks are delimited by the next tab's id, so a single
+           whole-file sweep would run the SQL Server registry's last tab straight through the PostgreSQL
+           registry's header comment and attribute its reads to a tab that does not fetch them. */
+        foreach (var registry in new[] { "SERVER_TABS", "POSTGRES_TABS" })
         {
-            var start = ids[i].Index;
-            var end = i + 1 < ids.Length
-                ? ids[i + 1].Index
-                : js.IndexOf("/** The tab for an id", StringComparison.Ordinal);
-            var block = js[start..end];
+            var region = RegistryRegion(js, registry);
+            var ids = Regex.Matches(region, "^    id: \"([a-z-]+)\",$", RegexOptions.Multiline).ToArray();
+            Assert.NotEmpty(ids);
 
-            var reads = Regex.Matches(block, "\"(get_[a-z0-9_]+|audit_config)\"").Select(m => m.Groups[1].Value).ToList();
-            foreach (var (call, composed) in composites)
+            for (var i = 0; i < ids.Length; i++)
             {
-                if (block.Contains(call, StringComparison.Ordinal)) reads.AddRange(composed);
-            }
+                var start = ids[i].Index;
+                var end = i + 1 < ids.Length ? ids[i + 1].Index : region.Length;
+                var block = region[start..end];
 
-            foreach (var dupe in reads.GroupBy(r => r, StringComparer.Ordinal).Where(g => g.Count() > 1))
-            {
-                problems.Add($"tab '{ids[i].Groups[1].Value}' fetches {dupe.Key} {dupe.Count()} times");
+                var reads = Regex.Matches(block, "\"(get_[a-z0-9_]+|audit_config)\"").Select(m => m.Groups[1].Value).ToList();
+                foreach (var (call, composed) in composites)
+                {
+                    if (block.Contains(call, StringComparison.Ordinal)) reads.AddRange(composed);
+                }
+
+                foreach (var dupe in reads.GroupBy(r => r, StringComparer.Ordinal).Where(g => g.Count() > 1))
+                {
+                    problems.Add($"{registry} tab '{ids[i].Groups[1].Value}' fetches {dupe.Key} {dupe.Count()} times");
+                }
             }
         }
 
@@ -447,6 +565,33 @@ public sealed class ServerPageTabsTests
     }
 
     // ── helpers ────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The slice of the module holding ONE registry's tabs. The boundaries are asserted rather than assumed, so
+    /// a rename fails with "remap this test" instead of silently scanning nothing and passing — an empty region
+    /// makes every pin below vacuously true, which is the failure mode this whole class exists to refuse.
+    /// </summary>
+    private static string RegistryRegion(string js, string registry)
+    {
+        var (open, close) = registry switch
+        {
+            "SERVER_TABS" => ("export const SERVER_TABS = [", "/* ─────────────────────────── the PostgreSQL tabs"),
+            "POSTGRES_TABS" => ("export const POSTGRES_TABS = [", "/**\n * The tab registry for a fleet card"),
+            _ => throw new ArgumentOutOfRangeException(nameof(registry)),
+        };
+
+        var at = js.IndexOf(open, StringComparison.Ordinal);
+        Assert.True(at > 0, registry + " is gone — remap this test before editing it");
+        var end = js.IndexOf(close, at, StringComparison.Ordinal);
+        Assert.True(end > at, registry + "'s end marker moved — remap this test before editing it");
+        return js[at..end];
+    }
+
+    /// <summary>The tab ids declared in a registry's region, in order.</summary>
+    private static string[] TabIdsIn(string region) =>
+        Regex.Matches(region, "^    id: \"([a-z-]+)\",$", RegexOptions.Multiline)
+            .Select(m => m.Groups[1].Value)
+            .ToArray();
 
     /// <summary>Every read name the module mentions. Read names live in their own <c>get_*</c> namespace plus
     /// three one-off verbs; nothing else in this module is a string literal of that shape.</summary>

@@ -496,10 +496,25 @@ exclusion list — 92 read endpoints out of 111 tools — and these are the excl
 - **No alert tuning, no mute-rule writes, no adding or removing servers.**
 
 The pages are Fleet Overview, per-server, Alert History, Availability Groups and Custom Views. The per-server
-page carries twelve sub-tabs — Overview, Wait Stats, CPU, Memory, Blocking, File I/O, Queries, Configuration,
-Config Changes, Activity, System Events and Collection Health — 72 of the 92 read endpoints on that page
-alone, 73 across all five pages, against the viewer's nineteen top-level per-server tabs (65 counting their
-inner tabs). So most of what the viewer shows is now here, and what is not divides into three groups.
+page carries one of **two** tab sets, chosen from the engine the store recorded for that server
+([#2530](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2530)):
+
+- **SQL Server — twelve sub-tabs.** Overview, Wait Stats, CPU, Memory, Blocking, File I/O, Queries,
+  Configuration, Config Changes, Activity, System Events, Collection Health.
+- **PostgreSQL — six.** Overview, Activity, Vacuum, Waits, I/O, Replication. Six is the design and not a
+  shortfall: it is where all eight `get_pg_*` reads live, and the SQL Server tabs it does not have (tempdb,
+  Query Store, trace flags, plan cache, the `system_health` ring buffer) have no PostgreSQL analogue to fill
+  them. Vacuum is deliberately one tab rather than three — an old xmin horizon starves vacuum, starved vacuum
+  falls behind on freezing, and freezing falling behind is what ends in wraparound; read separately each looks
+  survivable, and together they are one escalating story.
+- **A server whose engine the store has not recorded gets the SQL Server set**, which is what it always got.
+  A NULL `engine_kind` means "no connect has stamped it", which is not a claim of either engine, and only a
+  positive PostgreSQL claim moves a server off the default. A server that has never connected will therefore
+  show SQL Server tabs until it does.
+
+Between them the two sets reach **80 of the 92** read endpoints, 81 across all five pages, against the viewer's
+nineteen top-level per-server tabs (65 counting their inner tabs). So most of what the viewer shows is now
+here, and what is not divides into three groups.
 
 **Reads that exist but no web page shows.** `get_database_scoped_config`, whose `databases[].settings[]` shape
 the table renderer cannot draw, and `get_store_metrics`, which is store-wide and has no per-server home.
@@ -512,19 +527,27 @@ its avg CPU and avg duration over the window plus a grid of its per-collection s
 are exactly the queries the table shows** — the picker indexes into the rows rendered directly above it, rather
 than reading a second, wider list that could offer a query the table does not.
 
-**The eight `get_pg_*` PostgreSQL reads are NOT a web gap, and this section used to say they were.** Neither
-surface shows them: the WPF viewer has no PostgreSQL screens either, so a PostgreSQL target is readable only
-through MCP, on both SKUs. If you are evaluating this for PostgreSQL monitoring, know that up front: the
-collection and the reads are real and the graphical surfaces are not, and closing that is tracked as
-[#2530](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2530).
+**The eight `get_pg_*` PostgreSQL reads are on the web now, and are still absent from the WPF viewer.** That
+is the current state of [#2530](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2530): the web
+dashboard renders the six PostgreSQL tabs above at any target whose `engine_kind` says PostgreSQL, and the
+desktop viewer has no PostgreSQL screens at all — so on Windows a PostgreSQL target is still readable only
+through MCP. If you are evaluating this for PostgreSQL monitoring, know which surface you are evaluating.
+
+One PostgreSQL tab can be permanently empty, and that is not a fault. **Waits** is fed by `get_pg_wait_stats`,
+which reads Amazon Aurora's `aurora_stat_system_waits()` — core PostgreSQL has no equivalent in any version.
+On a stock PostgreSQL target the panel answers `not_collected`, naming the server, the engine and the
+collector and saying the gap is permanent, rather than going blank. The tab is **shown** at stock PostgreSQL
+deliberately, so the tab set does not change shape between two PostgreSQL servers in one fleet, and so the
+Aurora capability is discoverable from a stock instance rather than invisible.
 
 The web used to carry an additional obstacle on top of that, and **it is now gone**: `/api/fleet`'s card
 carried the SQL Server `engine_edition` and no target-engine discriminator, so a browser could not tell a
 PostgreSQL target from a SQL Server one — a PostgreSQL target lands at `engine_edition` 0, which is also what
 a SQL Server that has never connected lands at. The store now records the target engine explicitly
-(`collect.servers.engine_kind`, schema v82) and the card carries `engine_kind` plus the derived
-`is_postgres` / `is_aurora` booleans. What is still missing is the half that spends it: neither the web tab
-registry nor the viewer branches on the engine yet, so a PostgreSQL target still renders SQL Server tabs.
+(`collect.servers.engine_kind`, schema v82) and the card carries `engine_kind`, the derived
+`is_postgres` / `is_aurora` booleans, and `engine_description` — the engine's name in words, composed on the
+server so no viewer owns a second copy of the vocabulary. **The web tab registry now branches on it**; the
+WPF viewer does not, so a PostgreSQL target on the desktop still renders SQL Server tabs.
 
 One consequence you may notice before the screens arrive: a SQL Server read aimed at a PostgreSQL target now
 answers `not_collected` naming the engine ("...runs Aurora PostgreSQL. The system_health_events collector is

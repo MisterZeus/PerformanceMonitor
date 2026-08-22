@@ -645,6 +645,11 @@ table.data td.sev-Healthy { color: var(--ok); }
 .page-head .server-title { display: flex; align-items: center; gap: 0.5rem; }
 .page-head .server-title h2 { margin: 0; }
 .page-head .server-band { display: inline-flex; }
+.page-head .server-engine { display: inline-flex; }
+/* The engine badge names what the server RUNS, and is the answer to "why does this one have six tabs and that
+   one twelve" (#2530). Deliberately neutral rather than band-coloured: an engine is not a health state, and a
+   card whose engine_kind is NULL renders no badge at all rather than one asserting a default. */
+.badge.engine { background: var(--lighter); color: var(--muted); font-weight: 500; }
 
 /* ─────────────────────────── sort control ─────────────────────────── */
 

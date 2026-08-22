@@ -17,6 +17,15 @@
  * re-renders the whole route. An unknown or absent tab id resolves to Overview rather than erroring, so every
  * pre-existing #/server/{name} link keeps working unchanged.
  *
+ * WHICH tab set is a question about the SERVER, not about the shell (#2530): a PostgreSQL target gets the six
+ * PostgreSQL tabs and a SQL Server target the twelve SQL Server ones, chosen by serverTabsFor() from the fleet
+ * card's server-derived `is_postgres`. That fact arrives with the card, so the bar and the grid wait for the
+ * ONE /api/fleet read this page already made for the header's band and reason — not a second request, and not
+ * a guess rendered first and corrected after. Rendering the SQL Server set optimistically would flash twelve
+ * wrong tabs at every PostgreSQL target and start nine reads that cannot answer, which is the exact experience
+ * #2530 was filed about; a loading strip for one fetch is the cheaper wrong answer. If the card never arrives
+ * the page falls back to the SQL Server registry, which is what an unclaimed server has always rendered.
+ *
  * The time range is the web twin of ViewerServerTab.TimeRange.cs's preset picker: one page-level window that
  * every time-windowed panel is given. It is module state (like the fleet page's sort), so it survives the
  * refresh — but it is NOT persisted to localStorage, because a page that reopens on a 30-day window is slow for
@@ -24,8 +33,8 @@
  * subtitle rather than inheriting a label that would misdescribe them.
  */
 
-import { el, mount, apiGet, bandClass } from "../util.js";
-import { SERVER_TABS, findServerTab, tabNote } from "./server-tabs.js";
+import { el, mount, apiGet, bandClass, loadingStrip } from "../util.js";
+import { serverTabsFor, findServerTab, tabNote } from "./server-tabs.js";
 import { metricBands } from "./fleet.js";
 
 /** The page time range. Mirrors the desktop viewer's presets, plus the two longer windows the view chrome uses. */
@@ -51,25 +60,35 @@ function rangeContext() {
 }
 
 export function renderServer(main, server, tabId) {
-  const tab = findServerTab(tabId);
-  current = { server, tab };
+  current = { server, tab: null };
 
   const dot = el("span", { class: "dot" });
   const badgeSlot = el("span", { class: "server-band" });
+  const engineSlot = el("span", { class: "server-engine" });
   const whySlot = el("div", { class: "server-why" });
   const head = el("div", { class: "page-head" }, [
     el("a", { href: "#/fleet", text: "← Fleet" }),
     el("span", { class: "server-title" }, [dot, el("h2", { text: server })]),
     badgeSlot,
+    engineSlot,
     el("div", { class: "spacer" }),
     rangeControl(),
   ]);
-  enrichServerHead(dot, badgeSlot, whySlot, server);
 
+  /* The bar and the note share one slot because both are decided by the same card. */
+  const tabsSlot = el("div", { class: "subtabs-slot" }, [loadingStrip()]);
   gridNode = el("div", { class: "panel-grid" });
-  redrawPanels();
+  mount(main, [head, whySlot, tabsSlot, gridNode]);
 
-  mount(main, [head, whySlot, subtabBar(server, tab), tabNote(tab), gridNode]);
+  loadServerCard(server, (card, reason) => {
+    fillServerHead(dot, badgeSlot, engineSlot, whySlot, card, reason);
+
+    const tabs = serverTabsFor(card);
+    const tab = findServerTab(tabId, tabs);
+    current = { server, tab };
+    mount(tabsSlot, [subtabBar(server, tab, tabs), tabNote(tab)]);
+    redrawPanels();
+  });
 }
 
 /** (Re)fill the panel grid for the current server + tab at the current range. No refetch of anything else. */
@@ -80,11 +99,11 @@ function redrawPanels() {
 
 /* The sub-tab bar — the web port of ViewerServerTab.xaml's TabControl. Real <a href> links, not click handlers,
    so a tab can be middle-clicked, bookmarked and shared; the hash router does the rest. */
-function subtabBar(server, active) {
+function subtabBar(server, active, tabs) {
   return el(
     "nav",
     { class: "subtabs", role: "tablist", "aria-label": "Server sections" },
-    SERVER_TABS.map((t) =>
+    tabs.map((t) =>
       el("a", {
         class: "subtab" + (t.id === active.id ? " active" : ""),
         href: "#/server/" + encodeURIComponent(server) + "/" + t.id,
@@ -111,36 +130,57 @@ function rangeControl() {
   return el("label", { class: "range-control" }, [el("span", { text: "Range" }), sel]);
 }
 
-/* The server header's status dot, band badge and the WHY beneath them, all from this server's pre-banded fleet
- * card (one /api/fleet read). The header renders immediately and this fills them in when the card arrives.
+/* This server's fleet card, plus the reason sentence the fleet's worst-first ranking computed for it. ONE
+ * /api/fleet read serves both jobs the page has for it — the header's band and reason, and the engine the tab
+ * set is chosen by — because two callers of the same endpoint on one page render is a second request nobody
+ * asked for.
+ *
+ * `onCard` is ALWAYS called, card or not. A fleet read that failed, and a server name the fleet does not carry,
+ * still have to get tabs; a null card is "no engine claim", which serverTabsFor answers with the SQL Server
+ * registry, exactly as this page behaved before it could ask. */
+function loadServerCard(server, onCard) {
+  (async () => {
+    const res = await apiGet("/api/fleet");
+    if (res.kind !== "data") return onCard(null, null);
+
+    const matches = (c) => c.server_name === server || c.display_name === server;
+    const card = (res.data.cards || []).find(matches) || null;
+    /* The reason belongs to the RANKING, not to the card, so it travels as its own value rather than being
+       stapled onto the card object — and a server outside the ranking has none, which stays a null here
+       rather than becoming a sentence invented in the browser. */
+    const ranked = (res.data.worst_servers || []).find((w) => w.display_name === server);
+    onCard(card, ranked && ranked.reason ? ranked.reason : null);
+  })();
+}
+
+/* The server header's status dot, band badge, engine badge and the WHY beneath them, all from the card above.
  *
  * The band word alone is not an answer. `Warning` has three unrelated causes — a genuine metric breach, a server
  * awaiting its first collection, and a collector error — so a badge reading "Warning" with no way to ask why is
  * the #2422 report rebuilt on a new surface, which is exactly what #2429 fixed on the desktop by attaching the
- * card's own metric rows. Two things are shown here and NEITHER is derived in the browser (R1): the per-metric
- * severity chips, rendered by fleet.js's own metricBands so there is one implementation rather than two, and —
- * when this server is in the fleet's worst-first ranking — the reason string the server already computed for it,
- * the same sentence the fleet page shows. A server outside that ranking gets the chips and no sentence, because
- * inventing one here is the second derivation this comment exists to refuse. */
-function enrichServerHead(dot, badgeSlot, whySlot, server) {
-  (async () => {
-    const res = await apiGet("/api/fleet");
-    if (res.kind !== "data") return;
-    const matches = (c) => c.server_name === server || c.display_name === server;
-    const card = (res.data.cards || []).find(matches);
-    if (!card) return;
+ * card's own metric rows. Nothing shown here is derived in the browser (R1): the per-metric severity chips are
+ * rendered by fleet.js's own metricBands so there is one implementation rather than two, the reason is the same
+ * sentence the fleet page shows, and the engine is the token the store recorded. A server outside the ranking
+ * gets the chips and no sentence, because inventing one here is the second derivation this comment refuses. */
+function fillServerHead(dot, badgeSlot, engineSlot, whySlot, card, reason) {
+  if (!card) return;
 
-    dot.className = "dot " + bandClass(card.band);
-    const ranked = (res.data.worst_servers || []).find((w) => w.display_name === server);
-    const reason = ranked && ranked.reason ? ranked.reason : null;
-    mount(
-      badgeSlot,
-      el("span", { class: "badge " + bandClass(card.band), text: card.status || card.band, title: reason || null })
-    );
+  dot.className = "dot " + bandClass(card.band);
+  mount(
+    badgeSlot,
+    el("span", { class: "badge " + bandClass(card.band), text: card.status || card.band, title: reason || null })
+  );
 
-    mount(whySlot, [
-      reason ? el("div", { class: "server-reason " + bandClass(card.band), text: reason }) : null,
-      metricBands(card),
-    ]);
-  })();
+  /* The engine badge is the answer to "why does this server have six tabs and that one twelve". Only a card
+     that made a claim gets one: an unstamped engine renders no badge rather than one reading "SQL Server",
+     because the tabs it gets are a default, not a finding — which is why the SERVER sends null there rather
+     than a description of the absence. The wording is MonitoredEngineKind's, not this file's (R1). */
+  if (card.engine_description) {
+    mount(engineSlot, [el("span", { class: "badge engine", text: card.engine_description })]);
+  }
+
+  mount(whySlot, [
+    reason ? el("div", { class: "server-reason " + bandClass(card.band), text: reason }) : null,
+    metricBands(card),
+  ]);
 }
