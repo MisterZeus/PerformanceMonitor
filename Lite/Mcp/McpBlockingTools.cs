@@ -244,7 +244,14 @@ public sealed class McpBlockingTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var points = await dataService.GetBlockingTrendAsync(resolved.ServerId, hours_back);
+            /* One instant for BOTH reads. Resolving now separately in the trend and the capture count
+               lets a row arrive between them, and the two answers exist to be compared -- Darling's
+               twin pins a single now for exactly this reason. */
+            var windowEnd = DateTime.UtcNow;
+            var windowStart = windowEnd.AddHours(-Math.Abs(hours_back));
+
+            var points = await dataService.GetBlockingTrendAsync(
+                resolved.ServerId, hours_back, windowStart, windowEnd);
 
             if (points.Count == 0)
             {
@@ -256,7 +263,8 @@ public sealed class McpBlockingTools
                     collection_log, which records a SUCCESS with zero rows for a collector that ran and saw
                     nothing. Darling's twin makes the same distinction with the same words.
                 */
-                var captures = await dataService.GetBlockingCaptureCountsAsync(resolved.ServerId, hours_back);
+                var captures = await dataService.GetBlockingCaptureCountsAsync(
+                    resolved.ServerId, hours_back, windowStart, windowEnd);
                 return await EmptyTrend(
                     "blocking", resolved.ServerName, hours_back, captures,
                     () => dataService.HasAnyBlockingCaptureAsync(resolved.ServerId));
@@ -292,12 +300,18 @@ public sealed class McpBlockingTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var points = await dataService.GetDeadlockTrendAsync(resolved.ServerId, hours_back);
+            /* Same single-instant discipline as the blocking trend above. */
+            var dlWindowEnd = DateTime.UtcNow;
+            var dlWindowStart = dlWindowEnd.AddHours(-Math.Abs(hours_back));
+
+            var points = await dataService.GetDeadlockTrendAsync(
+                resolved.ServerId, hours_back, dlWindowStart, dlWindowEnd);
 
             if (points.Count == 0)
             {
                 /* Same two facts as the blocking trend above, same denominator, same reason. */
-                var captures = await dataService.GetDeadlockCaptureCountsAsync(resolved.ServerId, hours_back);
+                var captures = await dataService.GetDeadlockCaptureCountsAsync(
+                    resolved.ServerId, hours_back, dlWindowStart, dlWindowEnd);
                 return await EmptyTrend(
                     /* SINGULAR: the subject lands in "No {subject} was recorded", and "no deadlocks
                        was recorded" is not a sentence. It also reads correctly in the other two,

@@ -773,16 +773,18 @@ ORDER BY bucket";
     /// two must stay in step so a user moving between the SKUs is not told a different story about the
     /// same state.</para>
     /// </summary>
-    public Task<List<CollectorCaptureCount>> GetBlockingCaptureCountsAsync(int serverId, int hoursBack) =>
-        GetCaptureCountsAsync(serverId, hoursBack, "collector_name IN ('blocked_process_report', 'dmv_blocking_snapshot')");
+    public Task<List<CollectorCaptureCount>> GetBlockingCaptureCountsAsync(
+        int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null) =>
+        GetCaptureCountsAsync(serverId, hoursBack, "collector_name IN ('blocked_process_report', 'dmv_blocking_snapshot')", fromDate, toDate);
 
     /// <summary>
     /// Successful runs of the deadlock collector inside the window. One capture path here, not two —
     /// deadlocks come only from the <c>deadlocks</c> collector's system_health read, and there is no DMV
     /// fallback to count.
     /// </summary>
-    public Task<List<CollectorCaptureCount>> GetDeadlockCaptureCountsAsync(int serverId, int hoursBack) =>
-        GetCaptureCountsAsync(serverId, hoursBack, "collector_name = 'deadlocks'");
+    public Task<List<CollectorCaptureCount>> GetDeadlockCaptureCountsAsync(
+        int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null) =>
+        GetCaptureCountsAsync(serverId, hoursBack, "collector_name = 'deadlocks'", fromDate, toDate);
 
     /// <summary>
     /// Whether either blocking collector has EVER run successfully for this server, ignoring any window.
@@ -804,12 +806,17 @@ ORDER BY bucket";
     /// literal from the two call sites above — never caller input — so it is concatenated rather than
     /// bound; the server id and window still bind as parameters.
     /// </summary>
-    private async Task<List<CollectorCaptureCount>> GetCaptureCountsAsync(int serverId, int hoursBack, string collectorPredicate)
+    /* fromDate/toDate let a CALLER pin one instant across the trend read and this one. Resolving now
+       independently in each means the two can straddle a row that arrives between them, and the whole
+       point of asking both is that their answers are compared. Darling's twin takes explicit bounds
+       for the same reason. */
+    private async Task<List<CollectorCaptureCount>> GetCaptureCountsAsync(
+        int serverId, int hoursBack, string collectorPredicate, DateTime? fromDate = null, DateTime? toDate = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
 
         command.CommandText = @"
 SELECT
