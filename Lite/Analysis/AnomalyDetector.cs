@@ -79,8 +79,15 @@ public class AnomalyDetector
     {
         var anomalies = new List<Fact>();
 
-        // Check if baseline period has any data at all — if not, skip all anomaly detection.
-        if (!await HasBaselineDataAsync(context.ServerId, context.CancellationToken))
+        /* Check if baseline period has any data at all — if not, skip all anomaly detection.
+
+           #2506: the gate's 30 days are measured back from the WINDOW's end, not from the clock. Every
+           other bound in this class already comes off context.TimeRangeStart/End, and the baseline this
+           gate is guarding is computed at context.TimeRangeStart too — so asking "was anything collected
+           in the 30 days before now" while the baseline reads the 30 days before an anchored window was
+           the one place the two could disagree. Identical for an unanchored pass, whose TimeRangeEnd IS
+           now. */
+        if (!await HasBaselineDataAsync(context.ServerId, context.TimeRangeEnd, context.CancellationToken))
             return anomalies;
 
         // Existing detection methods (upgraded to time-bucketed baselines)
@@ -229,7 +236,7 @@ ORDER BY ms_delta DESC LIMIT 1";
     /// Checks if the server has enough historical data for meaningful baselines.
     /// Uses wait_stats as canary — if waits are collected, other data is too.
     /// </summary>
-    private async Task<bool> HasBaselineDataAsync(int serverId, CancellationToken cancellationToken)
+    private async Task<bool> HasBaselineDataAsync(int serverId, DateTime windowEnd, CancellationToken cancellationToken)
     {
         try
         {
@@ -244,7 +251,7 @@ SELECT (SELECT COUNT(*) FROM v_wait_stats
      + (SELECT COUNT(*) FROM v_cpu_utilization_stats
         WHERE server_id = $1 AND collection_time >= $2)";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
-            cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-30) });
+            cmd.Parameters.Add(new DuckDBParameter { Value = windowEnd.AddDays(-30) });
 
             var count = Convert.ToInt64(await cmd.ExecuteScalarAsync(cancellationToken) ?? 0);
             return count > 0;

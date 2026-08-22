@@ -99,6 +99,17 @@ INSERT INTO analysis_findings
      incident_id, remediation_action_json, drill_down_json)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)";
 
+    /*
+        #2506 added the UPPER bound ($3). Without it the read had a start and no end, so an as_of
+        anchor could only ever move the window's start EARLIER and every anchored read would still
+        return everything up to now — the anchor validated, the caller told the window had moved, and
+        the answer unchanged. That is the exact defect this convention exists to prevent, so the bound
+        is part of the read rather than something the caller filters afterwards.
+
+        It changes nothing for an unanchored caller: $3 is then "now", and no row's analysis_time can
+        be later than the moment the read computed it (both the writer and this reader stamp from the
+        same host clock).
+    */
     public const string GetRecentFindingsSql = @"
 SELECT finding_id, analysis_time, server_id, server_name, database_name,
        time_range_start, time_range_end, severity, confidence, category,
@@ -108,8 +119,9 @@ SELECT finding_id, analysis_time, server_id, server_name, database_name,
 FROM analysis_findings
 WHERE server_id = $1
 AND   analysis_time >= $2
+AND   analysis_time <= $3
 ORDER BY analysis_time DESC, severity DESC
-LIMIT $3";
+LIMIT $4";
 
     public const string GetLatestFindingsSql = @"
 SELECT finding_id, analysis_time, server_id, server_name, database_name,
@@ -368,16 +380,22 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// does not exist.</para>
     /// </summary>
     public async Task<List<AnalysisFinding>> GetRecentFindingsAsync(
-        int serverId, int hoursBack = 24, int limit = 100)
+        int serverId, int hoursBack = 24, int limit = 100, DateTime? asOfUtc = null)
     {
         var findings = new List<AnalysisFinding>();
 
         try
         {
+            /* #2506: the window's END. Null is "now" — the pre-#2506 read exactly. Made naive-UTC like
+               every other bound here, because analysis_time is a naive-UTC column and a Kind=Utc
+               parameter would be inferred as timestamptz and silently zone-shifted. */
+            var windowEnd = DateTime.SpecifyKind(asOfUtc ?? DateTime.UtcNow, DateTimeKind.Unspecified);
+
             await using var connection = await _postgres.OpenConnectionAsync();
             using var command = new NpgsqlCommand(GetRecentFindingsSql, connection);
             command.Parameters.AddWithValue(serverId);
-            command.Parameters.AddWithValue(NaiveUtcNow().AddHours(-hoursBack));
+            command.Parameters.AddWithValue(windowEnd.AddHours(-hoursBack));
+            command.Parameters.AddWithValue(windowEnd);
             command.Parameters.AddWithValue(limit);
 
             using var reader = await command.ExecuteReaderAsync();

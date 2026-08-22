@@ -274,15 +274,29 @@ public class FindingStore
     /// does not exist. Matches the Darling twin's PgFindingStore exactly.</para>
     /// </summary>
     public async Task<List<AnalysisFinding>> GetRecentFindingsAsync(
-        int serverId, int hoursBack = 24, int limit = 100)
+        int serverId, int hoursBack = 24, int limit = 100, DateTime? asOfUtc = null)
     {
         var findings = new List<AnalysisFinding>();
+
+        /* #2506: the window's END. Null is "now" — the pre-#2506 read exactly. */
+        var windowEnd = asOfUtc ?? DateTime.UtcNow;
 
         using var readLock = _duckDb.AcquireReadLock();
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync();
 
         using var cmd = connection.CreateCommand();
+
+        /*
+            #2506 added the UPPER bound ($3). Without it the read had a start and no end, so an as_of
+            anchor could only ever move the window's start EARLIER and every anchored read would still
+            return everything up to now — the anchor validated, the caller told the window had moved,
+            and the answer unchanged. That is the exact defect this convention exists to prevent, so
+            the bound is part of the read rather than something the caller filters afterwards.
+
+            It changes nothing for an unanchored caller: $3 is then "now", and no row's analysis_time
+            can be later than the moment the read computed it (writer and reader are the same process).
+        */
         cmd.CommandText = @"
 SELECT finding_id, analysis_time, server_id, server_name, database_name,
        time_range_start, time_range_end, severity, confidence, category,
@@ -292,11 +306,13 @@ SELECT finding_id, analysis_time, server_id, server_name, database_name,
 FROM analysis_findings
 WHERE server_id = $1
 AND   analysis_time >= $2
+AND   analysis_time <= $3
 ORDER BY analysis_time DESC, severity DESC
-LIMIT $3";
+LIMIT $4";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
-        cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-hoursBack) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = windowEnd.AddHours(-hoursBack) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = windowEnd });
         cmd.Parameters.Add(new DuckDBParameter { Value = limit });
 
         using var reader = await cmd.ExecuteReaderAsync();
