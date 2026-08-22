@@ -1128,4 +1128,70 @@ public sealed class DarlingMcpDataTools
             return McpHelpers.FormatError("get_collection_log", ex);
         }
     }
+
+    [McpServerTool(Name = "get_current_waits_trend"), Description("Gets the two Current Waits series over time for a server: waiting-task total wait duration per wait type per collection, and blocked-session counts per database per collection. get_waiting_tasks answers 'what is waiting right now' and can never say whether it is worse than an hour ago — this is that question. Use it to tell a server that is always mildly blocked from one that just started, and to see which database owns the blocking over the window rather than in one snapshot.")]
+    public static async Task<string> GetCurrentWaitsTrend(
+        NpgsqlDataSource postgres,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Hours of history. Default 4.")] int hours_back = 4,
+        [Description("Limit the blocked-session series to one database. Omit for all databases.")] string? database_name = null)
+    {
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        if (error != null) return error;
+
+        try
+        {
+            var end = DateTime.UtcNow;
+            var start = end.AddHours(-Math.Abs(hours_back));
+
+            var waits = await DarlingDataReader.GetWaitingTaskTrendAsync(postgres, resolved.ServerId, start, end);
+            var blocked = await DarlingDataReader.GetBlockedSessionTrendAsync(
+                postgres, resolved.ServerId, start, end, database_name);
+
+            if (waits.Count == 0 && blocked.Count == 0)
+            {
+                /*
+                    Both series empty is two facts again, and here the wrong one is actively reassuring:
+                    "nothing was waiting" reads as an all-clear, while the truth may be that the
+                    waiting_tasks collector never ran. A caller told all-clear stops looking.
+                */
+                var everCollected = await DarlingDataReader.HasAnyWaitingTaskSampleAsync(postgres, resolved.ServerId);
+                return everCollected
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"Nothing was waiting on {resolved.ServerName} in the last {Math.Abs(hours_back)} hour(s). The collector HAS sampled this server, so this is a genuine all-clear for the window rather than missing data.")
+                    : McpHelpers.Status(
+                        "unavailable",
+                        $"No waiting-task samples have EVER been recorded for {resolved.ServerName}, so this is NOT an all-clear — there is nothing to read. Check that collection is running for this server before concluding it was quiet.");
+            }
+
+            return JsonSerializer.Serialize(new
+            {
+                server = resolved.ServerName,
+                hours_back = Math.Abs(hours_back),
+                database_name,
+                /*
+                    Two series in one payload because they are read together: a wait-type spike with no
+                    blocked sessions is a resource wait, and the same spike WITH them is contention. Split
+                    across two tools a caller can fetch one and draw the wrong conclusion.
+                */
+                waiting_tasks = waits.Select(w => new
+                {
+                    collection_time = w.CollectionTime.ToString("o"),
+                    wait_type = w.WaitType,
+                    total_wait_ms = w.TotalWaitMs,
+                }),
+                blocked_sessions = blocked.Select(b => new
+                {
+                    collection_time = b.CollectionTime.ToString("o"),
+                    database_name = b.DatabaseName,
+                    blocked_count = b.BlockedCount,
+                }),
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("get_current_waits_trend", ex);
+        }
+    }
 }

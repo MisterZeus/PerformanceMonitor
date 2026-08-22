@@ -65,6 +65,13 @@ internal static class DarlingDataReader
     /// <summary>One memory clerk's footprint at the latest snapshot.</summary>
     public sealed record MemoryClerkRow(string ClerkType, double MemoryMb);
 
+    /* #2484: the two series behind the viewer's Current Waits tab. Both read waiting_tasks, which the
+       snapshot reads already expose row-by-row -- get_waiting_tasks answers "what is waiting now" and
+       never "was it worse an hour ago", which is the question that decides whether anything is wrong. */
+    public sealed record WaitingTaskTrendRow(DateTime CollectionTime, string WaitType, long TotalWaitMs);
+
+    public sealed record BlockedSessionTrendRow(DateTime CollectionTime, string DatabaseName, long BlockedCount);
+
     /*
         One row of the RAW per-run collection log, as opposed to the CollectorHealth rollup above.
         The rollup answers "is this collector healthy over seven days"; this answers "what happened
@@ -1448,6 +1455,127 @@ internal static class DarlingDataReader
                 reader.IsDBNull(5) ? null : Convert.ToInt64(reader.GetValue(5)),
                 reader.IsDBNull(6) ? null : reader.GetString(6),
                 reader.IsDBNull(7) ? null : reader.GetString(7)));
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// Waiting-task total wait duration per wait type per collection, for one server over an explicit
+    /// window. The viewer's Current Waits reader verbatim. $1 server_id, $2 start, $3 end (naive UTC).
+    /// </summary>
+    public const string WaitingTaskTrendSql = """
+        SELECT
+            collection_time,
+            wait_type,
+            CAST(SUM(wait_duration_ms) AS bigint) AS total_wait_ms
+        FROM waiting_tasks
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   wait_type IS NOT NULL
+        GROUP BY
+            collection_time,
+            wait_type
+        ORDER BY
+            collection_time,
+            wait_type
+        """;
+
+    /// <summary>
+    /// Whether the waiting-task collector has EVER sampled this server, ignoring any window.
+    /// <para>Separates an all-clear from missing data. Of the two, the wrong answer here is the
+    /// REASSURING one: "nothing was waiting" stops a caller looking, where "never collected" sends them
+    /// to check the collector. LIMIT 1, so it stops at the first row.</para>
+    /// </summary>
+    public const string HasAnyWaitingTaskSampleSql = """
+        SELECT 1
+        FROM waiting_tasks
+        WHERE server_id = $1
+        LIMIT 1
+        """;
+
+    /// <summary>Runs <see cref="HasAnyWaitingTaskSampleSql"/>.</summary>
+    public static async Task<bool> HasAnyWaitingTaskSampleAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(HasAnyWaitingTaskSampleSql);
+        AddInt(command, serverId);
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
+    }
+
+    /// <summary>Runs <see cref="WaitingTaskTrendSql"/>.</summary>
+    public static async Task<List<WaitingTaskTrendRow>> GetWaitingTaskTrendAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default)
+    {
+        var rows = new List<WaitingTaskTrendRow>();
+        await using var command = postgres.CreateCommand(WaitingTaskTrendSql);
+        AddInt(command, serverId);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new WaitingTaskTrendRow(
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? "" : reader.GetString(1),
+                reader.IsDBNull(2) ? 0 : reader.GetInt64(2)));
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// Blocked-session count per database per collection, for one server over an explicit window.
+    /// <para>blocking_session_id > 0 is the blocked-ness test, so this counts sessions WAITING ON another
+    /// session rather than every waiting task. The optional database filter is kept from the viewer's read
+    /// rather than dropped for a simpler signature: on a busy instance one database usually owns the
+    /// blocking, and a series that cannot be narrowed to it answers a different question from the one the
+    /// viewer answers. $1 server_id, $2 start, $3 end (naive UTC), $4 database name or NULL.</para>
+    /// </summary>
+    public const string BlockedSessionTrendSql = """
+        SELECT
+            collection_time,
+            database_name,
+            COUNT(*) AS blocked_count
+        FROM waiting_tasks
+        WHERE server_id = $1
+        AND   blocking_session_id > 0
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   database_name IS NOT NULL
+        AND   ($4::text IS NULL OR database_name = $4)
+        GROUP BY
+            collection_time,
+            database_name
+        ORDER BY
+            collection_time,
+            database_name
+        """;
+
+    /// <summary>Runs <see cref="BlockedSessionTrendSql"/>.</summary>
+    public static async Task<List<BlockedSessionTrendRow>> GetBlockedSessionTrendAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        string? databaseName = null, CancellationToken cancellationToken = default)
+    {
+        var rows = new List<BlockedSessionTrendRow>();
+        await using var command = postgres.CreateCommand(BlockedSessionTrendSql);
+        AddInt(command, serverId);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            Value = string.IsNullOrWhiteSpace(databaseName) ? DBNull.Value : databaseName,
+            NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text,
+        });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new BlockedSessionTrendRow(
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? "" : reader.GetString(1),
+                reader.IsDBNull(2) ? 0 : reader.GetInt64(2)));
         }
 
         return rows;

@@ -1105,6 +1105,7 @@ public static class DarlingWebEndpoints
             /* ── core data reads (DarlingMcpDataTools + long-query / fleet tools) ── */
             ["get_collection_health"] = R(CatData, "Per-collector collection health for a server.", PServer()),
             ["get_collection_log"] = R(CatData, "Raw per-run collector log for a server, newest first.", PServer(), PHours(24), PLimit(200)),
+            ["get_current_waits_trend"] = R(CatData, "Waiting-task and blocked-session series over time.", PServer(), PHours(4), PText("database_name")),
             ["get_cpu_utilization"] = R(CatData, "CPU utilization over time.", PServer(), PHours(4)),
             ["get_file_io_stats"] = R(CatData, "Per-file IO stall/throughput stats.", PServer()),
             ["get_memory_clerks"] = R(CatData, "Top memory clerks by allocation.", PServer()),
@@ -1542,6 +1543,7 @@ public static class DarlingWebEndpoints
             /* ── core data reads ── */
             ["get_collection_health"] = (c, pg, an) => DarlingMcpDataTools.GetCollectionHealth(pg, Server(c)),
             ["get_collection_log"] = (c, pg, an) => DarlingMcpDataTools.GetCollectionLog(pg, Server(c), Hours(c, 24), Rows(c, "limit", 200)),
+            ["get_current_waits_trend"] = (c, pg, an) => DarlingMcpDataTools.GetCurrentWaitsTrend(pg, Server(c), Hours(c, 4), Str(c, "database_name")),
             ["get_cpu_utilization"] = (c, pg, an) => DarlingMcpDataTools.GetCpuUtilization(pg, Server(c), Hours(c, 4)),
             ["get_file_io_stats"] = (c, pg, an) => DarlingMcpDataTools.GetFileIoStats(pg, Server(c)),
             ["get_memory_clerks"] = (c, pg, an) => DarlingMcpDataTools.GetMemoryClerks(pg, Server(c)),

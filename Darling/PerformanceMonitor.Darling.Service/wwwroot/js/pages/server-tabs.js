@@ -543,6 +543,33 @@ export const SERVER_TABS = [
         ctx.label,
         "No deadlocks in this window."
       ),
+      /* #2484: the Current Waits tab the viewer has and the browser did not. ONE read, two panels --
+         via fanout, not two line() calls, because the tab must not fetch the same read twice (there is
+         a pin for it, and the reason is real: this read returns both series in one payload precisely so
+         they cannot be looked at separately). A wait spike with no blocked sessions is a resource wait;
+         the same spike with them is contention. */
+      ...fanout("get_current_waits_trend", { server, hours: ctx.hours }, [
+        {
+          title: "Waiting Tasks",
+          subtitle: ctx.label,
+          viz: "line",
+          rowsKey: "waiting_tasks",
+          xKey: "collection_time",
+          series: WAITING_TASK_SERIES,
+          emptyText:
+            "Nothing was waiting in this window. If the server has never been sampled the read says so " +
+            "explicitly rather than reporting this as an all-clear.",
+        },
+        {
+          title: "Blocked Sessions",
+          subtitle: ctx.label,
+          viz: "line",
+          rowsKey: "blocked_sessions",
+          xKey: "collection_time",
+          series: BLOCKED_SESSION_SERIES,
+          emptyText: "No blocked sessions in this window.",
+        },
+      ]),
       table(
         "Deadlock Graphs",
         "get_deadlock_detail",
@@ -1103,6 +1130,11 @@ const MEMORY_SERIES = [
 
 /* The two trend reads that return {time, count}. */
 const COUNT_SERIES = [{ key: "count", label: "Events" }];
+
+/* #2484: the two Current Waits series. Each charts ONE numeric key; the wait type and database name are
+   the grouping the read already applied, not extra axes. */
+const WAITING_TASK_SERIES = [{ key: "total_wait_ms", label: "Total Wait (ms)" }];
+const BLOCKED_SESSION_SERIES = [{ key: "blocked_count", label: "Blocked Sessions" }];
 
 /* get_query_duration_trend returns {time, value, execution_count}. Only `value` (milliseconds) is charted —
    an execution count on the same axis would be a second unit sharing one y-domain, which is the mistake the
