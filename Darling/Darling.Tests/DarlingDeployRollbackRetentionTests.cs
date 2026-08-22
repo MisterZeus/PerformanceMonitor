@@ -473,6 +473,36 @@ public sealed class DarlingDeployRollbackRetentionTests
     }
 
     /// <summary>
+    /// The copy path requires the service to be REGISTERED, and refuses before anything is stopped or
+    /// copied when it is not.
+    ///
+    /// <para>The auto-resolve path cannot get here without one — it reads the install root out of the
+    /// registered ImagePath — but an explicit <c>-InstallRoot</c> skips that entirely. A tree holding the
+    /// binaries of a service that was renamed, removed, or never registered would otherwise pass the stop
+    /// guard, take a backup, prune, complete the copy, and only fall over at <c>Start-Service</c> with a raw
+    /// terminating error rather than one of this script's own messages — having already changed the tree.
+    /// The refusal has to sit after the <c>-PruneOnly</c> exit, though: reclaiming disk from a tree whose
+    /// service is gone is reasonable and copies nothing.</para>
+    /// </summary>
+    [Fact]
+    public void TheDeployScript_RefusesAnUnregisteredService_BeforeItStopsOrCopiesAnything()
+    {
+        var script = DeployScript;
+
+        var check = script.IndexOf("if (-not (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) {", StringComparison.Ordinal);
+        Assert.True(check >= 0, "upgrade-darling.ps1 no longer refuses an unregistered service on the copy path (#2525)");
+
+        var pruneExit = script.IndexOf("if ($ListRollbacks -or $PruneOnly)", StringComparison.Ordinal);
+        var stopGuard = script.IndexOf("$holders = @(Get-DarlingProcessesUnderPath $InstallRoot |", StringComparison.Ordinal);
+        var stop = script.IndexOf("Stop-Service -Name $serviceName", StringComparison.Ordinal);
+        var copy = script.IndexOf("Laying the new build over", StringComparison.Ordinal);
+
+        Assert.True(check > pruneExit, "-PruneOnly must not require a registered service — it copies nothing");
+        Assert.True(check < stopGuard && check < stop && check < copy,
+            "the unregistered-service refusal must come before the stop guard, the stop, and the copy — after any of them it has already cost something (#2525)");
+    }
+
+    /// <summary>
     /// A rollback backup holds the install root's FILES and not its subdirectories, so the guidance after a
     /// failed copy has to name both halves of a revert: re-extract the previous zip (for <c>viewer\</c>,
     /// <c>wwwroot\</c>, <c>runtimes\</c>) and then restore the backup's files over it.

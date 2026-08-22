@@ -514,6 +514,21 @@ else {
     Warn "The source is a folder, so this script cannot verify it — verify the zip's SHA256 before you extract it."
 }
 
+# ============================ the service has to exist ============================
+#
+# The auto-resolve path cannot reach here without a registered service - it reads the install root out of
+# the ImagePath - but an explicit -InstallRoot skips that check entirely. A tree holding the binaries of a
+# service that was renamed, removed, or never registered then sails through the stop guard, the backup, the
+# prune and the copy, and falls over at Start-Service with a raw terminating error instead of one of this
+# script's own messages. Failing HERE costs nothing and says what to do; failing there costs a completed
+# copy, a stopped-that-was-never-running service, and an error nobody can interpret.
+#
+# Deliberately not applied to -PruneOnly, which exits above: reclaiming disk from a tree whose service is
+# gone is a perfectly reasonable thing to want, and it copies nothing.
+if (-not (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) {
+    Fail "The '$serviceName' service is not registered on this machine, so there is nothing for this copy to stop and start around it. NOTHING has been stopped or copied. If '$InstallRoot' is a staging tree rather than an install, you want install-darling.ps1; if you only meant to reclaim disk, re-run with -PruneOnly, which needs no service."
+}
+
 # ============================ the stop guard ============================
 
 # PHASE ONE, before anything is stopped: the processes a service stop will NOT clear.
@@ -543,8 +558,9 @@ if ($holders.Count -gt 0 -and -not $SkipStopGuard) {
 $configPath = Join-Path $InstallRoot $configName
 $configHashBefore = if (Test-Path -LiteralPath $configPath) { (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash } else { $null }
 
-$service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-if ($service -and $service.Status -ne 'Stopped') {
+# Status is re-read here rather than carried down from the existence check above: it is a snapshot, and
+# between the two the service can legitimately have been stopped by someone else or crashed on its own.
+if ((Get-Service -Name $serviceName).Status -ne 'Stopped') {
     Note "Stopping '$serviceName'..."
     Stop-Service -Name $serviceName -Force
     try { (Get-Service -Name $serviceName).WaitForStatus('Stopped', [TimeSpan]::FromMinutes(2)) }
@@ -608,6 +624,19 @@ if ($prunable.Count -gt 0) {
     Good ("Reclaimed {0}." -f (Format-DarlingBytes $result.Reclaimed))
 }
 
+# A KNOWN GAP, named here rather than left for someone to discover: this is an OVERLAY, not a replacement.
+# Expand-Archive -Force (and the Copy-Item -Recurse -Force folder path) overwrite what the new build ships
+# and delete nothing else, so a file the old version had and the new one dropped - a removed dependency, a
+# renamed assembly, a satellite-resource folder for a culture we no longer localize into - stays in the
+# tree forever. DarlingInstallDirectoryReport will not catch it either: it walks top-level DIRECTORIES, so
+# a stale DLL sitting in the root or in viewer\ is invisible to it.
+#
+# Not fixed here on purpose. The obvious repair - diff the new build's manifest against the install root
+# and warn about the remainder - has to know about every file that legitimately lives here and was never
+# in a zip: darling.json, the DPAPI credential blobs, the rollback backups themselves, pg-runtime, and
+# whatever an operator put there. Get that list wrong and it warns about darling.json on every upgrade,
+# which is #2525 all over again with a new subject. Filed as #2529 with the options and the measurement
+# that should decide between them, rather than bolted on at the end of this one.
 Note "Laying the new build over $InstallRoot ..."
 $copied = $false
 foreach ($attempt in 1, 2) {
