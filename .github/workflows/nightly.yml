@@ -126,8 +126,25 @@ jobs:
       - name: Run tests
         run: dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release
 
+      # #2501: -r win-x64 --self-contained, and it makes the portable ZIP SMALLER, not bigger.
+      # The RID-agnostic framework-dependent publish this replaced copied every platform its
+      # packages ship - 537 MB of runtimes\ on a 565 MB tree, of which only the 52 MB win-x64
+      # folder can ever load on Windows (DuckDB.NET.Bindings.Full is most of it, SkiaSharp and
+      # SqlClient behind it). Pinning the RID drops ~485 MB of unloadable native payload, which
+      # is far more than the bundled .NET/WPF/ASP.NET runtime adds back. Measured on the same
+      # commit and SDK: 565 MB tree / 212.7 MB zipped becomes 277 MB / 114.2 MB.
+      #
+      # The size was the secondary reason. The primary one is #2489: a framework-dependent ZIP
+      # unzipped onto a stock Windows Server dies on the .NET host's own "You must install .NET
+      # to run this application" before a line of our code runs, so Lite cannot report it, and
+      # #2499 could only ship a READ-ME-FIRST.txt next to the exe. Self-contained there is
+      # nothing to install and nothing to fail. That matters most for the nightly ZIP, which is
+      # the UAT download and is not offered as a Setup.exe at all.
+      #
+      # Lite/PerformanceMonitorLite.csproj declares RuntimeIdentifiers so the committed lock
+      # file covers this RID; see the comment there before removing either half.
       - name: Publish Lite
-        run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -o publish/Lite
+        run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -r win-x64 --self-contained -o publish/Lite
 
       - name: Publish Darling Service
         run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -o publish/DarlingService

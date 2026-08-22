@@ -100,12 +100,9 @@ All editions include real-time alerts (system tray + email + webhooks), charts a
 
 Data starts flowing within 1–5 minutes. That's it. No installation on your server, no Agent jobs, no sysadmin required.
 
-**Taking the portable ZIP (`PerformanceMonitorLite-<version>.zip`) instead?** That artifact is framework-dependent, and it is the one with prerequisites. Install **both** of these, x64, from <https://dotnet.microsoft.com/download/dotnet/10.0>, before the first launch:
+**Taking the portable ZIP (`PerformanceMonitorLite-<version>.zip`) instead?** It is a self-contained win-x64 build too, so there is **nothing to install first** — unzip it anywhere and run `PerformanceMonitorLite.exe`. A stock Windows Server with no .NET on it at all is fine.
 
-- **.NET Desktop Runtime 10** — the app window itself (WPF).
-- **ASP.NET Core Runtime 10** — required **unconditionally**, not only when you switch the MCP server on. Lite references `ModelContextProtocol.AspNetCore`, which brings the ASP.NET Core framework reference in transitively, so the built `PerformanceMonitorLite.runtimeconfig.json` names it whether or not MCP is ever enabled. Leaving MCP off does not remove the requirement.
-
-A stock Windows Server image has neither. If one is missing, Lite never starts and never gets to say why — the .NET host fails first, with its own `You must install .NET to run this application` message and nothing of ours on it. The host also names only the **first** framework it cannot find, so installing just the Desktop Runtime buys a second copy of the same error naming ASP.NET Core. `READ-ME-FIRST.txt` ships beside `PerformanceMonitorLite.exe` in the ZIP saying so. `Setup.exe` above sidesteps all of it. See [`Lite/README.md`](Lite/README.md#prerequisites) for the full breakdown.
+That was not always true: through 3.5.0 the ZIP was a portable build with no runtime of its own, and on a machine without .NET it died on the host’s own `You must install .NET to run this application` before a line of Lite’s code ran. Pinning the ZIP to win-x64 removed the requirement **and halved the download** — the old build shipped ~537&nbsp;MB of `runtimes\` for macOS, Linux, ARM and musl targets Windows can never load, which cost far more than bundling the runtime does. See [`Lite/README.md`](Lite/README.md#prerequisites) for the detail.
 
 **Upgrading from zip?** Click **Import Settings** then **Import Data** in the sidebar and point both at your old Lite folder. Settings imports server connections, alert thresholds, SMTP config, and schedules. Data imports historical DuckDB + Parquet archives. **Auto-update users** (installed via Setup.exe) get updates automatically — no manual import needed.
 
