@@ -1,0 +1,693 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using System.Reflection.Emit;
+using PerformanceMonitor.Collectors;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #2518: proof that <see cref="CollectorEngineCapability.IsCollectedOnEngineEdition(ICollectorSchemaInfo, int)"/>
+/// FOLLOWS a gate that moves, rather than merely agreeing with the gates as they ship today.
+///
+/// <para><b>Why the existing tests are not this.</b> Every assertion in
+/// <c>CollectorEngineCapabilityTests</c> is a statement about the shipped collectors — system_health is a
+/// gap on Azure SQL Database, job_history is not, box editions have none. All of them are true, none of them
+/// can distinguish a derivation from a hard-coded set of gaps that happens to match today's gates, and a
+/// hard-coded set is exactly the failure the derivation exists to prevent. Nothing in the suite moves a gate
+/// and watches the answer move with it, so nothing in the suite would notice if the answer stopped being
+/// derived at all.</para>
+///
+/// <para><b>Why a synthetic collector rather than a real one.</b> The obvious demonstration is to point at a
+/// collector whose gate changed — and #2512/#2516 supplied one, <c>TempDbStatsCollector</c>, while #2511 was
+/// still open. Pinning the derivation to the one gate that is in flight is pinning the wrong thing: the pin
+/// then fails whenever that lane lands, says "update the pin", and gets updated rather than read. A gate this
+/// test owns moves on demand, moves in both directions, and drags no real collector into the assertion. The
+/// collectors as shipped stay the subject of the OTHER file, which is where a claim about them belongs.</para>
+///
+/// <para><b>Both directions, on ONE object.</b> The gate is mutated between calls on the same instance, so
+/// the two answers differ with literally nothing else changed — not the collector name, not the object
+/// identity, not the edition. A pair of differently-constructed fakes would leave "it keyed off something
+/// about the instance" open; this does not.</para>
+/// </summary>
+public sealed class CollectorEngineCapabilityMovingGateTests
+{
+    private const int Enterprise = 3;
+    private const int AzureSqlDb = CollectorEngineCapability.AzureSqlDatabaseEngineEdition;
+    private const int AzureMi = CollectorEngineCapability.AzureManagedInstanceEngineEdition;
+
+    /// <summary>
+    /// Every <c>SERVERPROPERTY('EngineEdition')</c> value Microsoft documents, as a contiguous range rather
+    /// than a curated list — this is the DOMAIN of the question, so covering it densely costs nothing and a
+    /// value that gets defined later is already included.
+    /// </summary>
+    private static readonly int[] AllEngineEditions = Enumerable.Range(1, 12).ToArray();
+
+    /// <summary>
+    /// A collector definition whose gate the test owns and can move between calls. Everything else is the
+    /// bare minimum <see cref="ICollectorSchemaInfo"/> demands — none of it participates in the capability
+    /// question, and giving it plausible-looking values would only invite the reader to wonder whether it
+    /// does.
+    /// <para>The name is deliberately not a catalog name. That is load-bearing:
+    /// <see cref="TheByDefinitionOverload_AsksTheGate_WhereTheByNameOverloadCanOnlyAskTheCatalog"/> uses the
+    /// same object through both overloads and gets different answers, which is what shows the definition
+    /// overload is evaluating the gate rather than resolving a name.</para>
+    /// </summary>
+    private sealed class SyntheticCollector : ICollectorSchemaInfo
+    {
+        /// <summary>The gate under test. Settable, not <c>init</c>, so one instance can be moved.</summary>
+        public required Func<CollectorTargetInfo, bool> Gate { get; set; }
+
+        public CollectorTargetEngine TargetEngine { get; init; } = CollectorTargetEngine.SqlServer;
+
+        public string Name => "synthetic_gate_2518";
+
+        public string TargetTable => "synthetic_gate_2518";
+
+        public bool IncludesCollectionId => true;
+
+        public string PrefixIdColumnName => "collection_id";
+
+        public string PrefixTimeColumnName => "collection_time";
+
+        public IReadOnlyList<CollectorColumn> PayloadColumns => Array.Empty<CollectorColumn>();
+
+        public bool YieldsOnLockTimeout => false;
+
+        public IReadOnlyList<string> StateKeys => Array.Empty<string>();
+
+        public bool AppliesTo(CollectorTargetInfo target) => Gate(target);
+    }
+
+    /// <summary>
+    /// The assertion the issue was filed for. One collector, one object, three gates: closed against Azure
+    /// SQL Database, open everywhere, then closed against everything BUT Azure SQL Database. The capability
+    /// answer tracks all three.
+    ///
+    /// <para>The third position matters as much as the first two. A "derivation" that had quietly become
+    /// "Azure SQL Database is where the gaps are" would pass the first two moves and fail here, because here
+    /// the gap is on Enterprise and Managed Instance and Azure SQL Database is the edition that collects.</para>
+    /// </summary>
+    [Fact]
+    public void TheAnswerMoves_WhenTheGateMoves_InBothDirections()
+    {
+        var collector = new SyntheticCollector { Gate = target => !target.IsAzureSqlDb };
+
+        /* Gate closed against Azure SQL Database: a permanent gap there, and nowhere else. */
+        Assert.False(CollectorEngineCapability.IsCollectedOnEngineEdition(collector, AzureSqlDb));
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition(collector, Enterprise));
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition(collector, AzureMi));
+
+        /* The gate OPENS — the #2516 direction, the one a hand-kept list fails silently in, because a list
+           goes on claiming a gap that the gate stopped producing and nothing says so. */
+        collector.Gate = _ => true;
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition(collector, AzureSqlDb));
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition(collector, Enterprise));
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition(collector, AzureMi));
+
+        /* And closes again the OTHER way round, so the answer cannot be "Azure SQL Database is special". */
+        collector.Gate = target => target.IsAzureSqlDb;
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition(collector, AzureSqlDb));
+        Assert.False(CollectorEngineCapability.IsCollectedOnEngineEdition(collector, Enterprise));
+        Assert.False(CollectorEngineCapability.IsCollectedOnEngineEdition(collector, AzureMi));
+    }
+
+    /// <summary>
+    /// The by-definition overload asks the GATE; the by-name overload asks the CATALOG and then the gate it
+    /// finds. Handed a definition the catalog has never heard of, they must therefore disagree — the
+    /// definition form reports the gap its gate produces, the name form makes no claim at all because there
+    /// is no gate behind that name to derive one from.
+    ///
+    /// <para>This is the assertion that stops the new overload being a rename. If it delegated back to the
+    /// name, or resolved the definition through the catalog, both calls below would return <c>true</c> and
+    /// the moving-gate test above would be exercising nothing.</para>
+    /// </summary>
+    [Fact]
+    public void TheByDefinitionOverload_AsksTheGate_WhereTheByNameOverloadCanOnlyAskTheCatalog()
+    {
+        var collector = new SyntheticCollector { Gate = _ => false };
+
+        Assert.Null(CollectorCatalog.Find(collector.Name));
+        Assert.False(CollectorEngineCapability.IsCollectedOnEngineEdition(collector, AzureSqlDb));
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition(collector.Name, AzureSqlDb));
+    }
+
+    /// <summary>
+    /// For every collector the catalog DOES know, the two overloads are the same function. The by-name form
+    /// is the one both MCP trees call, so a divergence would mean the tests below prove a property of code
+    /// nothing in production reaches.
+    /// </summary>
+    [Fact]
+    public void TheTwoOverloads_AgreeOnEveryShippedCollectorAtEveryEdition()
+    {
+        Assert.NotEmpty(CollectorCatalog.All);
+
+        foreach (var definition in CollectorCatalog.All)
+        {
+            foreach (var edition in AllEngineEditions)
+            {
+                Assert.Equal(
+                    CollectorEngineCapability.IsCollectedOnEngineEdition(definition, edition),
+                    CollectorEngineCapability.IsCollectedOnEngineEdition(definition.Name, edition));
+            }
+        }
+    }
+
+    /// <summary>
+    /// A gate that closes on a FIXABLE fact is not an engine gap, demonstrated on gates this test controls
+    /// rather than on <c>job_history</c>'s. Same claim as <c>AFixableGate_IsNotReportedAsAnEngineGap</c>,
+    /// but it stays true when the Agent collectors' gates change, and it covers the gate shapes no shipped
+    /// collector happens to have today.
+    ///
+    /// <para>The last case is the one worth reading: a gate that reads BOTH a fixable fact and the edition
+    /// is still an engine gap on that edition, because no combination of the fixable facts rescues it. That
+    /// is the distinction the whole helper exists to draw, and neither half of it alone would show it.</para>
+    /// </summary>
+    [Fact]
+    public void AGateOnAFixableFact_IsNotAnEngineGap_ButTheSameGateAndAnEditionStillIs()
+    {
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition(
+            new SyntheticCollector { Gate = target => target.HasMsdbAccess }, Enterprise));
+
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition(
+            new SyntheticCollector { Gate = target => !target.IsAwsRds }, Enterprise));
+
+        /* Both fixable facts at once: the sweep has to carry the COMBINATION, not just each value somewhere. */
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition(
+            new SyntheticCollector { Gate = target => target.HasMsdbAccess && target.IsAwsRds }, Enterprise));
+
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition(
+            new SyntheticCollector { Gate = target => !target.HasMsdbAccess && !target.IsAwsRds }, Enterprise));
+
+        /* Fixable AND edition-bound: permanent on Azure SQL Database, fixable everywhere else. */
+        var mixed = new SyntheticCollector { Gate = target => target.HasMsdbAccess && !target.IsAzureSqlDb };
+        Assert.False(CollectorEngineCapability.IsCollectedOnEngineEdition(mixed, AzureSqlDb));
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition(mixed, Enterprise));
+    }
+
+    /// <summary>
+    /// A version gate is answered across the real majors, not by whichever single representative value the
+    /// sweep happened to pick. Every major the sweep carries must be reachable ON ITS OWN, or a gate written
+    /// as a RANGE — supported on 15 and 16, dropped on 17 — would be reported as a permanent engine gap on
+    /// hardware it runs on perfectly well.
+    /// <para>The floor and ceiling cases bracket it: a gate that needs the newest engine, and one that only
+    /// tolerates the oldest, are both answered "collected".</para>
+    /// </summary>
+    [Fact]
+    public void AVersionGate_IsAnsweredAcrossTheRealMajors_NotByOneRepresentativeValue()
+    {
+        foreach (var major in new[] { 11, 12, 13, 14, 15, 16, 17 })
+        {
+            var only = major;
+            Assert.True(
+                CollectorEngineCapability.IsCollectedOnEngineEdition(
+                    new SyntheticCollector { Gate = target => target.SqlMajorVersion == only }, Enterprise),
+                $"a gate that passes only on SQL major {only} was reported as a permanent engine gap, so the " +
+                "sweep does not carry that major — every real major has to be reachable on its own");
+        }
+
+        /* A range, the shape the sweep's own doc comment says it exists for. */
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition(
+            new SyntheticCollector { Gate = target => target.SqlMajorVersion is 15 or 16 }, Enterprise));
+
+        /* A floor above every real major, and the "unknown, assume newest" value. */
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition(
+            new SyntheticCollector { Gate = target => target.SqlMajorVersion >= 99 }, Enterprise));
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition(
+            new SyntheticCollector { Gate = target => target.SqlMajorVersion == 0 }, Enterprise));
+    }
+
+    /// <summary>
+    /// The non-vacuity floor, both ways and on every edition: a gate shut everywhere is a gap everywhere, a
+    /// gate open everywhere is a gap nowhere. If either of these ever stopped holding, every other assertion
+    /// in this file would be passing for a reason unrelated to the gate.
+    /// <para>Unknown (0) is excluded from the loop and asserted separately, because it is the one edition
+    /// where a shut gate must STILL make no claim — "we have not probed this server" is not "this will never
+    /// work", and that branch sits above the sweep where no gate can reach it.</para>
+    /// </summary>
+    [Fact]
+    public void AGateShutEverywhere_IsAGapOnEveryEdition_AndAnOpenGateOnNone()
+    {
+        var shut = new SyntheticCollector { Gate = _ => false };
+        var open = new SyntheticCollector { Gate = _ => true };
+
+        foreach (var edition in AllEngineEditions)
+        {
+            Assert.False(
+                CollectorEngineCapability.IsCollectedOnEngineEdition(shut, edition),
+                $"a gate that refuses every target was not reported as a gap on engine edition {edition}");
+            Assert.True(
+                CollectorEngineCapability.IsCollectedOnEngineEdition(open, edition),
+                $"a gate that accepts every target was reported as a gap on engine edition {edition}");
+        }
+
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition(
+            shut, CollectorEngineCapability.UnknownEngineEdition));
+    }
+
+    /// <summary>
+    /// A definition written in another engine's dialect is never a gap on a SQL Server edition, however its
+    /// own gate is set — the question does not apply to it.
+    /// <para>The <c>Gate = _ =&gt; true</c> case is the one that isolates the short-circuit. The sweep asks
+    /// <see cref="CollectorCatalog.AppliesTo(ICollectorSchemaInfo, CollectorTargetInfo)"/>, whose engine half
+    /// rejects every SQL Server shape, so WITHOUT the short-circuit an always-open PostgreSQL collector comes
+    /// back as a permanent gap on all nine editions — a confident claim about an engine it was never meant to
+    /// run on. With <c>_ =&gt; false</c> the two paths agree by accident and prove nothing.</para>
+    /// </summary>
+    [Fact]
+    public void AForeignEngineDefinition_IsNeverAGap_HoweverItsOwnGateIsSet()
+    {
+        foreach (var gate in new Func<CollectorTargetInfo, bool>[] { _ => true, _ => false })
+        {
+            var postgres = new SyntheticCollector
+            {
+                TargetEngine = CollectorTargetEngine.PostgreSql,
+                Gate = gate,
+            };
+
+            foreach (var edition in AllEngineEditions)
+            {
+                Assert.True(
+                    CollectorEngineCapability.IsCollectedOnEngineEdition(postgres, edition),
+                    $"a PostgreSQL definition was reported as a permanent gap on engine edition {edition}");
+            }
+        }
+    }
+}
+
+/// <summary>
+/// #2518, the converse of the sweep-dimension pin: nothing asserted that a target fact the gates READ is a
+/// fact the sweep VARIES.
+///
+/// <para><b>The hole.</b> <c>TheSweep_VariesEveryDimensionTheGatesRead</c> walks a hand-written list of
+/// dimensions and checks the sweep spans each. Add a property to <see cref="CollectorTargetInfo"/>, write a
+/// gate on it, and that test still passes — the new fact sits at its CLR default across all 36 swept shapes,
+/// every shape fails the new gate, and the derivation reports a permanent engine gap on every edition for a
+/// collector that runs fine. Nothing is red. The message is confident, specific and wrong, which is the exact
+/// defect #2511 was filed to remove.</para>
+///
+/// <para><b>Why this is not a list under another name.</b> Both halves are read out of the shipped artifacts.
+/// The facts the gates read come from decoding the IL of every SQL Server definition's <c>AppliesTo</c> and
+/// recording which <see cref="CollectorTargetInfo"/> getters it calls — so a gate cannot be written without
+/// this seeing it, and a gate that stops reading a fact stops being evidence for it. The facts the sweep
+/// varies come from running <see cref="CollectorEngineCapability.TargetsWithEngineEdition"/> and observing
+/// the values it produces — so extending the sweep is what satisfies the check, and there is no list here to
+/// add a name to instead. Neither half can be brought into line by editing this file.</para>
+///
+/// <para><b>What it does not catch, stated rather than assumed.</b> A field ADDED to
+/// <see cref="CollectorTargetInfo"/> that no SQL Server gate reads is not flagged, because it is not yet a
+/// defect: the derivation only consults the gates, so an unread fact cannot make it over-claim.
+/// <c>PostgresVersionNum</c> is the shipped proof that this state exists and is fine — it is populated by the
+/// connector, read by no definition at all, and harmless. The guard fires at the moment the harm becomes
+/// possible, which is the moment a gate reads the fact.</para>
+/// </summary>
+public sealed class CollectorEngineCapabilitySweepDimensionTests
+{
+    /// <summary>The same contiguous edition domain the moving-gate tests use.</summary>
+    private static readonly int[] AllEngineEditions = Enumerable.Range(1, 12).ToArray();
+
+    /// <summary>Every public instance property of <see cref="CollectorTargetInfo"/>, from the type itself —
+    /// so a new one is in scope the moment it compiles.</summary>
+    private static readonly IReadOnlyList<PropertyInfo> TargetFacts =
+        typeof(CollectorTargetInfo)
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .OrderBy(property => property.Name, StringComparer.Ordinal)
+            .ToArray();
+
+    /// <summary>Getter name → the property it reads, for mapping a decoded <c>callvirt</c> back to a fact.</summary>
+    private static readonly IReadOnlyDictionary<string, PropertyInfo> FactByGetterName =
+        TargetFacts
+            .Where(property => property.GetGetMethod() is not null)
+            .ToDictionary(property => property.GetGetMethod()!.Name, StringComparer.Ordinal);
+
+    /// <summary>Fact name → the property, for going back from a decoded read to its sweep role.</summary>
+    private static readonly IReadOnlyDictionary<string, PropertyInfo> FactByName =
+        TargetFacts.ToDictionary(property => property.Name, StringComparer.Ordinal);
+
+    /// <summary>
+    /// How the sweep treats a fact. Derived by RUNNING the sweep and looking at what it produces, never
+    /// declared — a declared role would be the hand-maintained list this test exists to replace.
+    /// </summary>
+    private enum SweepRole
+    {
+        /// <summary>The sweep produces more than one value for it within a single edition.</summary>
+        VariedBySweep,
+
+        /// <summary>Constant within an edition, but different between editions — the edition decides it.</summary>
+        FixedByEdition,
+
+        /// <summary>The engine discriminator itself. Fixed at SQL Server because that is the question.</summary>
+        EngineDiscriminator,
+
+        /// <summary>The same value in every shape of every edition — a gate reading it can only ever see one
+        /// answer, so a gate reading it is where over-claiming begins.</summary>
+        ConstantEverywhere,
+    }
+
+    private static SweepRole RoleOf(PropertyInfo fact)
+    {
+        /* The engine is the precondition of the whole question, not a dimension of it: "does any target of
+           this SQL Server engine edition run this collector" fixes the engine by construction. Recognised by
+           TYPE rather than by name, so it stays recognised if the property is ever renamed. */
+        if (fact.PropertyType == typeof(CollectorTargetEngine))
+        {
+            return SweepRole.EngineDiscriminator;
+        }
+
+        var perEdition = AllEngineEditions
+            .Select(edition => CollectorEngineCapability.TargetsWithEngineEdition(edition)
+                .Select(fact.GetValue)
+                .Distinct()
+                .ToArray())
+            .ToArray();
+
+        if (perEdition.Any(values => values.Length > 1))
+        {
+            return SweepRole.VariedBySweep;
+        }
+
+        return perEdition.Select(values => values[0]).Distinct().Count() > 1
+            ? SweepRole.FixedByEdition
+            : SweepRole.ConstantEverywhere;
+    }
+
+    /// <summary>fact name → the SQL Server collectors whose <c>AppliesTo</c> reads it, decoded from IL.</summary>
+    private static SortedDictionary<string, SortedSet<string>> FactsReadBySqlServerGates()
+    {
+        var byFact = new SortedDictionary<string, SortedSet<string>>(StringComparer.Ordinal);
+
+        foreach (var definition in CollectorCatalog.All.Where(c => c.TargetEngine == CollectorTargetEngine.SqlServer))
+        {
+            foreach (var fact in FactsReadByGateOf(definition))
+            {
+                if (!byFact.TryGetValue(fact, out var collectors))
+                {
+                    byFact[fact] = collectors = new SortedSet<string>(StringComparer.Ordinal);
+                }
+
+                collectors.Add(definition.Name);
+            }
+        }
+
+        return byFact;
+    }
+
+    /// <summary>The <see cref="CollectorTargetInfo"/> facts one definition's gate reads, following calls into
+    /// other collector-assembly code so a gate refactored behind a helper cannot hide what it reads.</summary>
+    private static SortedSet<string> FactsReadByGateOf(ICollectorSchemaInfo definition)
+    {
+        var gate = definition.GetType().GetMethod(
+            nameof(ICollectorSchemaInfo.AppliesTo),
+            BindingFlags.Public | BindingFlags.Instance,
+            binder: null,
+            types: new[] { typeof(CollectorTargetInfo) },
+            modifiers: null);
+
+        Assert.True(gate is not null, $"{definition.Name}: no AppliesTo(CollectorTargetInfo) to decode");
+
+        var facts = new SortedSet<string>(StringComparer.Ordinal);
+        CollectFactReads(gate!, new HashSet<MethodBase>(), facts);
+        return facts;
+    }
+
+    private static void CollectFactReads(MethodBase method, HashSet<MethodBase> visited, SortedSet<string> facts)
+    {
+        if (!visited.Add(method))
+        {
+            return;
+        }
+
+        foreach (var callee in CalleesOf(method))
+        {
+            if (callee.DeclaringType == typeof(CollectorTargetInfo))
+            {
+                if (FactByGetterName.TryGetValue(callee.Name, out var fact))
+                {
+                    facts.Add(fact.Name);
+                }
+
+                continue;
+            }
+
+            /* Follow only into code this repo ships. Walking the framework would never terminate usefully,
+               and a gate cannot read a target fact through a BCL call anyway — the fact only exists here. */
+            if (callee.DeclaringType?.Assembly == typeof(CollectorTargetInfo).Assembly)
+            {
+                CollectFactReads(callee, visited, facts);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Every opcode the runtime defines, keyed by its encoded value — taken from
+    /// <see cref="OpCodes"/> by reflection rather than typed out, so the operand-size table below cannot
+    /// drift from the instruction set it is decoding.
+    /// </summary>
+    private static readonly IReadOnlyDictionary<short, OpCode> Opcodes =
+        typeof(OpCodes)
+            .GetFields(BindingFlags.Public | BindingFlags.Static)
+            .Where(field => field.FieldType == typeof(OpCode))
+            .Select(field => (OpCode)field.GetValue(null)!)
+            .GroupBy(opcode => opcode.Value)
+            .ToDictionary(group => group.Key, group => group.First());
+
+    /// <summary>
+    /// The methods a method calls, by walking its IL stream instruction by instruction.
+    ///
+    /// <para><b>Decoded properly, not scanned for byte patterns.</b> Searching the stream for a
+    /// <c>call</c>/<c>callvirt</c> byte would match those values inside other instructions' operands, and a
+    /// four-byte slice of an operand can resolve to a perfectly valid, entirely unrelated method token — a
+    /// guard that reports facts nobody reads, in a file whose whole subject is guards that stop guarding.
+    /// Advancing by each opcode's real operand size is the only way to know a token is a token.</para>
+    /// </summary>
+    private static IReadOnlyList<MethodBase> CalleesOf(MethodBase method)
+    {
+        var callees = new List<MethodBase>();
+        var il = method.GetMethodBody()?.GetILAsByteArray();
+        if (il is null)
+        {
+            return callees;
+        }
+
+        var typeArguments = method.DeclaringType?.GetGenericArguments();
+        var methodArguments = method.IsGenericMethod ? method.GetGenericArguments() : null;
+
+        var position = 0;
+        while (position < il.Length)
+        {
+            var value = il[position] == 0xFE && position + 1 < il.Length
+                ? unchecked((short)(0xFE00 | il[position + 1]))
+                : (short)il[position];
+
+            Assert.True(
+                Opcodes.TryGetValue(value, out var opcode),
+                $"{method.DeclaringType?.Name}.{method.Name}: undecodable opcode 0x{value:X4} at IL offset " +
+                $"{position}. The stream is being mis-walked from here on, and a mis-walked stream reads " +
+                "operand bytes as call tokens — stop rather than report facts that were never read.");
+
+            position += opcode.Size;
+            var operandSize = OperandSize(opcode, il, position);
+
+            if (opcode.OperandType is OperandType.InlineMethod or OperandType.InlineTok)
+            {
+                var token = BitConverter.ToInt32(il, position);
+                try
+                {
+                    if (method.Module.ResolveMethod(token, typeArguments, methodArguments) is { } callee)
+                    {
+                        callees.Add(callee);
+                    }
+                }
+                catch (ArgumentException)
+                {
+                    /* InlineTok also carries field and type handles; those are not calls. */
+                }
+            }
+
+            position += operandSize;
+        }
+
+        return callees;
+    }
+
+    private static int OperandSize(OpCode opcode, byte[] il, int operandStart) => opcode.OperandType switch
+    {
+        OperandType.InlineNone => 0,
+        OperandType.ShortInlineBrTarget or OperandType.ShortInlineI or OperandType.ShortInlineVar => 1,
+        OperandType.InlineVar => 2,
+        OperandType.InlineBrTarget or OperandType.InlineField or OperandType.InlineI
+            or OperandType.InlineMethod or OperandType.InlineSig or OperandType.InlineString
+            or OperandType.InlineTok or OperandType.InlineType or OperandType.ShortInlineR => 4,
+        OperandType.InlineI8 or OperandType.InlineR => 8,
+        OperandType.InlineSwitch => 4 + (4 * BitConverter.ToInt32(il, operandStart)),
+        _ => throw new NotSupportedException($"unhandled operand type {opcode.OperandType} for {opcode.Name}"),
+    };
+
+    /// <summary>
+    /// THE assertion. Every <see cref="CollectorTargetInfo"/> fact a SQL Server gate reads is a fact the
+    /// sweep either varies or fixes by edition — so no gate can be answered by a single defaulted value.
+    ///
+    /// <para>A gate written on a fact the sweep leaves at its default fails EVERY swept shape, and the
+    /// derivation then reports a permanent, unfixable engine gap for a collector that runs. This is the only
+    /// check in the suite that fires on that, and it fires at the moment the gate is written rather than the
+    /// day someone notices a read has gone quiet.</para>
+    /// </summary>
+    [Fact]
+    public void EveryFactASqlServerGateReads_IsVariedBySweepOrFixedByEdition()
+    {
+        var read = FactsReadBySqlServerGates();
+
+        var overClaiming = read
+            .Where(entry => RoleOf(FactByName[entry.Key]) == SweepRole.ConstantEverywhere)
+            .Select(entry => $"  {entry.Key} — read by {string.Join(", ", entry.Value)}")
+            .ToArray();
+
+        Assert.True(
+            overClaiming.Length == 0,
+            "A SQL Server collector's AppliesTo gate reads a CollectorTargetInfo fact that " +
+            "CollectorEngineCapability.TargetsWithEngineEdition never varies. Every swept target therefore " +
+            "carries that fact's default, every one of them fails the gate, and the capability derivation " +
+            "reports a PERMANENT engine gap on every edition for a collector that runs perfectly well — the " +
+            "confident-and-wrong message #2511 exists to delete.\n\n" +
+            "Fix the SWEEP, not this test: add the fact to TargetsWithEngineEdition (varying it, or deriving " +
+            "it from the engine edition the way the two Azure flags are). There is no list here to add a name " +
+            "to.\n\n" +
+            string.Join("\n", overClaiming));
+    }
+
+    /// <summary>
+    /// The scan is only worth anything if it reads the real gates, so pin what it finds against what the
+    /// source plainly says — including a gate that reads NOTHING, which is what shows the decoder
+    /// discriminates rather than reporting every fact for every collector.
+    ///
+    /// <para>A source-parsing guard that matches nothing passes for free and is worse than no guard at all:
+    /// it converts an open question into false confidence. That has happened in this repo more than once, so
+    /// the floor is asserted here rather than assumed.</para>
+    /// </summary>
+    [Fact]
+    public void TheGateScan_ReadsTheGatesTheSourceActuallyCarries()
+    {
+        var sqlServerDefinitions = CollectorCatalog.All
+            .Where(c => c.TargetEngine == CollectorTargetEngine.SqlServer)
+            .ToArray();
+
+        Assert.True(
+            sqlServerDefinitions.Length >= 30,
+            $"only {sqlServerDefinitions.Length} SQL Server definitions found — the catalog walk is broken, not the catalog");
+
+        var read = FactsReadBySqlServerGates();
+
+        /* The facts today's gates are written on. Not an expected-set pin — a floor, so a decoder that
+           silently returned nothing cannot pass. */
+        Assert.Contains(nameof(CollectorTargetInfo.IsAzureSqlDb), read.Keys);
+        Assert.Contains(nameof(CollectorTargetInfo.IsAzureManagedInstance), read.Keys);
+        Assert.Contains(nameof(CollectorTargetInfo.HasMsdbAccess), read.Keys);
+        Assert.Contains(nameof(CollectorTargetInfo.IsAwsRds), read.Keys);
+        Assert.Contains(nameof(CollectorTargetInfo.SqlMajorVersion), read.Keys);
+
+        var byName = CollectorCatalog.All.ToDictionary(c => c.Name, StringComparer.Ordinal);
+
+        /* The collector the whole feature was filed on: one fact, exactly the one its source names. */
+        Assert.Equal(
+            new[] { nameof(CollectorTargetInfo.IsAzureSqlDb) },
+            FactsReadByGateOf(byName["system_health_events"]).ToArray());
+
+        /* Three facts in one gate, so the decoder is not stopping at the first call it finds. */
+        Assert.Equal(
+            new[]
+            {
+                nameof(CollectorTargetInfo.HasMsdbAccess),
+                nameof(CollectorTargetInfo.IsAwsRds),
+                nameof(CollectorTargetInfo.IsAzureSqlDb),
+            },
+            FactsReadByGateOf(byName["running_jobs"]).ToArray());
+
+        /* And a gate that reads nothing at all. Without this, "reports every fact for every collector" would
+           satisfy every assertion above. */
+        Assert.Empty(FactsReadByGateOf(byName["wait_stats"]));
+    }
+
+    /// <summary>
+    /// The sweep is the FULL cross product of the dimensions it varies, not a sample of them.
+    ///
+    /// <para>The claim the derivation makes is "there is no target of this engine edition, under any
+    /// COMBINATION of the other facts, for which this collector runs". A sweep that varied each dimension but
+    /// only along one axis at a time would satisfy
+    /// <c>TheSweep_VariesEveryDimensionTheGatesRead</c> while missing combinations entirely — and a
+    /// conjunctive gate (<c>running_jobs</c> and <c>agent_status</c> are both conjunctions of three facts)
+    /// would be reported as a permanent gap because the one shape that passes it was never generated.</para>
+    ///
+    /// <para>Both sides are measured from the sweep's own output: the dimensions are the facts it varies, the
+    /// expected shape count is the product of the distinct values it produced for each. Nothing here says how
+    /// many dimensions there should be, so adding one needs no edit — only keeping it exhaustive does.</para>
+    /// </summary>
+    [Fact]
+    public void TheSweep_IsTheFullCrossProductOfTheDimensionsItVaries()
+    {
+        foreach (var edition in AllEngineEditions)
+        {
+            var shapes = CollectorEngineCapability.TargetsWithEngineEdition(edition).ToArray();
+            var varied = TargetFacts.Where(fact => RoleOf(fact) == SweepRole.VariedBySweep).ToArray();
+
+            Assert.NotEmpty(varied);
+
+            var expected = varied.Aggregate(
+                1,
+                (total, fact) => total * shapes.Select(fact.GetValue).Distinct().Count());
+
+            Assert.Equal(expected, shapes.Length);
+
+            /* Same size AND no repeats means every combination appears exactly once. Size alone would be
+               satisfied by a sweep that emitted one shape twice and skipped another. */
+            var fingerprints = shapes
+                .Select(shape => string.Join("|", varied.Select(fact => fact.GetValue(shape))))
+                .ToArray();
+
+            Assert.Equal(shapes.Length, fingerprints.Distinct(StringComparer.Ordinal).Count());
+        }
+    }
+
+    /// <summary>
+    /// Every fact on <see cref="CollectorTargetInfo"/> lands in exactly one derived role, and the roles are
+    /// non-degenerate: something is varied, something is fixed by edition, and there is exactly one engine
+    /// discriminator.
+    ///
+    /// <para>This is the whole-type view the per-gate check above cannot give. If
+    /// <see cref="CollectorEngineCapability.TargetsWithEngineEdition"/> ever collapsed — one shape per
+    /// edition, or the Azure flags stopped following the edition — every fact would slide into
+    /// <see cref="SweepRole.ConstantEverywhere"/> and the derivation would answer every question from a
+    /// single target. The gap set would still look plausible; it would just have stopped being derived from
+    /// anything.</para>
+    /// </summary>
+    [Fact]
+    public void EveryTargetFact_LandsInExactlyOneDerivedRole()
+    {
+        var roles = TargetFacts.ToDictionary(fact => fact.Name, RoleOf, StringComparer.Ordinal);
+
+        Assert.NotEmpty(roles);
+        Assert.Single(roles, role => role.Value == SweepRole.EngineDiscriminator);
+        Assert.Contains(roles, role => role.Value == SweepRole.VariedBySweep);
+        Assert.Contains(roles, role => role.Value == SweepRole.FixedByEdition);
+
+        /* The two Azure flags are the edition-fixed pair, and they follow the edition in OPPOSITE directions
+           — asserted here because "fixed by edition" is otherwise satisfied by a flag that is fixed at the
+           wrong value. */
+        var azureShapes = CollectorEngineCapability.TargetsWithEngineEdition(
+            CollectorEngineCapability.AzureSqlDatabaseEngineEdition).ToArray();
+        var miShapes = CollectorEngineCapability.TargetsWithEngineEdition(
+            CollectorEngineCapability.AzureManagedInstanceEngineEdition).ToArray();
+
+        Assert.All(azureShapes, shape => Assert.True(shape.IsAzureSqlDb && !shape.IsAzureManagedInstance));
+        Assert.All(miShapes, shape => Assert.True(shape.IsAzureManagedInstance && !shape.IsAzureSqlDb));
+    }
+}

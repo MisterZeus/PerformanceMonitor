@@ -94,6 +94,19 @@ public static class CollectorCatalog
         s_byName.TryGetValue(collectorName, out var definition) ? AppliesTo(definition, target) : true;
 
     /// <summary>
+    /// The definition registered under <paramref name="collectorName"/>, or <c>null</c> when the catalog
+    /// does not know the name.
+    /// <para>The single name → definition step, exposed so a caller that carries BOTH forms of a question
+    /// can delegate the by-name form to the by-definition one rather than keeping a second copy of the
+    /// lookup AND a second copy of the true-on-miss rule that goes with it — see
+    /// <see cref="CollectorEngineCapability.IsCollectedOnEngineEdition(string, int)"/>. Returning the
+    /// definition rather than a <c>bool</c> is what makes that delegation possible; a <c>Contains</c>
+    /// would leave the caller to look the definition up a second way.</para>
+    /// </summary>
+    public static ICollectorSchemaInfo? Find(string collectorName) =>
+        s_byName.TryGetValue(collectorName, out var definition) ? definition : null;
+
+    /// <summary>
     /// The full dispatch gate: a definition runs only when its
     /// <see cref="ICollectorSchemaInfo.TargetEngine"/> matches the target's
     /// <see cref="CollectorTargetInfo.Engine"/> AND its own
@@ -106,7 +119,7 @@ public static class CollectorCatalog
     /// exists today.</para>
     /// </summary>
     public static bool AppliesTo(ICollectorSchemaInfo definition, CollectorTargetInfo target) =>
-        definition.TargetEngine == target.Engine && definition.AppliesTo(target);
+        EngineMatches(definition, target) && definition.AppliesTo(target);
 
     /// <summary>
     /// The engine half of the gate alone, by name — for callers that want to drop a foreign-dialect
@@ -119,7 +132,16 @@ public static class CollectorCatalog
     /// switch's "unknown collector" rather than a silent disappearance.</para>
     /// </summary>
     public static bool EngineMatches(string collectorName, CollectorTargetInfo target) =>
-        !s_byName.TryGetValue(collectorName, out var definition) || definition.TargetEngine == target.Engine;
+        !s_byName.TryGetValue(collectorName, out var definition) || EngineMatches(definition, target);
+
+    /// <summary>
+    /// The engine half of the gate alone, by definition — the by-name overload above is this plus the
+    /// catalog's true-on-miss lookup. Split out so the comparison itself lives in ONE place: a caller
+    /// holding a definition (a test double, or anything walking <see cref="All"/>) would otherwise
+    /// re-spell <c>definition.TargetEngine == target.Engine</c> and own a second copy of the rule.
+    /// </summary>
+    public static bool EngineMatches(ICollectorSchemaInfo definition, CollectorTargetInfo target) =>
+        definition.TargetEngine == target.Engine;
 
     /// <summary>
     /// True when <paramref name="collectorName"/>'s query carries the deliberate short

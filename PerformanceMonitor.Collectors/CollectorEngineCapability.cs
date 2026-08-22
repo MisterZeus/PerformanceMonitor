@@ -65,6 +65,10 @@ public static class CollectorEngineCapability
     /// pass) and 99 is a version above any floor. The real majors in between are carried anyway so a future
     /// gate written as a RANGE — supported on 15 and 16 but not 17 — is answered correctly rather than by
     /// whichever single representative value happened to be chosen here.</para>
+    /// <para>Dropping a major from this list is not a cosmetic edit: a gate that only that major satisfies
+    /// then matches no swept shape and is reported as a permanent engine gap.
+    /// <c>AVersionGate_IsAnsweredAcrossTheRealMajors_NotByOneRepresentativeValue</c> asserts every value here
+    /// is reachable on its own (#2518).</para>
     /// </summary>
     private static readonly int[] MajorVersionSweep = { 0, 11, 12, 13, 14, 15, 16, 17, 99 };
 
@@ -119,6 +123,14 @@ public static class CollectorEngineCapability
     /// none of it is implied by the edition and all of it can differ server to server.
     /// <para>Public so a test can assert the sweep actually spans the dimensions the gates read, rather than
     /// trusting that it does.</para>
+    /// <para><b>Adding a field to <see cref="CollectorTargetInfo"/> that a SQL Server gate reads means adding
+    /// it here too.</b> A fact this sweep never varies sits at its CLR default in every shape, so a gate
+    /// written on it fails all of them and the derivation reports a permanent engine gap for a collector that
+    /// runs — silently, because the gap set still looks plausible. That is not left to review:
+    /// <c>EveryFactASqlServerGateReads_IsVariedBySweepOrFixedByEdition</c> decodes every SQL Server gate's IL
+    /// for the <see cref="CollectorTargetInfo"/> getters it calls and fails if any of them names a fact this
+    /// sweep leaves constant (#2518). Vary it here, or derive it from the engine edition the way the two
+    /// Azure flags are — there is no third option and no list to add it to instead.</para>
     /// </summary>
     public static IEnumerable<CollectorTargetInfo> TargetsWithEngineEdition(int engineEdition)
     {
@@ -148,12 +160,37 @@ public static class CollectorEngineCapability
     /// <summary>
     /// True when SOME server of this engine edition runs <paramref name="collectorName"/> — i.e. the
     /// collector is not excluded by the engine alone.
-    /// <para>Unknown (0) editions answer TRUE. So does an unknown collector name, following
+    /// <para>Unknown (0) editions answer TRUE. So does an unknown collector name, matching
     /// <see cref="CollectorCatalog.AppliesTo(string, CollectorTargetInfo)"/>'s own true-on-miss default: a
     /// typo must not silently manufacture a permanent-gap claim. The test that scans the reads' collector
     /// names against the catalog is what keeps that default from hiding one.</para>
     /// </summary>
     public static bool IsCollectedOnEngineEdition(string collectorName, int engineEdition)
+    {
+        var definition = CollectorCatalog.Find(collectorName);
+
+        /* True-on-miss, and it is the LOOKUP that owns that rule rather than the sweep: an unknown name has
+           no gate to ask, so there is nothing to derive an answer from and the honest answer is "no claim". */
+        return definition is null || IsCollectedOnEngineEdition(definition, engineEdition);
+    }
+
+    /// <summary>
+    /// The same question asked of a DEFINITION rather than a catalog name. The by-name overload above is
+    /// exactly this plus <see cref="CollectorCatalog.Find"/>'s true-on-miss lookup, so the two cannot answer
+    /// differently — there is one sweep, not two.
+    ///
+    /// <para><b>Why the pair exists (#2518).</b> By name, this function can only ever be handed a gate that
+    /// SHIPS, and a shipped gate is fixed at test time. Every assertion anyone can write against the by-name
+    /// form is therefore a statement about today's collectors, and would pass just as well against a
+    /// hard-coded set of gaps that happened to match them — which is precisely the failure the derivation
+    /// exists to prevent. Taking a definition lets a caller hand the sweep a gate it CONTROLS and move it,
+    /// so "the answer follows the gate" becomes something that can be demonstrated rather than believed.
+    /// It is the same by-name/by-definition pair
+    /// <see cref="CollectorCatalog.AppliesTo(ICollectorSchemaInfo, CollectorTargetInfo)"/> already carries,
+    /// for the same reason: the definition is the thing that owns the answer, and the name is a way of
+    /// finding one.</para>
+    /// </summary>
+    public static bool IsCollectedOnEngineEdition(ICollectorSchemaInfo definition, int engineEdition)
     {
         if (engineEdition == UnknownEngineEdition)
         {
@@ -163,14 +200,14 @@ public static class CollectorEngineCapability
         /* A PostgreSQL collector is not "missing" from a SQL Server engine edition — the question does not
            apply to it. Without this the sweep would report all eight PG definitions as permanent gaps on
            every SQL Server edition, because the dispatch gate it asks includes the engine half. */
-        if (!CollectorCatalog.EngineMatches(collectorName, SqlServerProbe))
+        if (!CollectorCatalog.EngineMatches(definition, SqlServerProbe))
         {
             return true;
         }
 
         foreach (var target in TargetsWithEngineEdition(engineEdition))
         {
-            if (CollectorCatalog.AppliesTo(collectorName, target))
+            if (CollectorCatalog.AppliesTo(definition, target))
             {
                 return true;
             }
