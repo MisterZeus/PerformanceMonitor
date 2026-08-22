@@ -152,18 +152,14 @@ public sealed class DailySummaryRangeToolTests : IClassFixture<SharedDuckDbFixtu
 
         var anchored = Root(await McpHealthTools.GetDailySummaryRange(
             service, _serverManager, ServerName, 1, tenDaysAgo.ToString("yyyy-MM-dd")));
-        var anchoredDays = anchored.GetProperty("days").EnumerateArray().ToArray();
-
-        Assert.Equal(1, anchoredDays.Length);
-        Assert.Equal(tenDaysAgo.ToString("yyyy-MM-dd"), anchoredDays[0].GetProperty("summary_date").GetString());
+        var anchoredDay = Assert.Single(anchored.GetProperty("days").EnumerateArray().ToArray());
+        Assert.Equal(tenDaysAgo.ToString("yyyy-MM-dd"), anchoredDay.GetProperty("summary_date").GetString());
 
         /* And the same one-day span unanchored answers about TODAY instead, so the anchor moved the range
            rather than widening it. */
         var unanchored = Root(await McpHealthTools.GetDailySummaryRange(service, _serverManager, ServerName, 1));
-        var unanchoredDays = unanchored.GetProperty("days").EnumerateArray().ToArray();
-
-        Assert.Equal(1, unanchoredDays.Length);
-        Assert.Equal(today.ToString("yyyy-MM-dd"), unanchoredDays[0].GetProperty("summary_date").GetString());
+        var unanchoredDay = Assert.Single(unanchored.GetProperty("days").EnumerateArray().ToArray());
+        Assert.Equal(today.ToString("yyyy-MM-dd"), unanchoredDay.GetProperty("summary_date").GetString());
     }
 
     [Fact]

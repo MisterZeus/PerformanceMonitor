@@ -136,19 +136,15 @@ public sealed class DarlingDailySummaryRangeTests
 
             var anchored = JsonDocument.Parse(await DarlingMcpHealthTools.GetDailySummaryRange(
                 dataSource, ServerName, 1, tenDaysAgo.ToString("yyyy-MM-dd"))).RootElement;
-            var anchoredDays = anchored.GetProperty("days").EnumerateArray().ToArray();
-
-            Assert.Equal(1, anchoredDays.Length);
-            Assert.Equal(tenDaysAgo.ToString("yyyy-MM-dd"), anchoredDays[0].GetProperty("summary_date").GetString());
+            var anchoredDay = Assert.Single(anchored.GetProperty("days").EnumerateArray().ToArray());
+            Assert.Equal(tenDaysAgo.ToString("yyyy-MM-dd"), anchoredDay.GetProperty("summary_date").GetString());
 
             /* And the same one-day span unanchored answers about TODAY instead, so the anchor moved the
                range rather than widening it. */
             var unanchored = JsonDocument.Parse(
                 await DarlingMcpHealthTools.GetDailySummaryRange(dataSource, ServerName, 1)).RootElement;
-            var unanchoredDays = unanchored.GetProperty("days").EnumerateArray().ToArray();
-
-            Assert.Equal(1, unanchoredDays.Length);
-            Assert.Equal(today.ToString("yyyy-MM-dd"), unanchoredDays[0].GetProperty("summary_date").GetString());
+            var unanchoredDay = Assert.Single(unanchored.GetProperty("days").EnumerateArray().ToArray());
+            Assert.Equal(today.ToString("yyyy-MM-dd"), unanchoredDay.GetProperty("summary_date").GetString());
 
             /* ── the span is bounded, and refused rather than clamped ── */
             Assert.StartsWith(
