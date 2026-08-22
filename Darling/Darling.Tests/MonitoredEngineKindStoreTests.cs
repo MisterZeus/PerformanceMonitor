@@ -309,6 +309,25 @@ public sealed class MonitoredEngineKindStoreTests
            server rather than about the store. The distinction only exists because the DESCRIPTION is composed
            where the token is decoded; a browser mapping tokens itself would have had to invent it. */
         JsonAssert.Contains("\"engine_description\": null", unknownJson);
+
+        /* And the third answer, which is neither of the two above: a token this build has never heard of — a
+           store written by a NEWER build. The booleans stay false, because an unknown token is not a claim
+           about either engine. The DESCRIPTION is the token itself rather than DescribeEngineKind's
+           "an unrecognised engine": that phrase is worded to sit mid-sentence in the capability messages and
+           reads as the wrong part of speech as a UI label, and the token is the more useful of the two anyway,
+           being the string an operator would search their own store for. */
+        var future = new FleetServerCard
+        {
+            ServerId = 3,
+            DisplayName = "future",
+            ServerName = "future",
+            EngineKind = "cockroach",
+        };
+        var futureJson = System.Text.Json.JsonSerializer.Serialize(future, DarlingFleetReader.JsonOptions);
+        JsonAssert.Contains("\"engine_kind\": \"cockroach\"", futureJson);
+        JsonAssert.Contains("\"engine_description\": \"cockroach\"", futureJson);
+        JsonAssert.Contains("\"is_postgres\": false", futureJson);
+        JsonAssert.Contains("\"is_aurora\": false", futureJson);
     }
 
     /* ---------------- gated live E2E: the UPGRADE, not just a fresh store ---------------- */

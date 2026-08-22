@@ -349,6 +349,16 @@ public sealed class ServerPageTabsTests
            correct without it until two renders overlap. */
         Assert.Contains("const generation = ++renderGeneration;", ServerJs, StringComparison.Ordinal);
         Assert.Contains("if (generation !== renderGeneration) return;", ServerJs, StringComparison.Ordinal);
+
+        /* And only the FIRST render of a server waits on that fetch. route() re-renders on every sub-tab click
+           and on the 60s poll, so gating those on /api/fleet blanks the bar and the grid once a minute and
+           makes a tab click wait on a read it does not need — the engine is a property of the server, not of
+           the render. A repeat render paints from the remembered card synchronously; a card that does not
+           arrive leaves a painted page alone, because a failed fleet read is not evidence the engine changed. */
+        Assert.Contains("const remembered = lastCard.get(server);", ServerJs, StringComparison.Ordinal);
+        Assert.Contains("painted = paintTabs(tabsSlot, server, tabId, remembered.card);", ServerJs, StringComparison.Ordinal);
+        Assert.Contains("if (card) lastCard.set(server, { card, reason });", ServerJs, StringComparison.Ordinal);
+        Assert.Contains("if (!painted || (card && serverTabsFor(card) !== painted)) {", ServerJs, StringComparison.Ordinal);
         Assert.DoesNotContain("card.is_postgres", ServerJs, StringComparison.Ordinal);
         Assert.DoesNotContain("card.engine_kind", ServerJs, StringComparison.Ordinal);
         Assert.DoesNotContain("\"aurora-postgres\"", ServerJs, StringComparison.Ordinal);
@@ -356,14 +366,19 @@ public sealed class ServerPageTabsTests
         Assert.DoesNotContain("engine_kind ===", js, StringComparison.Ordinal);
 
         /* And the words on that badge are MonitoredEngineKind's, DERIVED on the card rather than assigned by
-           whichever builder happened to remember — with null for an absent kind, so the browser shows no badge
-           rather than "an unrecognised engine" at every server that has not connected since the rung landed. */
+           whichever builder happened to remember. Three answers: null for an absent kind (no badge, rather
+           than one describing the store's silence as a property of the server), the describer's words for a
+           recognised token, and the RAW TOKEN for one this build has never heard of — because the describer's
+           "an unrecognised engine" is a mid-sentence fragment and reads as the wrong part of speech beside
+           "SQL Server". */
         var reader = ReadRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingFleetReader.cs"));
+        Assert.Contains("string.IsNullOrWhiteSpace(EngineKind) ? null", reader, StringComparison.Ordinal);
         Assert.Contains(
-            "string.IsNullOrWhiteSpace(EngineKind) ? null : MonitoredEngineKind.DescribeEngineKind(EngineKind);",
+            ": MonitoredEngineKind.IsKnown(EngineKind) ? MonitoredEngineKind.DescribeEngineKind(EngineKind)",
             reader,
             StringComparison.Ordinal);
+        Assert.Contains(": EngineKind.Trim();", reader, StringComparison.Ordinal);
     }
 
     /// <summary>

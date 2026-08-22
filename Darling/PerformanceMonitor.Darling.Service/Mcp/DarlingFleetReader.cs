@@ -830,14 +830,24 @@ public sealed class FleetServerCard
     ///
     /// <para>DERIVED rather than assigned, so it cannot be forgotten: every card is built by an object
     /// initializer, and a settable field would be null on any card whose builder did not think of it —
-    /// including one added later on a path nobody re-reads. Null rather than "an unrecognised engine" for an
-    /// ABSENT kind: a surface has nothing to say about a server whose engine was never stamped, and no badge
-    /// is better than a badge describing the store's silence as a property of the server. A non-null token
-    /// this build does not recognise keeps the describer's own wording, which says exactly that.</para>
+    /// including one added later on a path nobody re-reads.</para>
+    ///
+    /// <para><b>Three answers, and the third is the interesting one.</b> An ABSENT kind is null: a surface has
+    /// nothing to say about a server whose engine was never stamped, and no badge is better than a badge
+    /// describing the store's silence as a property of the server. A RECOGNISED token gets
+    /// <see cref="MonitoredEngineKind.DescribeEngineKind"/>'s words. A token this build has never heard of —
+    /// a store written by a NEWER build — gets the token back verbatim, NOT the describer's
+    /// "an unrecognised engine": that phrase is worded to sit mid-sentence in the capability messages, and as
+    /// a label beside "SQL Server" and "Aurora PostgreSQL" it reads as the wrong part of speech. The raw token
+    /// is also the more useful of the two, being the string an operator would search their own store for. It
+    /// is deliberately not mapped onto a default, which is the whole reason the describer refuses to guess in
+    /// the first place.</para>
     /// </summary>
     [JsonPropertyName("engine_description")]
     public string? EngineDescription =>
-        string.IsNullOrWhiteSpace(EngineKind) ? null : MonitoredEngineKind.DescribeEngineKind(EngineKind);
+        string.IsNullOrWhiteSpace(EngineKind) ? null
+        : MonitoredEngineKind.IsKnown(EngineKind) ? MonitoredEngineKind.DescribeEngineKind(EngineKind)
+        : EngineKind.Trim();
 
     /// <summary>True when this server is PostgreSQL (Aurora or stock) — derived from
     /// <see cref="EngineKind"/>, so a consumer never has to know the token vocabulary. False when the kind is

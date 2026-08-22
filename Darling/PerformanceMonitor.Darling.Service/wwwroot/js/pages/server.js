@@ -19,12 +19,24 @@
  *
  * WHICH tab set is a question about the SERVER, not about the shell (#2530): a PostgreSQL target gets the six
  * PostgreSQL tabs and a SQL Server target the twelve SQL Server ones, chosen by serverTabsFor() from the fleet
- * card's server-derived `is_postgres`. That fact arrives with the card, so the bar and the grid wait for the
- * ONE /api/fleet read this page already made for the header's band and reason — not a second request, and not
- * a guess rendered first and corrected after. Rendering the SQL Server set optimistically would flash twelve
- * wrong tabs at every PostgreSQL target and start nine reads that cannot answer, which is the exact experience
- * #2530 was filed about; a loading strip for one fetch is the cheaper wrong answer. If the card never arrives
- * the page falls back to the SQL Server registry, which is what an unclaimed server has always rendered.
+ * card's server-derived `is_postgres`. That fact arrives with the ONE /api/fleet read this page already made
+ * for the header's band and reason — not a second request, and not a guess rendered first and corrected after.
+ * Rendering the SQL Server set optimistically would flash twelve wrong tabs at every PostgreSQL target and
+ * start nine reads that cannot answer, which is the exact experience #2530 was filed about.
+ *
+ * So the FIRST render of a server waits, behind a loading strip, and every render after it does not. The
+ * engine is a property of the server rather than of the render — it changes about as often as the server's
+ * operating system does — so `lastCard` remembers it by name and a repeat render picks its registry
+ * SYNCHRONOUSLY, exactly as this page behaved before it was engine-aware. That matters because route()
+ * re-renders on every sub-tab click AND on the 60s poll: gating those on a fetch would blank the tab bar and
+ * the grid once a minute, and would make a sub-tab click wait on /api/fleet before the new tab's panels even
+ * started loading. When the fresh card lands it always refreshes the header, and rebuilds the bar and grid
+ * only if the registry it chooses is a different one — which is to say, essentially never.
+ *
+ * A card that does NOT arrive (a failed fleet read, a server the fleet does not carry) leaves a painted page
+ * alone rather than repainting it as SQL Server: a transient read failure is not evidence that a server
+ * stopped being PostgreSQL. With nothing painted yet it falls back to the SQL Server registry, which is what
+ * an unclaimed server has always rendered.
  *
  * The time range is the web twin of ViewerServerTab.TimeRange.cs's preset picker: one page-level window that
  * every time-windowed panel is given. It is module state (like the fleet page's sort), so it survives the
@@ -67,6 +79,11 @@ let current = { server: null, tab: null };
  * /api/fleet fetch out from under the winning one; the fetch is fine, it is only its RESULT that is stale. */
 let renderGeneration = 0;
 
+/* The last card seen for a server name, so a repeat render can choose its registry without a round trip. Keyed
+   on the ROUTE's name (which may be either the server name or the display name — the same key loadServerCard
+   matches on), module-scoped like pageHours, and bounded by the number of servers visited in one session. */
+const lastCard = new Map();
+
 /** The {hours,label} context every tab build() is given. */
 function rangeContext() {
   const opt = RANGE_OPTIONS.find((o) => o.hours === pageHours) || RANGE_OPTIONS[3];
@@ -95,19 +112,41 @@ export function renderServer(main, server, tabId) {
   gridNode = el("div", { class: "panel-grid" });
   mount(main, [head, whySlot, tabsSlot, gridNode]);
 
+  /* Seen this server before? Then its engine is already known and the page paints now — no loading strip, and
+     the tab's panels start fetching in this tick, which is what keeps the 60s poll and a sub-tab click feeling
+     like they did before the tab set had a question to answer. */
+  const remembered = lastCard.get(server);
+  let painted = null;
+  if (remembered) {
+    fillServerHead(dot, badgeSlot, engineSlot, whySlot, remembered.card, remembered.reason);
+    painted = paintTabs(tabsSlot, server, tabId, remembered.card);
+  }
+
   loadServerCard(server, (card, reason) => {
     /* A newer render has started since this fetch went out — everything below writes module state or mounts
        into nodes this render no longer owns, so the only correct thing to do with a stale answer is drop it. */
     if (generation !== renderGeneration) return;
 
+    if (card) lastCard.set(server, { card, reason });
     fillServerHead(dot, badgeSlot, engineSlot, whySlot, card, reason);
 
-    const tabs = serverTabsFor(card);
-    const tab = findServerTab(tabId, tabs);
-    current = { server, tab };
-    mount(tabsSlot, [subtabBar(server, tab, tabs), tabNote(tab)]);
-    redrawPanels();
+    /* Repaint only when there is nothing painted yet, or when the fresh card chooses a DIFFERENT registry —
+       the two registries are module constants, so that comparison is exact. A null card never repaints over a
+       painted page: a fleet read that failed says nothing about which engine this server runs. */
+    if (!painted || (card && serverTabsFor(card) !== painted)) {
+      painted = paintTabs(tabsSlot, server, tabId, card);
+    }
   });
+}
+
+/** Put the tab bar, its note and its panels on the page for a card, and return the registry that card chose. */
+function paintTabs(tabsSlot, server, tabId, card) {
+  const tabs = serverTabsFor(card);
+  const tab = findServerTab(tabId, tabs);
+  current = { server, tab };
+  mount(tabsSlot, [subtabBar(server, tab, tabs), tabNote(tab)]);
+  redrawPanels();
+  return tabs;
 }
 
 /** (Re)fill the panel grid for the current server + tab at the current range. No refetch of anything else. */
