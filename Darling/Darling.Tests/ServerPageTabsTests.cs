@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
 
@@ -310,6 +311,102 @@ public sealed class ServerPageTabsTests
             "the PostgreSQL registry names SQL Server reads beyond the three engine-neutral ones — each of " +
             "these answers a PostgreSQL target with a sentence about a collector that will never run: " +
             string.Join(", ", unexpected));
+    }
+
+    /// <summary>
+    /// A PostgreSQL read whose collector is Aurora-only sits on a tab that SAYS it is Aurora-only.
+    ///
+    /// <para>Two of the eight are: <c>pg_wait_stats</c> reads <c>aurora_stat_system_waits()</c> and
+    /// <c>pg_statement_stats</c> reads <c>aurora_stat_statements()</c>, and core PostgreSQL has an equivalent
+    /// of neither in any version. Both panels self-explain — #2532 made the reads answer that state with
+    /// <c>not_collected</c> naming the server, the engine and the collector — but a note is what the reader
+    /// meets BEFORE clicking, and it is what makes "shown at stock PostgreSQL" a decision rather than an
+    /// oversight. It matters most on Activity, where the rest of the tab DOES fill, so one empty grid among
+    /// three could reasonably read as a fault.</para>
+    ///
+    /// <para><b>Which reads are Aurora-only is DERIVED, not listed.</b>
+    /// <see cref="CollectorEngineCapability.IsCollectedOnEngineKind"/> answers it from the shipped
+    /// <c>AppliesTo</c> gates, so moving a gate moves this pin with it — and a ninth PostgreSQL read landing
+    /// on a tab with no note goes red rather than shipping an unexplained blank. The read-to-collector map is
+    /// explicit because it is the one half that is a naming fact with no table anywhere: each read passes its
+    /// collector's name to <c>DarlingEngineCapability.NotCollectedStatusAsync</c> as a string literal. The map
+    /// is asserted to cover every served <c>get_pg_*</c> read, so it cannot go stale quietly.</para>
+    ///
+    /// <para>Found by review: this PR argued the Waits case at length and left the Activity tab, whose
+    /// <c>get_pg_top_queries</c> panel is gated exactly the same way, with no note at all.</para>
+    /// </summary>
+    [Fact]
+    public void EveryAuroraOnlyPostgresRead_SitsOnATabThatSaysSo()
+    {
+        /* The naming fact. Verified against the dispatch below rather than trusted. */
+        var collectorOf = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["get_pg_wait_stats"] = "pg_wait_stats",
+            ["get_pg_top_queries"] = "pg_statement_stats",
+            ["get_pg_blocking"] = "pg_blocking",
+            ["get_pg_io_stats"] = "pg_io_stats",
+            ["get_pg_autovacuum_health"] = "pg_autovacuum_stats",
+            ["get_pg_replication_slots"] = "pg_replication_slots",
+            ["get_pg_wraparound_risk"] = "pg_wraparound_stats",
+            ["get_pg_xmin_horizon"] = "pg_xmin_horizon",
+        };
+
+        var served = DarlingWebEndpoints.BuildReadDispatch().Keys
+            .Where(n => n.StartsWith("get_pg_", StringComparison.Ordinal))
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+        var unmapped = served.Where(n => !collectorOf.ContainsKey(n)).ToArray();
+        Assert.True(
+            unmapped.Length == 0,
+            "this map has gone stale against the dispatch, so the check below silently skips these reads: " +
+            string.Join(", ", unmapped));
+
+        var auroraOnly = served
+            .Where(read =>
+            {
+                var definition = CollectorCatalog.Find(collectorOf[read]);
+                Assert.True(definition is not null, "no collector named " + collectorOf[read] + " — remap this test");
+                return !CollectorEngineCapability.IsCollectedOnEngineKind(definition!, MonitoredEngineKind.Postgres);
+            })
+            .ToArray();
+
+        /* The check is only worth having if some read is actually gated this way; an empty set would pass it
+           vacuously and keep passing after the last Aurora-only collector lost its gate. */
+        Assert.NotEmpty(auroraOnly);
+
+        var region = RegistryRegion(ServerTabsJs, "POSTGRES_TABS");
+        var ids = Regex.Matches(region, "^    id: \"([a-z-]+)\",$", RegexOptions.Multiline).ToArray();
+        var problems = new List<string>();
+
+        foreach (var read in auroraOnly)
+        {
+            for (var i = 0; i < ids.Length; i++)
+            {
+                var end = i + 1 < ids.Length ? ids[i + 1].Index : region.Length;
+                var block = region[ids[i].Index..end];
+                if (!block.Contains("\"" + read + "\"", StringComparison.Ordinal)) continue;
+
+                if (!block.Contains("Aurora", StringComparison.Ordinal))
+                {
+                    problems.Add(
+                        $"tab '{ids[i].Groups[1].Value}' fetches {read}, whose collector " +
+                        $"({collectorOf[read]}) does not run on stock PostgreSQL, and the tab never says so");
+                }
+            }
+        }
+
+        Assert.True(problems.Count == 0, string.Join("; ", problems));
+
+        /* And both tabs say it in the place the reader meets first — a `note`, rendered by tabNote above the
+           panels — rather than only in a comment nobody reading the screen can see. */
+        foreach (var tabId in new[] { "waits", "activity" })
+        {
+            var at = region.IndexOf("    id: \"" + tabId + "\",", StringComparison.Ordinal);
+            Assert.True(at > 0, "the PostgreSQL '" + tabId + "' tab is gone — remap this test");
+            var end = region.IndexOf("    build: (server, ctx)", at, StringComparison.Ordinal);
+            Assert.True(end > at, "the '" + tabId + "' tab's build() moved — remap this test");
+            Assert.Contains("note:", region[at..end], StringComparison.Ordinal);
+        }
     }
 
     /// <summary>

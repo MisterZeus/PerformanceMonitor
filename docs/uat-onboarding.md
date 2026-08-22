@@ -533,12 +533,17 @@ dashboard renders the six PostgreSQL tabs above at any target whose `engine_kind
 desktop viewer has no PostgreSQL screens at all — so on Windows a PostgreSQL target is still readable only
 through MCP. If you are evaluating this for PostgreSQL monitoring, know which surface you are evaluating.
 
-One PostgreSQL tab can be permanently empty, and that is not a fault. **Waits** is fed by `get_pg_wait_stats`,
-which reads Amazon Aurora's `aurora_stat_system_waits()` — core PostgreSQL has no equivalent in any version.
-On a stock PostgreSQL target the panel answers `not_collected`, naming the server, the engine and the
-collector and saying the gap is permanent, rather than going blank. The tab is **shown** at stock PostgreSQL
-deliberately, so the tab set does not change shape between two PostgreSQL servers in one fleet, and so the
-Aurora capability is discoverable from a stock instance rather than invisible.
+**Two of the eight PostgreSQL capture paths are Amazon Aurora-only**, so on a stock PostgreSQL target two
+panels are permanently empty — and neither is a fault. `get_pg_wait_stats` reads `aurora_stat_system_waits()`
+and `get_pg_top_queries` reads `aurora_stat_statements()`; core PostgreSQL has an equivalent of neither, in any
+version. Both answer `not_collected` there, naming the server, the engine and the collector and saying the gap
+is permanent, rather than going blank — and both tabs carry a note saying so before you click.
+
+**Waits** is the only tab that is *wholly* Aurora-only. Activity's other half, the blocking panels, is
+collected at every PostgreSQL target including standbys, where a recovery conflict is blocking that happens
+nowhere else. Waits is **shown** at stock PostgreSQL deliberately, so the tab set does not change shape between
+two PostgreSQL servers in one fleet, and so the Aurora capability is discoverable from a stock instance rather
+than invisible.
 
 The web used to carry an additional obstacle on top of that, and **it is now gone**: `/api/fleet`'s card
 carried the SQL Server `engine_edition` and no target-engine discriminator, so a browser could not tell a

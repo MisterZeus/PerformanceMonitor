@@ -1426,6 +1426,20 @@ export const POSTGRES_TABS = [
   {
     id: "activity",
     label: "Activity",
+
+    /* HALF of this tab is Aurora-only, and only half. get_pg_blocking runs everywhere — including on
+       standbys, where a recovery conflict is blocking that happens nowhere else — while get_pg_top_queries
+       is fed by pg_statement_stats, whose AppliesTo gate is target.IsAurora, so it reads
+       aurora_stat_statements() and has no core-PostgreSQL equivalent in any version. Same treatment as the
+       Waits tab, for the same reason: the panel self-explains via not_collected, and the note says so before
+       the reader clicks. Saying it here rather than only in the panel matters more on THIS tab than on
+       Waits, because the rest of the tab does fill, so a reader could reasonably read one empty grid among
+       three as a fault. */
+    note:
+      "The blocking panels are collected at every PostgreSQL target, standbys included. Top Query Shapes is " +
+      "not: it comes from Amazon Aurora's aurora_stat_statements(), which core PostgreSQL has in no version, " +
+      "so on a stock PostgreSQL target that one panel is permanently empty and says so in its own words " +
+      "while the two above it keep working.",
     build: (server, ctx) => [
       /* One read, three panels, and the FIRST of them is the denominator. get_pg_blocking is a periodic SAMPLE,
          not an event log: PostgreSQL records nothing unless asked, so "no chains" is ambiguous between a quiet
