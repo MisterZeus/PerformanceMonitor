@@ -83,8 +83,13 @@ public class DarlingPgDatabaseReaderTests
         /* IS DISTINCT FROM, not <>, so a NULL on either side is a real comparison rather than NULL. */
         Assert.Contains("stats_reset IS DISTINCT FROM LAG(stats_reset) OVER series", Sql, StringComparison.Ordinal);
 
-        /* The first sample of a series has a NULL LAG and is the START of the series, not a reset. */
-        Assert.Contains("LAG(stats_reset) OVER series IS NOT NULL", Sql, StringComparison.Ordinal);
+        /* The first sample of a series is excluded by its POSITION, not by its LAG being NULL. Pinned as an
+           explicit DoesNotContain because the LAG form reads correctly and is wrong: LAG(stats_reset) is
+           NULL both when there is no previous row AND when the previous row's stats_reset was itself NULL —
+           the ordinary state of a database nobody has reset — so a database's FIRST reset moves stats_reset
+           NULL -> timestamp and never fires. */
+        Assert.Contains("ROW_NUMBER() OVER series > 1", Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LAG(stats_reset) OVER series IS NOT NULL", Sql, StringComparison.Ordinal);
 
         Assert.Contains("count(*) FILTER (WHERE reset_here)", Sql, StringComparison.Ordinal);
         Assert.Contains("AS stats_reset_count", Sql, StringComparison.Ordinal);

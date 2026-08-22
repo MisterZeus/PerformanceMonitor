@@ -146,6 +146,18 @@ public sealed class DarlingPgDatabaseStatsLiveTests
             await SeedAsync(connection, ct, t1, "quietreset", 1_010, 0, 0, 0, 0, 0, 0, resetBefore);
             await SeedAsync(connection, ct, t2, "quietreset", 2_000, 0, 0, 0, 0, 0, 0, resetAfter);
 
+            /* firstreset is the case the review of this PR found, and it is the same category as
+               quietreset one step further out: a database that has NEVER been reset carries
+               stats_reset = NULL, so its FIRST-EVER reset moves the column NULL -> timestamp. A guard
+               written as `LAG(stats_reset) IS NOT NULL` cannot tell that from "no previous row" and misses
+               it entirely — and because the counters climb across it, the rewind detector misses it too, so
+               the reset is completely invisible. Every other database in this fixture has a non-null
+               stats_reset from its first sample, which is exactly why the original tests could not see the
+               hole. */
+            await SeedAsync(connection, ct, t0, "firstreset", 1_000, 0, 0, 0, 0, 0, 0, null);
+            await SeedAsync(connection, ct, t1, "firstreset", 1_010, 0, 0, 0, 0, 0, 0, null);
+            await SeedAsync(connection, ct, t2, "firstreset", 2_000, 0, 0, 0, 0, 0, 0, resetAfter);
+
             /* PostgreSQL's own shared-relations row, with a NULL database name. */
             await SeedAsync(connection, ct, t0, null, 0, 0, 100, 1_000, 0, 0, 0, null);
             await SeedAsync(connection, ct, t1, null, 0, 0, 200, 3_000, 0, 0, 0, null);
@@ -219,7 +231,24 @@ public sealed class DarlingPgDatabaseStatsLiveTests
             Assert.Equal(0, quietReset.GetProperty("counter_rewind_count").GetInt32());
             Assert.True(quietReset.GetProperty("counters_were_reset").GetBoolean());
 
-            /* ── a database with no reset at all keeps a clean bill ── */
+            /* ── the FIRST-EVER reset: NULL -> timestamp, with the counters climbing across it ──
+
+               Neither signal could see this before the guard moved to ROW_NUMBER: the timestamp's LAG is
+               NULL (indistinguishable from "no previous row" to a LAG-based guard) and every difference is
+               positive. Both halves are asserted, because a fix that reported the reset by making the
+               rewind detector fire would be reporting the right answer for the wrong reason. */
+            var firstReset = Row(databases, "firstreset");
+            Assert.Equal(1_000, firstReset.GetProperty("xact_commit").GetInt64());
+            Assert.Equal(1, firstReset.GetProperty("stats_reset_count").GetInt32());
+            Assert.Equal(0, firstReset.GetProperty("counter_rewind_count").GetInt32());
+            Assert.True(firstReset.GetProperty("counters_were_reset").GetBoolean());
+
+            /* ── a database with no reset at all keeps a clean bill ──
+
+               The control for the arm above. This row's stats_reset is NULL in every sample, so a fix that
+               caught the first-ever reset by simply firing whenever the timestamp is involved would light
+               this up too — reporting a reset on a server nobody has ever reset, which is the opposite
+               wrong answer and no better than the one it replaced. */
             var shared = Row(databases, "(shared relations)");
             Assert.True(shared.GetProperty("is_shared_relations").GetBoolean());
             Assert.Equal(0, shared.GetProperty("stats_reset_count").GetInt32());

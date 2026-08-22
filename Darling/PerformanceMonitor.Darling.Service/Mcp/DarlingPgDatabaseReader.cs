@@ -49,8 +49,9 @@ public static class DarlingPgDatabaseReader
     /// <item><c>stats_reset_count</c> — the EXPLICIT signal, from the server's own per-database
     /// <c>stats_reset</c> timestamp moving between two samples. This is the only thing that can see a reset
     /// followed by enough activity to climb back PAST the old value inside one collection interval: the
-    /// difference is positive there, so the arithmetic sees a perfectly ordinary busy minute. A
-    /// <c>LAG</c> of NULL is the start of the series, not a reset, so it is excluded.</item>
+    /// difference is positive there, so the arithmetic sees a perfectly ordinary busy minute. The first
+    /// sample of a series is excluded by its ROW_NUMBER, not by its <c>LAG</c> being NULL — see the
+    /// comment on the expression, where that distinction is load-bearing.</item>
     /// <item><c>counter_rewind_count</c> — the IMPLICIT signal, a counter smaller than the previous sample's.
     /// Kept alongside rather than replaced by the explicit one because a crash restart discards the
     /// statistics, and a target that has never been reset at all reports <c>stats_reset</c> as NULL, so the
@@ -80,9 +81,20 @@ public static class DarlingPgDatabaseReader
                 temp_bytes    - LAG(temp_bytes)    OVER series AS raw_temp_bytes,
                 deadlocks     - LAG(deadlocks)     OVER series AS raw_deadlocks,
                 /* The explicit reset. IS DISTINCT FROM rather than <> so a NULL on either side is a real
-                   comparison; the LAG IS NOT NULL guard is what stops the first sample of a series - whose
-                   LAG is always NULL - being counted as a reset. */
-                (LAG(stats_reset) OVER series IS NOT NULL
+                   comparison, and ROW_NUMBER > 1 - not `LAG(stats_reset) IS NOT NULL` - is what excludes
+                   the first sample of the series.
+
+                   That distinction is the whole correctness of this line. LAG(stats_reset) is NULL in TWO
+                   situations a guard on it cannot tell apart: there is no previous row, and there IS one
+                   whose stats_reset was itself NULL. The second is the COMMON state - stats_reset is NULL
+                   until the first reset ever - so a database's FIRST reset moves it NULL -> timestamp, the
+                   LAG guard evaluates false, and the reset never fires. Worse, that is precisely the case
+                   counter_rewind_count cannot cover either: if the database climbed back past its old
+                   values before the next sample, every difference is positive and the reset is completely
+                   invisible. ROW_NUMBER asks the question actually being asked - "is this the first sample
+                   of the series" - and answers it from the row's position rather than from a value that
+                   means something else. Proven both directions against live PostgreSQL 17. */
+                (ROW_NUMBER() OVER series > 1
                  AND stats_reset IS DISTINCT FROM LAG(stats_reset) OVER series) AS reset_here
             FROM pg_database_stats
             WHERE server_id = $1
