@@ -638,8 +638,9 @@ public sealed class DarlingMcpHostService : BackgroundService
                 .WithGeminiCompatibleTools<DarlingMcpAgTools>()
                 /* The system_health parse-on-read family — get_health_parser_cpu_tasks / _io_issues /
                    _memory_broker / _memory_conditions / _memory_node_oom / _scheduler_issues /
-                   _severe_errors / _system_health — the same names the Dashboard exposes. Where the Dashboard
-                   reads its server-side-parsed collect.HealthParser_* tables, these shred the raw
+                   _severe_errors / _significant_waits / _system_health — the same names the Dashboard
+                   exposes. Where the Dashboard reads its server-side-parsed collect.HealthParser_*
+                   tables, these shred the raw
                    system_health_events on read via the shared SystemHealthParser (Common) and gate with the
                    service-side twin of the viewer's SystemEventSignificance, exactly as the viewer's System
                    Events tab does — the same SIGNIFICANT warning set, no live hit. */
