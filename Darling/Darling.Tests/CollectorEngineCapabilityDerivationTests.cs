@@ -68,7 +68,10 @@ public sealed class CollectorEngineCapabilityMovingGateTests
         /// <summary>The gate under test. Settable, not <c>init</c>, so one instance can be moved.</summary>
         public required Func<CollectorTargetInfo, bool> Gate { get; set; }
 
-        public CollectorTargetEngine TargetEngine { get; init; } = CollectorTargetEngine.SqlServer;
+        /// <summary>The engine half of the dispatch gate, and the discriminator the KIND axis derives from
+        /// (#2530). Settable for the same reason <see cref="Gate"/> is: the engine-kind assertions move it
+        /// between calls on ONE instance, so the two answers differ with nothing else changed.</summary>
+        public CollectorTargetEngine TargetEngine { get; set; } = CollectorTargetEngine.SqlServer;
 
         public string Name => "synthetic_gate_2518";
 
@@ -282,6 +285,175 @@ public sealed class CollectorEngineCapabilityMovingGateTests
                     $"a PostgreSQL definition was reported as a permanent gap on engine edition {edition}");
             }
         }
+    }
+
+    /* ───────── the engine-KIND axis (#2530) ───────── */
+
+    /// <summary>
+    /// The kind axis is DERIVED too, and this is what says so: one object, one engine kind, the
+    /// definition's own <see cref="ICollectorSchemaInfo.TargetEngine"/> moved between calls, and the answer
+    /// moves with it. Nothing else changes — not the name, not the object identity, not the token.
+    ///
+    /// <para>Without this the kind axis could have been "the eight pg_ collectors are the PostgreSQL ones",
+    /// which is true today, would pass every assertion anyone would write about the shipped catalog, and
+    /// would go stale in the direction that keeps passing — exactly the failure #2518 exists to prevent
+    /// one axis over.</para>
+    /// </summary>
+    [Fact]
+    public void TheKindAnswerMoves_WhenTheDefinitionsEngineMoves_InBothDirections()
+    {
+        var collector = new SyntheticCollector { Gate = _ => true, TargetEngine = CollectorTargetEngine.SqlServer };
+
+        /* A SQL Server dialect asked about a PostgreSQL target: a permanent gap, on both PG tokens. */
+        Assert.False(CollectorEngineCapability.IsCollectedOnEngineKind(collector, MonitoredEngineKind.Postgres));
+        Assert.False(CollectorEngineCapability.IsCollectedOnEngineKind(collector, MonitoredEngineKind.AuroraPostgres));
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(collector, MonitoredEngineKind.SqlServer));
+
+        /* The SAME object, one field moved. Every answer inverts. */
+        collector.TargetEngine = CollectorTargetEngine.PostgreSql;
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(collector, MonitoredEngineKind.Postgres));
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(collector, MonitoredEngineKind.AuroraPostgres));
+        Assert.False(CollectorEngineCapability.IsCollectedOnEngineKind(collector, MonitoredEngineKind.SqlServer));
+
+        /* And back, so the answer cannot be "PostgreSQL is the special one". */
+        collector.TargetEngine = CollectorTargetEngine.SqlServer;
+        Assert.False(CollectorEngineCapability.IsCollectedOnEngineKind(collector, MonitoredEngineKind.Postgres));
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(collector, MonitoredEngineKind.SqlServer));
+    }
+
+    /// <summary>
+    /// The kind axis reads the ENGINE half of the dispatch gate and nothing else — a definition's own
+    /// <c>AppliesTo</c> cannot make it claim a gap, however tightly shut.
+    ///
+    /// <para>That is a deliberate narrowing, not an oversight, and it is the same discipline the edition
+    /// axis applies to msdb access: <c>AppliesTo</c> on the PostgreSQL side reads Aurora-ness, version
+    /// floors and recovery state, and none of those are decided by the engine kind alone. Letting a shut
+    /// gate speak here would report "never will" for a collector an upgrade or a writer connection
+    /// enables — the confident-and-wrong message this whole mechanism exists to delete.</para>
+    /// </summary>
+    [Fact]
+    public void AShutAppliesToGate_IsNotAnEngineKindGap()
+    {
+        var postgres = new SyntheticCollector { Gate = _ => false, TargetEngine = CollectorTargetEngine.PostgreSql };
+
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(postgres, MonitoredEngineKind.Postgres));
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(postgres, MonitoredEngineKind.AuroraPostgres));
+
+        /* ...and the engine half still speaks, so the assertion above is not vacuous. */
+        Assert.False(CollectorEngineCapability.IsCollectedOnEngineKind(postgres, MonitoredEngineKind.SqlServer));
+    }
+
+    /// <summary>
+    /// An absent or unrecognised token makes NO claim, whatever the definition's engine. This is the
+    /// guarantee #2530 was told to keep: the distinction being added is "known to be PostgreSQL", never
+    /// "not known to be SQL Server". A store one rung behind, and a server that has not connected since the
+    /// rung landed, both land here — and both must keep the miss vocabulary they had.
+    /// </summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("something-a-newer-build-writes")]
+    public void AnUnknownEngineKind_MakesNoClaim_ForEitherDialect(string? engineKind)
+    {
+        foreach (var engine in new[] { CollectorTargetEngine.SqlServer, CollectorTargetEngine.PostgreSql })
+        {
+            var collector = new SyntheticCollector { Gate = _ => true, TargetEngine = engine };
+            Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(collector, engineKind));
+        }
+    }
+
+    /// <summary>
+    /// The by-name and by-definition kind overloads are the same function for every collector the catalog
+    /// knows, and disagree exactly where they must: on a definition the catalog has never heard of, the
+    /// name form has no gate to ask and makes no claim.
+    /// </summary>
+    [Fact]
+    public void TheTwoKindOverloads_Agree_ExceptWhereTheNameCannotBeResolved()
+    {
+        Assert.NotEmpty(CollectorCatalog.All);
+
+        foreach (var definition in CollectorCatalog.All)
+        {
+            foreach (var kind in MonitoredEngineKind.All)
+            {
+                Assert.Equal(
+                    CollectorEngineCapability.IsCollectedOnEngineKind(definition, kind),
+                    CollectorEngineCapability.IsCollectedOnEngineKind(definition.Name, kind));
+            }
+        }
+
+        var unknown = new SyntheticCollector { Gate = _ => true, TargetEngine = CollectorTargetEngine.SqlServer };
+        Assert.Null(CollectorCatalog.Find(unknown.Name));
+        Assert.False(CollectorEngineCapability.IsCollectedOnEngineKind(unknown, MonitoredEngineKind.Postgres));
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(unknown.Name, MonitoredEngineKind.Postgres));
+    }
+
+    /// <summary>
+    /// The shipped catalog, as the axis sees it: every SQL Server collector is a gap on a PostgreSQL
+    /// target and none on a SQL Server one, and the eight PostgreSQL collectors are the mirror image.
+    /// Both halves are counted from the catalog rather than listed, so the numbers track it.
+    ///
+    /// <para>This is the vacuity check for everything above: if the derivation quietly answered TRUE for
+    /// everything, every "no claim" assertion in this file would still pass and this would not.</para>
+    /// </summary>
+    [Fact]
+    public void TheShippedCatalogSplitsCleanlyOnTheKindAxis()
+    {
+        var sqlServer = CollectorCatalog.All.Where(c => c.TargetEngine == CollectorTargetEngine.SqlServer).ToArray();
+        var postgres = CollectorCatalog.All.Where(c => c.TargetEngine == CollectorTargetEngine.PostgreSql).ToArray();
+
+        Assert.True(sqlServer.Length >= 30, $"only {sqlServer.Length} SQL Server definitions — the catalog walk is broken");
+        Assert.True(postgres.Length >= 8, $"only {postgres.Length} PostgreSQL definitions — the catalog walk is broken");
+
+        foreach (var pgToken in new[] { MonitoredEngineKind.Postgres, MonitoredEngineKind.AuroraPostgres })
+        {
+            Assert.All(sqlServer, c => Assert.False(CollectorEngineCapability.IsCollectedOnEngineKind(c, pgToken)));
+            Assert.All(postgres, c => Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(c, pgToken)));
+        }
+
+        Assert.All(sqlServer, c => Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(c, MonitoredEngineKind.SqlServer)));
+        Assert.All(postgres, c => Assert.False(CollectorEngineCapability.IsCollectedOnEngineKind(c, MonitoredEngineKind.SqlServer)));
+    }
+
+    /// <summary>
+    /// The two axes compose in the right ORDER inside the message, which is the one thing neither axis can
+    /// assert on its own. A PostgreSQL target's engine edition is 0 — "no claim" — so asking edition
+    /// first would return null for every PostgreSQL target and the read would fall back to
+    /// <c>unavailable</c>: the wrong-cause message #2530 was filed about, still there after the fix.
+    /// </summary>
+    [Fact]
+    public void TheKindAxisIsAskedFirst_SoAPostgresTargetsZeroEditionCannotSilenceIt()
+    {
+        /* Edition 0 AND a known PostgreSQL kind — exactly what the store holds for an Aurora target. */
+        var message = CollectorEngineCapability.NotCollectedMessage(
+            "aurora-01", CollectorEngineCapability.UnknownEngineEdition, MonitoredEngineKind.AuroraPostgres, "system_health_events");
+
+        Assert.NotNull(message);
+        Assert.Contains("Aurora PostgreSQL", message, StringComparison.Ordinal);
+        Assert.Contains("system_health_events", message, StringComparison.Ordinal);
+        Assert.Contains("is written against SQL Server", message, StringComparison.Ordinal);
+        Assert.Contains("and never will.", message, StringComparison.Ordinal);
+
+        /* The edition axis must not have spoken: its sentence names an EngineEdition number, and
+           "EngineEdition 0" would be a claim about a property this server does not have. */
+        Assert.DoesNotContain("EngineEdition", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("check that collection is running", message, StringComparison.OrdinalIgnoreCase);
+
+        /* Same server, same edition, kind absent — the pre-rung row — keeps its old silence. */
+        Assert.Null(CollectorEngineCapability.NotCollectedMessage(
+            "aurora-01", CollectorEngineCapability.UnknownEngineEdition, engineKind: null, "system_health_events"));
+
+        /* And a PostgreSQL read asked about a KNOWN SQL Server target is the mirror image, which is what
+           shows the axis is about engines rather than about PostgreSQL being second-class. */
+        var mirrored = CollectorEngineCapability.NotCollectedMessage(
+            "box-01", 3, MonitoredEngineKind.SqlServer, "pg_wait_stats");
+        Assert.NotNull(mirrored);
+        Assert.Contains("box-01 runs SQL Server.", mirrored, StringComparison.Ordinal);
+        Assert.Contains("is written against PostgreSQL", mirrored, StringComparison.Ordinal);
+
+        /* A SQL Server read about a SQL Server target whose collector runs everywhere: untouched. */
+        Assert.Null(CollectorEngineCapability.NotCollectedMessage(
+            "box-01", 3, MonitoredEngineKind.SqlServer, "wait_stats"));
     }
 }
 

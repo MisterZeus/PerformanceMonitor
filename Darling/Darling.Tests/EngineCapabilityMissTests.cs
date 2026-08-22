@@ -143,7 +143,7 @@ public sealed class CollectorEngineCapabilityTests
     public void UnknownEngineEdition_MakesNoClaim()
     {
         Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition("system_health_events", CollectorEngineCapability.UnknownEngineEdition));
-        Assert.Null(CollectorEngineCapability.NotCollectedMessage("srv", 0, "system_health_events"));
+        Assert.Null(CollectorEngineCapability.NotCollectedMessage("srv", 0, engineKind: null, "system_health_events"));
     }
 
     /// <summary>
@@ -165,7 +165,7 @@ public sealed class CollectorEngineCapabilityTests
     public void AnUnknownCollectorName_MakesNoClaim()
     {
         Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition("no_such_collector", AzureSqlDb));
-        Assert.Null(CollectorEngineCapability.NotCollectedMessage("srv", AzureSqlDb, "no_such_collector"));
+        Assert.Null(CollectorEngineCapability.NotCollectedMessage("srv", AzureSqlDb, engineKind: null, "no_such_collector"));
     }
 
     /// <summary>
@@ -175,7 +175,7 @@ public sealed class CollectorEngineCapabilityTests
     [Fact]
     public void TheMessage_NamesTheEngineAndRefusesToSendAnyoneLooking()
     {
-        var message = CollectorEngineCapability.NotCollectedMessage("azure-db-01", AzureSqlDb, "system_health_events");
+        var message = CollectorEngineCapability.NotCollectedMessage("azure-db-01", AzureSqlDb, MonitoredEngineKind.SqlServer, "system_health_events");
         Assert.NotNull(message);
         Assert.Contains("azure-db-01", message, StringComparison.Ordinal);
         Assert.Contains("Azure SQL Database", message, StringComparison.Ordinal);
@@ -433,19 +433,28 @@ public sealed class EngineCapabilityReadWiringTests
 }
 
 /// <summary>
-/// #2511 end to end against a live store: the SAME read, on two servers that differ only in
-/// <c>servers.sql_engine_edition</c>, must answer differently. Both directions, because a pin that only
+/// #2511 end to end against a live store: the SAME read, on servers that differ only in what the
+/// registry records about their engine, must answer differently. Both directions, because a pin that only
 /// asserts the Azure branch would pass just as well if the read had stopped distinguishing anything and
 /// started saying <c>not_collected</c> to everyone.
+///
+/// <para>#2530 adds the second axis to the same demonstration: a PostgreSQL target differs from the box
+/// only in <c>servers.engine_kind</c> — its <c>sql_engine_edition</c> is 0, the same value a server that
+/// has never connected carries — and that one column is what turns "check that collection is running"
+/// into the true answer.</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class EngineCapabilityMissLivePostgresTests
 {
     private const string AzureServerName = "darling-engine-cap-azure";
     private const string BoxServerName = "darling-engine-cap-box";
+    private const string PostgresServerName = "darling-engine-cap-postgres";
+    private const string UnprobedServerName = "darling-engine-cap-unprobed";
 
     private static readonly int AzureServerId = ServerIdHelper.GetDeterministicHashCode(AzureServerName);
     private static readonly int BoxServerId = ServerIdHelper.GetDeterministicHashCode(BoxServerName);
+    private static readonly int PostgresServerId = ServerIdHelper.GetDeterministicHashCode(PostgresServerName);
+    private static readonly int UnprobedServerId = ServerIdHelper.GetDeterministicHashCode(UnprobedServerName);
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -522,6 +531,95 @@ public sealed class EngineCapabilityMissLivePostgresTests
     }
 
     /// <summary>
+    /// #2530, the engine-KIND axis through the real reads. Three servers with an identical (empty) store
+    /// behind them, all three at engine edition 0 so the EDITION axis can say nothing about any of them:
+    /// an Aurora PostgreSQL target, a stock PostgreSQL target, and a server that has simply never
+    /// connected. The first two must answer <c>not_collected</c> naming their engine; the third must keep
+    /// its old miss, because "we do not know" rendering as "this will never work" is the same defect
+    /// wearing the fix's clothes.
+    ///
+    /// <para>Holding the edition at 0 across all three is what makes this a test of the new axis rather
+    /// than of the old one: there is no other column in which these rows differ.</para>
+    /// </summary>
+    [Fact]
+    public async Task APostgresTarget_AnswersNotCollectedNamingTheEngine_WhileAnUnprobedServerKeepsItsMiss()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live engine-capability test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* Edition 0 on ALL THREE — what a PostgreSQL connect stamps, and what an unconnected server
+               carries. The engine kind is the only thing that differs. */
+            await RegisterAsync(connection, ct, PostgresServerId, PostgresServerName, engineEdition: 0,
+                engineKind: MonitoredEngineKind.AuroraPostgres);
+            await RegisterAsync(connection, ct, BoxServerId, BoxServerName, engineEdition: 0,
+                engineKind: MonitoredEngineKind.Postgres);
+            await RegisterAsync(connection, ct, UnprobedServerId, UnprobedServerName, engineEdition: 0,
+                engineKind: null);
+
+            /* ── Aurora: not_collected, naming the engine, and NOT sending anyone to check collection ── */
+            var auroraHealth = await DarlingMcpHealthParserTools.GetSystemHealth(postgres, PostgresServerName);
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(auroraHealth));
+            Assert.Contains("Aurora PostgreSQL", auroraHealth, StringComparison.Ordinal);
+            Assert.Contains("system_health_events", auroraHealth, StringComparison.Ordinal);
+            Assert.Contains(PostgresServerName, auroraHealth, StringComparison.Ordinal);
+
+            /* The message the issue quoted. It must no longer point at a session that cannot exist on an
+               engine that has no extended events at all. */
+            var auroraWaits = await DarlingMcpHealthParserTools.GetSignificantWaits(postgres, PostgresServerName);
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(auroraWaits));
+            Assert.DoesNotContain("system_health session is started", auroraWaits, StringComparison.Ordinal);
+
+            /* A read from a different family, sharing nothing with the one above but the helper. */
+            var auroraServerConfig = await DarlingMcpConfigTools.GetServerConfig(postgres, PostgresServerName);
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(auroraServerConfig));
+            Assert.Contains("server_config", auroraServerConfig, StringComparison.Ordinal);
+            Assert.Contains("Aurora PostgreSQL", auroraServerConfig, StringComparison.Ordinal);
+
+            /* The LIMIT of this change, asserted rather than left to be discovered: only the reads #2511
+               wired to the capability helper can answer on either axis. get_database_config is not one of
+               them — its collector runs on every SQL Server, so the edition axis gave it nothing to say and
+               it was never wired — and on a PostgreSQL target it therefore still reports the old
+               `unavailable`. The kind axis makes EVERY SQL Server read a permanent gap on a PostgreSQL
+               target, which is a much wider wiring job than the twelve gated collectors; it is filed rather
+               than smuggled in, and this line is what stops the gap being mistaken for a fix that regressed. */
+            Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(
+                await DarlingMcpConfigTools.GetDatabaseConfig(postgres, PostgresServerName)));
+
+            /* ── Stock PostgreSQL: the same answer, named for the engine it actually is ── */
+            var stockFlags = await DarlingMcpConfigTools.GetTraceFlags(postgres, BoxServerName);
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(stockFlags));
+            Assert.Contains("trace_flags", stockFlags, StringComparison.Ordinal);
+            Assert.Contains("runs PostgreSQL.", stockFlags, StringComparison.Ordinal);
+            Assert.DoesNotContain("Aurora", stockFlags, StringComparison.Ordinal);
+
+            /* ── And the server nobody has probed keeps every one of its old misses ── */
+            Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpHealthParserTools.GetSystemHealth(postgres, UnprobedServerName)));
+            Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpConfigTools.GetTraceFlags(postgres, UnprobedServerName)));
+
+            var unprobedWaits = await DarlingMcpHealthParserTools.GetSignificantWaits(postgres, UnprobedServerName);
+            Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(unprobedWaits));
+            Assert.Contains("system_health session is started", unprobedWaits, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
     /// A registry row that never got an edition (a server that has not completed a connect) must keep the
     /// old miss. "We do not know" rendering as "this will never work" would be the same defect wearing the
     /// fix's clothes.
@@ -556,19 +654,21 @@ public sealed class EngineCapabilityMissLivePostgresTests
         }
     }
 
-    /// <summary>Column list copied from <c>DarlingMcpTestData.RegisterServerAsync</c>, plus the one column
-    /// this test exists to vary.</summary>
+    /// <summary>Column list copied from <c>DarlingMcpTestData.RegisterServerAsync</c>, plus the two columns
+    /// this test exists to vary. <paramref name="engineKind"/> null is the pre-V82 row — no claim.</summary>
     private static async Task RegisterAsync(
-        NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName, int? engineEdition)
+        NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName, int? engineEdition,
+        string? engineKind = null)
     {
         using var command = new NpgsqlCommand(@"
-INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, created_date, modified_date)
-VALUES ($1, $2, $3, TRUE, $4, 15, $5, $5)
-ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_engine_edition = EXCLUDED.sql_engine_edition;", connection);
+INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, engine_kind, created_date, modified_date)
+VALUES ($1, $2, $3, TRUE, $4, 15, $5, $6, $6)
+ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_engine_edition = EXCLUDED.sql_engine_edition, engine_kind = EXCLUDED.engine_kind;", connection);
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(serverName);
         command.Parameters.AddWithValue(serverName);
         command.Parameters.AddWithValue((object?)engineEdition ?? DBNull.Value);
+        command.Parameters.AddWithValue((object?)engineKind ?? DBNull.Value);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
         await command.ExecuteNonQueryAsync(ct);
     }
@@ -576,7 +676,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_engine_edition = EX
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
-            $"DELETE FROM servers WHERE server_id IN ({AzureServerId}, {BoxServerId});", connection);
+            $"DELETE FROM servers WHERE server_id IN ({AzureServerId}, {BoxServerId}, {PostgresServerId}, {UnprobedServerId});", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

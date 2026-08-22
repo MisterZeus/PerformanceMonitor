@@ -30,15 +30,21 @@ public static class DarlingObservability
        only enabled servers are in the loop). The ON CONFLICT re-connect deliberately does NOT touch
        is_enabled, so a control-plane disable (config_monitored_servers.is_enabled = FALSE, mirrored onto
        this observed row by SyncServerEnabledStatesAsync) is never clobbered back to TRUE on the next
-       connect. Before Stage 2 this forced is_enabled = TRUE on every connect and nothing ever read it. */
-    private const string UpsertServerSql = @"
-INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, created_date, modified_date, monthly_cost_usd)
-VALUES ($1, $2, $3, TRUE, $4, $5, $6, $6, $7)
+       connect. Before Stage 2 this forced is_enabled = TRUE on every connect and nothing ever read it.
+
+       engine_kind (V82, #2530) is written on BOTH arms, unlike is_enabled: it is a probed fact about the
+       target rather than an operator decision, so the re-connect arm is exactly where a re-pointed
+       registration (same storage name, different engine) has to correct it. Internal so a pure test can pin
+       the shape without a live store. */
+    internal const string UpsertServerSql = @"
+INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, engine_kind, created_date, modified_date, monthly_cost_usd)
+VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $7, $8)
 ON CONFLICT (server_id) DO UPDATE SET
     server_name = EXCLUDED.server_name,
     display_name = EXCLUDED.display_name,
     sql_engine_edition = EXCLUDED.sql_engine_edition,
     sql_major_version = EXCLUDED.sql_major_version,
+    engine_kind = EXCLUDED.engine_kind,
     modified_date = EXCLUDED.modified_date,
     monthly_cost_usd = EXCLUDED.monthly_cost_usd;";
 
@@ -128,6 +134,10 @@ ON CONFLICT (server_id) DO UPDATE SET
                just the 5/8 Azure classifications. */
             command.Parameters.AddWithValue(server.EngineEdition);
             command.Parameters.AddWithValue(server.Target.SqlMajorVersion);
+            /* The engine KIND (#2530), derived from the target the connector probed rather than from the
+               configured engine string: Aurora-ness is not configurable — it comes from aurora_version being
+               present in pg_proc — and it is half of what this column exists to carry. */
+            command.Parameters.AddWithValue(MonitoredEngineKind.For(server.Target));
             /* Naive-UTC storage: Npgsql 6+ rejects Kind=Utc against `timestamp` — see PgCollectorRowWriter. */
             command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
             /* Per-server FinOps budget from darling.json (0 = hide cost in the viewer, like Lite). */

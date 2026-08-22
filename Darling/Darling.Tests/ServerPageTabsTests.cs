@@ -247,22 +247,26 @@ public sealed class ServerPageTabsTests
     /// <summary>
     /// No PostgreSQL read appears on the server page, and this is a guard rather than an oversight.
     ///
-    /// <para>The web dashboard's per-server surface is fed by <c>/api/fleet</c>, whose card
-    /// (<c>DarlingFleetReader.FleetServerCard</c>) carries <c>engine_edition</c> — the SQL Server
-    /// SERVERPROPERTY value — and NO <c>CollectorTargetEngine</c> discriminator. So the browser cannot tell a
-    /// PostgreSQL target from a SQL Server one, and a <c>get_pg_*</c> panel added to these tabs would render for
-    /// every server in the fleet, permanently empty on the ~all of them that are SQL Server. Adding the
-    /// discriminator to the fleet payload is the prerequisite; this fails until then rather than letting the
-    /// panel ship first.</para>
+    /// <para>The web dashboard's per-server surface is fed by <c>/api/fleet</c>, and its tab registry
+    /// (<c>SERVER_TABS</c>) is a FLAT list applied to every server — nothing in <c>server-tabs.js</c> branches
+    /// on the engine. So a <c>get_pg_*</c> panel added to these tabs today would render for every server in
+    /// the fleet, permanently empty on the ~all of them that are SQL Server.</para>
+    ///
+    /// <para><b>The PAYLOAD half of that blocker is gone (#2530).</b> The card now carries
+    /// <c>engine_kind</c>, <c>is_postgres</c> and <c>is_aurora</c> beside <c>engine_edition</c>, so the
+    /// browser CAN tell a PostgreSQL target from a SQL Server one. What is still missing is the branch that
+    /// reads it: until the registry is engine-aware, this stays red on the first PostgreSQL panel someone
+    /// adds, which is the right order for the two halves to land in.</para>
     /// </summary>
     [Fact]
-    public void NoPostgresRead_IsOnTheServerPage_UntilTheFleetPayloadCanTellTheEngines()
+    public void NoPostgresRead_IsOnTheServerPage_UntilTheTabRegistryBranchesOnTheEngine()
     {
         var pg = ReadNamesIn(ServerTabsJs).Where(n => n.StartsWith("get_pg_", StringComparison.Ordinal)).ToArray();
         Assert.True(
             pg.Length == 0,
-            "the fleet payload carries no target-engine discriminator, so these would render on every SQL Server " +
-            "too: " + string.Join(", ", pg));
+            "the tab registry is a flat list with no engine branch, so these would render on every SQL Server " +
+            "too (the fleet card carries is_postgres since #2530 — what is missing is the branch that reads " +
+            "it): " + string.Join(", ", pg));
     }
 
     /// <summary>

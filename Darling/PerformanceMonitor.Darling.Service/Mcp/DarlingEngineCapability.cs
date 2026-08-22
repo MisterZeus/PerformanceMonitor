@@ -36,12 +36,17 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 internal static class DarlingEngineCapability
 {
     /// <summary>
-    /// The probed <c>SERVERPROPERTY('EngineEdition')</c> the registration upsert stamps on every connect
-    /// (<see cref="DarlingObservability"/>). Exposed as a const so Darling.Tests can pin the dialect without a
-    /// live store. $1 server_id.
+    /// The two engine facts the registration upsert stamps on every connect
+    /// (<see cref="DarlingObservability"/>): the probed <c>SERVERPROPERTY('EngineEdition')</c> and, since
+    /// V82 (#2530), the target's engine KIND. Exposed as a const so Darling.Tests can pin the dialect without
+    /// a live store. $1 server_id.
+    ///
+    /// <para>ONE round trip for both, deliberately: they are read together on every miss, and two reads would
+    /// also make it possible to answer the kind axis from one server's row and the edition axis from a stale
+    /// copy of another's.</para>
     /// </summary>
-    public const string EngineEditionSql = @"
-SELECT sql_engine_edition
+    public const string ServerEngineSql = @"
+SELECT sql_engine_edition, engine_kind
 FROM servers
 WHERE server_id = $1";
 
@@ -62,32 +67,46 @@ WHERE server_id = $1";
         CancellationToken cancellationToken = default)
     {
         int engineEdition;
+        string? engineKind;
         try
         {
-            engineEdition = await ReadEngineEditionAsync(postgres, serverId, cancellationToken);
+            (engineEdition, engineKind) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);
         }
         catch (Exception)
         {
             return null;
         }
 
-        var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, collectorName);
+        var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, collectorName);
         return message is null ? null : McpHelpers.Status("not_collected", message);
     }
 
     /// <summary>
-    /// The server's probed engine edition, or <see cref="CollectorEngineCapability.UnknownEngineEdition"/>
-    /// when the registry has no row or a NULL (a server that has never completed a connect, and a PostgreSQL
-    /// target, both land here). Unknown makes no capability claim.
+    /// The server's probed engine edition and engine kind, defaulting to
+    /// <see cref="CollectorEngineCapability.UnknownEngineEdition"/> and <c>null</c> when the registry has no
+    /// row or a NULL.
+    ///
+    /// <para>The two NULLs mean different things and are both correct. A PostgreSQL target always has edition
+    /// 0 — <c>SERVERPROPERTY</c> does not exist there — so the edition is unknown for it permanently, and it
+    /// is the KIND that carries the fact. A NULL kind is a row no connect has stamped since V82 landed, which
+    /// makes no claim on that axis and leaves the edition axis answering exactly as it did before (#2530).</para>
     /// </summary>
-    private static async Task<int> ReadEngineEditionAsync(
+    private static async Task<(int EngineEdition, string? EngineKind)> ReadServerEngineAsync(
         NpgsqlDataSource postgres,
         int serverId,
         CancellationToken cancellationToken)
     {
-        await using var command = postgres.CreateCommand(EngineEditionSql);
+        await using var command = postgres.CreateCommand(ServerEngineSql);
         DarlingMcpReadParameters.AddInt(command, serverId);
-        var value = await command.ExecuteScalarAsync(cancellationToken);
-        return value is int edition ? edition : CollectorEngineCapability.UnknownEngineEdition;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return (CollectorEngineCapability.UnknownEngineEdition, null);
+        }
+
+        var edition = reader.IsDBNull(0) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(0);
+        var kind = reader.IsDBNull(1) ? null : reader.GetString(1);
+        return (edition, kind);
     }
 }
