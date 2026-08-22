@@ -98,7 +98,7 @@ public sealed class DarlingServer : INotifyPropertyChanged
     /// </summary>
     public string? EngineDescription =>
         !MonitoredEngineKind.IsKnown(EngineKind)
-            ? (string.IsNullOrWhiteSpace(EngineKind) ? null : EngineKind)
+            ? (string.IsNullOrWhiteSpace(EngineKind) ? null : EngineKind.Trim())
             : MonitoredEngineKind.DescribeEngineKind(EngineKind);
 
     /// <summary>"SQL Server 2022"-style label for the server list; empty when the version is unknown.</summary>

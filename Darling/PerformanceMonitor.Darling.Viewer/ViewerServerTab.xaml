@@ -3735,10 +3735,13 @@
                         <Grid Margin="0,8,0,0">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="*"/>
-                                <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="Auto"/>
+                                <!-- The statement grid is the primary panel and gets twice the height: the
+                                     per-database counters below it are the follow-up question (did this
+                                     spill?), not a second list of equal standing. -->
                                 <RowDefinition Height="2*"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" x:Name="PgStatementsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
                                        Foreground="{DynamicResource ForegroundMutedBrush}"/>
