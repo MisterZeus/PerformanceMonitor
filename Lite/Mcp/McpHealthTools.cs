@@ -418,15 +418,19 @@ public sealed class McpHealthTools
 
             if (blocking.Count == 0 && deadlocks.Count == 0)
             {
-                /* The reassuring answer is the wrong one -- same words as Darling's twin. */
-                var everCaptured = await dataService.HasAnyBlockingCaptureAsync(resolved.ServerId);
-                return everCaptured
+                /* The denominator is whether we LOOKED, not whether we ever FOUND anything: these are
+                   edge tables, and a healthy server that never blocked has no rows to find. Same words
+                   as Darling's twin. */
+                var everRan =
+                    await dataService.HasAnyBlockingCollectorRunAsync(resolved.ServerId)
+                    || await dataService.HasAnyDeadlockCollectorRunAsync(resolved.ServerId);
+                return everRan
                     ? McpHelpers.Status(
                         "empty",
-                        $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {hours} hour(s). This server HAS captured blocking before, so the window is genuinely clear.")
+                        $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {hours} hour(s). The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind.")
                     : McpHelpers.Status(
                         "unavailable",
-                        $"No blocking has EVER been captured for {resolved.ServerName}, so this is NOT a clean bill of health — there is nothing to read. Blocked-process reports need the XE session running, or the DMV blocking snapshot collector enabled; check those before concluding this server does not block.");
+                        $"The blocking collectors have NEVER run successfully for {resolved.ServerName}, so this is NOT a clean bill of health — nothing looked. Blocked-process reports need the XE session running, or the DMV blocking snapshot collector enabled; check those before concluding this server does not block.");
             }
 
             return JsonSerializer.Serialize(new

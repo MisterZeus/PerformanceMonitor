@@ -22,10 +22,11 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 
 /// <summary>
 /// The system_health parse-on-read MCP tools — get_health_parser_cpu_tasks / _io_issues / _memory_broker /
-/// _memory_conditions / _memory_node_oom / _scheduler_issues / _severe_errors / _system_health — served over
-/// Darling's Postgres store, the SAME eight tools the Dashboard's <c>McpHealthParserTools</c> exposes. Where
-/// the Dashboard reads its server-side-parsed <c>collect.HealthParser_*</c> tables, these PARSE ON READ: the
-/// raw <c>system_health_events</c> the collector captured are shredded by the shared
+/// _memory_conditions / _memory_node_oom / _scheduler_issues / _severe_errors / _significant_waits /
+/// _system_health — served over Darling's Postgres store, the SAME nine tools the Dashboard's
+/// <c>McpHealthParserTools</c> exposes. Where the Dashboard reads its server-side-parsed
+/// <c>collect.HealthParser_*</c> tables, these PARSE ON READ: the raw <c>system_health_events</c> the
+/// collector captured are shredded by the shared
 /// <see cref="SystemHealthParser"/> (PerformanceMonitor.Common — reused, NOT re-implemented) and gated by
 /// <see cref="SystemHealthSignificance"/>, exactly as the viewer's System Events tab does. The
 /// result is the same SIGNIFICANT warning set the Dashboard surfaces (its collector runs sp_HealthParser at
@@ -424,6 +425,87 @@ public sealed class DarlingMcpHealthParserTools
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_memory_node_oom", ex); }
+    }
+
+    [McpServerTool(Name = "get_health_parser_significant_waits"), Description("Gets significant individual waits from system_health: one row per wait_info event where a real session's non-BACKUP statement waited at least 500 ms on a wait type that is not idle/background — the wait type, total and signal duration, the wait resource, the session id and the waiting statement. get_wait_stats gives the instance-wide totals and can never name the statement that paid them; this is the individual waits, with their SQL text.")]
+    public static async Task<string> GetSignificantWaits(
+        NpgsqlDataSource postgres,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
+        [Description("Maximum number of entries. Default 50.")] int limit = 50)
+    {
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        if (error != null) return error;
+
+        var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
+        if (validation != null) return validation;
+
+        try
+        {
+            /*
+                Written out rather than routed through CollectAsync because the raw event count is
+                load-bearing here: zero significant waits out of a hundred captured events is a healthy
+                server, and zero out of zero is a blind one. CollectAsync returns only the surviving rows,
+                so the two would arrive indistinguishable.
+            */
+            var now = DateTime.UtcNow;
+            var xmls = await DarlingSystemHealthReader.ReadEventXmlAsync(
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, SystemHealthParser.WaitInfoEvent);
+
+            var rows = xmls
+                .Select(SystemHealthParser.ParseSignificantWait)
+                .Where(r => r != null && SystemHealthSignificance.IsSignificant(r))
+                .Select(r => r!)
+                .ToList();
+
+            if (rows.Count == 0)
+            {
+                /*
+                    Three different nothings, and only one of them is good news. Events captured but none
+                    significant is the healthy state and costs no extra query -- we already counted them.
+                    Nothing captured in the window needs the probe to tell a quiet window from a server
+                    whose wait_info has never been collected, because "no significant waits" is exactly
+                    what an operator wants to hear and a caller who believes it stops looking.
+                */
+                if (xmls.Count > 0)
+                {
+                    return McpHelpers.Status(
+                        "empty",
+                        $"{xmls.Count} wait_info event(s) were captured for {resolved.ServerName} in the last {hours_back} hour(s) and none was significant (needs a real session, a non-BACKUP statement, at least {SystemHealthSignificance.SignificantWaitMinDurationMs} ms, and a wait type off the idle list). Events ARE being captured, so this is the healthy answer for this read rather than missing data.");
+                }
+
+                var everCaptured = await DarlingSystemHealthReader.HasAnyEventOfTypeAsync(
+                    postgres, resolved.ServerId, SystemHealthParser.WaitInfoEvent);
+                return everCaptured
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"No wait_info events were captured for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS captured them before, so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.")
+                    : McpHelpers.Status(
+                        "unavailable",
+                        $"No wait_info events have EVER been captured for {resolved.ServerName}, so this is NOT an all-clear — there is nothing here to be clear about. This read is served from the collected system_health ring buffer: check that collection is running for this server and that its system_health session is started before concluding nothing was waiting.");
+            }
+
+            return JsonSerializer.Serialize(new
+            {
+                server = resolved.ServerName,
+                hours_back,
+                wait_count = rows.Count,
+                shown = Math.Min(rows.Count, limit),
+                waits = rows.Take(limit).Select(r => new
+                {
+                    event_time = r.EventTime?.ToString("o"),
+                    wait_type = r.WaitType,
+                    duration_ms = r.DurationMs,
+                    /* Signal duration is the part spent runnable AFTER the resource was granted, so a
+                       signal close to the total is CPU pressure wearing a wait type's name. */
+                    signal_duration_ms = r.SignalDurationMs,
+                    wait_resource = r.WaitResource,
+                    session_id = r.SessionId,
+                    query_text = r.QueryText
+                })
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_significant_waits", ex); }
     }
 
     /* ─────────────────────────── shared read + parse + filter ─────────────────────────── */

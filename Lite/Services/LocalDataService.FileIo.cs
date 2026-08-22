@@ -135,6 +135,28 @@ ORDER BY f.collection_time, f.database_name, f.file_name";
     }
 
     /// <summary>
+    /// Whether this server has EVER recorded a file I/O sample, ignoring any window.
+    /// <para>Lets an empty I/O trend say WHICH kind of nothing it found — see
+    /// <c>LocalDataService.HasAnyMemoryStatAsync</c> for the reasoning. Reads <c>v_file_io_stats</c>, the
+    /// same source <see cref="GetFileIoLatencyTrendAsync"/> reads. Darling's twin is
+    /// <c>DarlingTrendReader.HasAnyFileIoStatAsync</c>.</para>
+    /// </summary>
+    public async Task<bool> HasAnyFileIoStatAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT 1
+FROM v_file_io_stats
+WHERE server_id = $1
+LIMIT 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return await command.ExecuteScalarAsync() is not null and not DBNull;
+    }
+
+    /// <summary>
     /// Gets file I/O throughput trend data (MB/s) broken down by file for charting.
     /// Uses LAG() window function to compute collection interval for per-second calculation.
     /// </summary>

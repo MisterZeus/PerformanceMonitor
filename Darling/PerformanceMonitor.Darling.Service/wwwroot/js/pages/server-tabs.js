@@ -305,10 +305,12 @@ function stat(title, read, params, stats, subtitle, span = 1) {
 }
 
 /**
- * A line panel over a read's row array. `opts.emptyText` is REQUIRED for the same reason table()'s is, and for
- * one extra: two of these reads (get_blocking_trend, get_deadlock_trend) answer an idle server with `trend: []`
- * and NO {status,message} envelope, so without a sentence a perfectly healthy server was told "Not enough data
- * points to chart yet" about a condition it simply never had.
+ * A line panel over a read's row array. `opts.emptyText` is REQUIRED for the same reason table()'s is: without
+ * a sentence, a read whose empty array means the thing simply did not happen inherits renderLineChart's
+ * "Not enough data points to chart yet", which describes a condition it never had. get_blocking_trend and
+ * get_deadlock_trend used to be the sharpest example; #2485 gave those two a {status,message} envelope, so they
+ * now answer above this layer and their emptyText is the fallback rather than the sentence you see. Every other
+ * line read still lands here at zero rows.
  */
 function line(title, read, params, rowsKey, xKey, series, opts = {}) {
   if (!opts.emptyText) throw new Error("line(" + title + "): a chart panel must explain its own empty state.");
@@ -692,14 +694,64 @@ export const SERVER_TABS = [
         ctx.label,
         "No active-query snapshots in this window."
       ),
+      /* #2484: the viewer's Performance Trends tab is four charts over three reads. Duration and the
+         execution rate come from ONE payload -- via fanout, not two line() calls, because the tab must not
+         fetch the same read twice. They get separate charts rather than separate series because ms/sec and
+         executions/sec are two units, and one y-domain cannot hold both honestly. */
+      ...fanout("get_query_duration_trend", { server, hours: ctx.hours }, [
+        {
+          title: "Query Duration Trend",
+          subtitle: ctx.label,
+          viz: "line",
+          rowsKey: "trend",
+          xKey: "time",
+          series: DURATION_SERIES,
+          format: "ms",
+          span: 2,
+          emptyText: "No query duration samples in this window.",
+        },
+        {
+          title: "Executions per Second",
+          subtitle: ctx.label,
+          viz: "line",
+          rowsKey: "trend",
+          xKey: "time",
+          series: EXECUTION_RATE_SERIES,
+          span: 2,
+          emptyText: "No query executions recorded in this window.",
+        },
+      ]),
       line(
-        "Query Duration Trend",
-        "get_query_duration_trend",
+        "Procedure Duration Trend",
+        "get_procedure_duration_trend",
         { server, hours: ctx.hours },
         "trend",
         "time",
         DURATION_SERIES,
-        { subtitle: ctx.label, format: "ms", span: 2, emptyText: "No query duration samples in this window." }
+        {
+          subtitle: ctx.label,
+          format: "ms",
+          span: 2,
+          emptyText:
+            "No stored-procedure activity in this window. A server that runs no procedures lands here too, " +
+            "and the read says which of the two it found.",
+        }
+      ),
+      line(
+        "Query Store Duration Trend",
+        "get_query_store_duration_trend",
+        { server, hours: ctx.hours },
+        "trend",
+        "time",
+        DURATION_SERIES,
+        {
+          subtitle: ctx.label,
+          format: "ms",
+          span: 2,
+          emptyText:
+            "No Query Store activity in this window. If Query Store is off on this server's databases the " +
+            "read says so rather than showing an empty chart.",
+        }
       ),
       table(
         "Top Queries by CPU",
@@ -978,6 +1030,18 @@ export const SERVER_TABS = [
         ctx.label,
         "No memory node OOM events in this window — the healthy state for this read."
       ),
+      /* #2484: the ninth member of the get_health_parser_* family. Built with table(), not a bare object
+         literal -- mount() stringifies anything it cannot consume, so a literal renders as [object Object]
+         and never fetches the read at all. */
+      table(
+        "Significant Waits",
+        "get_health_parser_significant_waits",
+        { server, hours: ctx.hours, limit: 50 },
+        "waits",
+        SIGNIFICANT_WAIT_COLUMNS,
+        ctx.label,
+        "No significant waits (a real session waiting 500 ms+ on a non-idle wait type) in this window."
+      ),
       table(
         "Default Trace",
         "get_default_trace_events",
@@ -1172,10 +1236,17 @@ const DEADLOCK_SEVERITY_SERIES = [
   { key: "max_wait_ms", label: "Max Wait (ms)" },
 ];
 
-/* get_query_duration_trend returns {time, value, execution_count}. Only `value` (milliseconds) is charted —
-   an execution count on the same axis would be a second unit sharing one y-domain, which is the mistake the
-   CPU chart's dropped idle_cpu series exists to avoid. The count is in the Query Store / top-query tables. */
+/* The three Performance-Trends reads all return {time, value, execution_count, executions_per_second} and
+   share this series: `value` is milliseconds per second. The execution rate is NOT charted beside it — a
+   count and a millisecond on one y-domain is the mistake the CPU chart's dropped idle_cpu series exists to
+   avoid — it gets its own panel off the same payload. */
 const DURATION_SERIES = [{ key: "value", label: "Avg duration" }];
+
+/* #2484: executions/sec, the viewer's fourth Performance-Trends chart. Charts executions_per_second and
+   not execution_count: the two are the same quantity, and the integer one reports ZERO on any server
+   running under one execution a second, which would draw a flat line along the axis for a server that is
+   simply quiet rather than idle. */
+const EXECUTION_RATE_SERIES = [{ key: "executions_per_second", label: "Executions/sec" }];
 
 const GRANT_SERIES = [
   { key: "granted_memory_mb", label: "Granted" },
@@ -1668,6 +1739,19 @@ const MEMORY_BROKER_COLUMNS = [
   { key: "previously_allocated", label: "Previously", format: "int" },
   { key: "currently_predicated", label: "Predicated", format: "int" },
   { key: "rate", label: "Rate", format: "num2" },
+];
+
+/* #2484: the Significant Waits grid. Signal duration sits beside the total on purpose -- both are
+   milliseconds, so they share a column format honestly, and a signal close to the total is CPU pressure
+   wearing a wait type's name. The statement goes through codeDisclosure like every other SQL column. */
+const SIGNIFICANT_WAIT_COLUMNS = [
+  { key: "event_time", label: "Time", format: "time" },
+  { key: "wait_type", label: "Wait Type" },
+  { key: "duration_ms", label: "Duration", format: "ms" },
+  { key: "signal_duration_ms", label: "Signal", format: "ms" },
+  { key: "wait_resource", label: "Resource", wrap: true },
+  { key: "session_id", label: "Session", format: "int" },
+  { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
 ];
 
 const MEMORY_OOM_COLUMNS = [

@@ -1151,10 +1151,35 @@ ORDER BY collection_time";
             {
                 CollectionTime = reader.GetDateTime(0),
                 Value = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
-                ExecutionCount = reader.IsDBNull(2) ? 0 : (long)ToDouble(reader.GetValue(2))
+                ExecutionCount = reader.IsDBNull(2) ? 0 : (long)ToDouble(reader.GetValue(2)),
+                ExecutionsPerSecond = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2))
             });
         }
         return items;
+    }
+
+    /// <summary>
+    /// Whether this server has EVER recorded a query-stats sample, ignoring any window.
+    /// <para>Lets an empty query-duration trend say WHICH kind of nothing it found — see
+    /// <c>LocalDataService.HasAnyMemoryStatAsync</c> for the reasoning. Reads <c>v_query_stats</c>, the
+    /// same source <see cref="GetQueryDurationTrendAsync"/> reads here. Darling's twin probes the BASE
+    /// <c>query_stats</c> table instead, because ITS duration trend does — on a Darling store
+    /// <c>v_query_stats</c> is the payload-resolving view rather than a passthrough. Each probe follows
+    /// its own read; the SENTENCES the two SKUs return are identical, which is what the caller sees.</para>
+    /// </summary>
+    public async Task<bool> HasAnyQueryStatAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT 1
+FROM v_query_stats
+WHERE server_id = $1
+LIMIT 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return await command.ExecuteScalarAsync() is not null and not DBNull;
     }
 
     /// <summary>
@@ -1203,7 +1228,8 @@ ORDER BY collection_time";
             {
                 CollectionTime = reader.GetDateTime(0),
                 Value = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
-                ExecutionCount = reader.IsDBNull(2) ? 0 : (long)ToDouble(reader.GetValue(2))
+                ExecutionCount = reader.IsDBNull(2) ? 0 : (long)ToDouble(reader.GetValue(2)),
+                ExecutionsPerSecond = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2))
             });
         }
         return items;
@@ -1256,6 +1282,33 @@ ORDER BY collection_time";
             });
         }
         return items;
+    }
+
+    /// <summary>The same probe over <c>v_procedure_stats</c>, the source
+    /// <see cref="GetProcedureDurationTrendAsync"/> reads. See <see cref="HasAnyQueryStatAsync"/>.</summary>
+    public Task<bool> HasAnyProcedureStatAsync(int serverId) => HasAnyRowAsync("v_procedure_stats", serverId);
+
+    /// <summary>
+    /// The same probe over <c>v_query_store_stats</c>. See <see cref="HasAnyQueryStatAsync"/>.
+    /// <para>Worth the most of the trends' probes: zero rows here has a cause the others do not, which is that
+    /// Query Store can be OFF on every database. A server with no Query Store data is not a server with no
+    /// slow queries.</para>
+    /// </summary>
+    public Task<bool> HasAnyQueryStoreStatAsync(int serverId) => HasAnyRowAsync("v_query_store_stats", serverId);
+
+    /*
+        The view name is interpolated because DuckDB cannot parameterize a FROM target. Every caller is one
+        of the two literals above -- no caller-supplied string reaches this -- and the server id stays a
+        bound parameter.
+    */
+    private async Task<bool> HasAnyRowAsync(string viewName, int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = $"SELECT 1 FROM {viewName} WHERE server_id = $1 LIMIT 1";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return await command.ExecuteScalarAsync() is not null and not DBNull;
     }
 
     private static readonly double[] HeatmapBucketThresholds = { 0, 1, 10, 100, 1000, 10000, 100000, 1000000 };
@@ -1403,6 +1456,15 @@ public class QueryTrendPoint
     public DateTime CollectionTime { get; set; }
     public double Value { get; set; }
     public long ExecutionCount { get; set; }
+
+    /// <summary>
+    /// The SAME quantity as <see cref="ExecutionCount"/> - executions per second - without the truncation.
+    /// <para>The long shipped first and the charts have always plotted it; on a server doing three
+    /// executions a second that rounds harmlessly, and on a quiet one doing 0.4 it reports ZERO, which reads
+    /// as an idle server rather than a slow one. Kept alongside rather than replacing it so nothing reading
+    /// the long breaks. Darling's twin is <c>QueryDurationTrendPoint.ExecutionsPerSecond</c>.</para>
+    /// </summary>
+    public double ExecutionsPerSecond { get; set; }
 }
 
 public class QueryStatsRow

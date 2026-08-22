@@ -179,6 +179,8 @@ public sealed class MemoryNodeOomRow(MemoryNodeOomRecord record)
 public sealed class SignificantWaitRow(SignificantWaitRecord record)
 {
     public string EventTimeLocal => SystemEventRowFormat.Local(record.EventTime);
+    /// <summary>Raw naive-UTC event time (the XE @timestamp) for the MCP layer's ISO output.</summary>
+    public DateTime? EventTime => record.EventTime;
     public string? WaitType => record.WaitType;
     public long? DurationMs => record.DurationMs;
     public long? SignalDurationMs => record.SignalDurationMs;
@@ -438,7 +440,19 @@ ORDER BY event_time DESC";
     /// Significant individual waits (real session, non-BACKUP statement, duration &gt;= 500 ms, wait type not
     /// on the idle-wait ignore list) for the window, newest first.
     /// </summary>
-    public async Task<List<SignificantWaitRow>> GetSignificantWaitsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<SignificantWaitRow>> GetSignificantWaitsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null) =>
+        (await GetSignificantWaitsWithCaptureAsync(serverId, hoursBack, fromDate, toDate)).Rows;
+
+    /// <summary>
+    /// The same shred as <see cref="GetSignificantWaitsAsync"/>, plus the number of wait_info events that
+    /// were CAPTURED in the window before the significance gate ran.
+    /// <para>The count is what lets an empty answer say which nothing it is. Zero significant waits out of a
+    /// hundred captured events is a healthy server; zero out of zero is a blind one, and the surviving rows
+    /// alone cannot tell them apart. Returned from the one read rather than recovered by a second COUNT, so
+    /// the two numbers can never describe different windows. Darling gets the same count for free from its
+    /// own reader.</para>
+    /// </summary>
+    public async Task<(List<SignificantWaitRow> Rows, int CapturedCount)> GetSignificantWaitsWithCaptureAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
         using var _q = TimeQuery("GetSignificantWaitsAsync", "v_system_health_events wait_info shred");
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
@@ -451,7 +465,35 @@ ORDER BY event_time DESC";
             if (record != null && SystemHealthSignificance.IsSignificant(record))
                 rows.Add(new SignificantWaitRow(record));
         }
-        return rows;
+        return (rows, xmls.Count);
+    }
+
+    /// <summary>
+    /// Whether this server has EVER captured a system_health event of one type, ignoring any window.
+    /// <para>Separates a quiet window from a blind one on the empty path. Reads
+    /// <c>v_system_health_events</c> - the SAME source <see cref="ReadSystemHealthEventXmlAsync"/> uses, so
+    /// it cannot report a server as captured for rows the read itself can never see - and is scoped to the
+    /// event_type, because a server capturing sp_server_diagnostics but no wait_info has not been sampled
+    /// for waits whatever its other categories hold. Darling twin:
+    /// <c>DarlingSystemHealthReader.HasAnyEventOfTypeAsync</c>; the two must stay in step so a user moving
+    /// between the SKUs is not told a different story about the same state.</para>
+    /// </summary>
+    public async Task<bool> HasAnySystemHealthEventOfTypeAsync(int serverId, string eventType)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT 1
+FROM v_system_health_events
+WHERE server_id = $1
+AND   event_type = $2
+AND   event_xml IS NOT NULL
+LIMIT 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = eventType });
+        return await command.ExecuteScalarAsync() is not null and not DBNull;
     }
 
     // ── CPU Tasks ──

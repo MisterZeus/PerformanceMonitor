@@ -75,7 +75,9 @@ internal static class McpInstructions
         | `get_top_procedures_by_cpu` | Expensive stored procedures by CPU time, with the same `cpu_attribution` disclosure | `server_name`, `hours_back`, `top`, `database_name` |
         | `get_query_store_top` | Expensive queries from Query Store (persistent) | `server_name`, `hours_back`, `top`, `database_name` |
         | `get_query_trend` | Time-series for a specific query by query_hash | `query_hash` (required), `database_name` (required), `server_name`, `hours_back` |
-        | `get_query_duration_trend` | Average query duration over time (detect degradation) | `server_name`, `hours_back` |
+        | `get_query_duration_trend` | Overall query elapsed-ms/sec + executions/sec over time, from the PLAN CACHE. `execution_count` and `executions_per_second` are the same quantity; the first is truncated to an integer, so read the second on a quiet server. An empty result distinguishes a quiet window (`empty`, widen `hours_back`) from a server nothing has ever been collected for (`unavailable`, collection is not running) | `server_name`, `hours_back` |
+        | `get_procedure_duration_trend` | The same series over procedure_stats. NOT a duplicate: query_stats smears a procedure's work across the statements inside it, this charges the whole call to the procedure. Read both to tell an ad-hoc regression from a procedure regression | `server_name`, `hours_back` |
+        | `get_query_store_duration_trend` | The same series over Query Store, which persists per interval and survives a plan-cache eviction or a restart. Each interval is counted once, at the hour the work RAN. Its `unavailable` names the cause the plan-cache trends do not have: Query Store may be OFF on every database | `server_name`, `hours_back` |
 
         ### Blocking & Deadlock Tools
         | Tool | Purpose | Key Parameters |
@@ -85,14 +87,14 @@ internal static class McpInstructions
         | `get_blocked_process_reports` | Parsed blocking from sp_HumanEventsBlockViewer (extended events) | `server_name`, `hours_back`, `limit` |
         | `get_blocked_process_xml` | Raw blocked process report XML | `server_name`, `hours_back`, `limit` |
         | `get_long_query_completions` | Longest completed queries (rpc/batch over the trace threshold) + attentions/cancels from the opt-in long-query trace, duration DESC (empty until the collector is enabled) | `server_name`, `hours_back`, `limit` |
-        | `get_blocking_trend` | Time-series of blocking event counts | `server_name`, `hours_back` |
-        | `get_deadlock_trend` | Time-series of deadlock event counts | `server_name`, `hours_back` |
+        | `get_blocking_trend` | Time-series of blocking event counts. An empty result distinguishes a genuine all-clear (`empty`, with the collector run counts in `hints` so you can see how many captures the window actually holds) from a window no collector covered (`unavailable`), which is NOT an all-clear | `server_name`, `hours_back` |
+        | `get_deadlock_trend` | Time-series of deadlock event counts. An empty result distinguishes a genuine all-clear (`empty`, with the collector run counts in `hints` so you can see how many captures the window actually holds) from a window no collector covered (`unavailable`), which is NOT an all-clear | `server_name`, `hours_back` |
 
         ### Memory Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
         | `get_memory_stats` | Latest memory snapshot: physical, buffer pool, plan cache | `server_name` |
-        | `get_memory_trend` | Memory usage over time | `server_name`, `hours_back` |
+        | `get_memory_trend` | Memory usage over time. An empty result distinguishes a quiet window (`empty`, widen `hours_back`) from a server nothing has ever been collected for (`unavailable`, collection is not running) | `server_name`, `hours_back` |
         | `get_memory_clerks` | Top memory consumers by clerk type. An empty result is `unavailable`, never a quiet period — a live SQL Server always has clerks, so nothing retained means the collector has not run or its rows aged out | `server_name` |
         | `get_memory_grants` | Active/recent memory grants (detect grant pressure) | `server_name`, `hours_back` (default 1), `limit` |
         | `get_resource_semaphore` | Latest resource-semaphore snapshot: workspace memory vs target/max ceiling, waiter/timeout/forced-grant pressure | `server_name`, `hours_back` (default 24) |
@@ -102,7 +104,7 @@ internal static class McpInstructions
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
         | `get_file_io_stats` | Latest file I/O stats per database file with latency | `server_name` |
-        | `get_file_io_trend` | I/O latency trend over time per database | `server_name`, `hours_back` |
+        | `get_file_io_trend` | I/O latency trend over time per database. An empty result distinguishes a quiet window (`empty`, widen `hours_back`) from a server nothing has ever been collected for (`unavailable`, collection is not running) | `server_name`, `hours_back` |
 
         ### TempDB Tools
         | Tool | Purpose | Key Parameters |
@@ -158,6 +160,7 @@ internal static class McpInstructions
         | `get_health_parser_cpu_tasks` | CPU task/worker-thread snapshots (QUERY_PROCESSING) with deadlock/blocking flags | `server_name`, `hours_back`, `limit` |
         | `get_health_parser_memory_broker` | Memory broker ratio changes and target adjustments | `server_name`, `hours_back`, `limit` |
         | `get_health_parser_memory_node_oom` | Per-NUMA-node out-of-memory events | `server_name`, `hours_back`, `limit` |
+        | `get_health_parser_significant_waits` | Individual wait_info events: a real session's non-BACKUP statement waited 500 ms+ on a non-idle wait type, with the wait type, duration and signal duration, resource, session id and the waiting SQL text. `get_wait_stats` gives the instance-wide totals and can never name the statement that paid them. An empty result says which nothing it is: events captured but none significant (the healthy answer), a quiet window (`empty`), or wait_info never captured (`unavailable`, NOT an all-clear) | `server_name`, `hours_back`, `limit` |
 
         ### Server Information Tools
         | Tool | Purpose | Key Parameters |

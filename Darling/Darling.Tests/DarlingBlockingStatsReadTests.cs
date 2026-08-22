@@ -63,11 +63,27 @@ public sealed class DarlingBlockingStatsReadTests
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
 
-            /* ── nothing captured at all: NOT a clean bill of health ── */
+            /* ── collectors never ran: NOT a clean bill of health ── */
             var never = await DarlingMcpDataTools.GetBlockingStats(dataSource, ServerName, 24);
             var neverDoc = JsonDocument.Parse(never);
             Assert.Equal("unavailable", neverDoc.RootElement.GetProperty("status").GetString());
             Assert.Contains("NOT a clean bill of health", neverDoc.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+
+            /*
+                ── the healthy-server case, which the first design got backwards ──
+                A collector that RAN and saw nothing, with no blocking or deadlock rows anywhere. This is
+                the ordinary state of a well-behaved server, and it must read as a clear window. An
+                event-existence probe answers no here -- there are no rows to find -- and would tell a
+                healthy server its collection is broken, sending someone to fix what is working.
+            */
+            await SeedCollectorRunAsync(connection, ct, "blocked_process_report", MinutesAgo(20));
+
+            var healthy = await DarlingMcpDataTools.GetBlockingStats(dataSource, ServerName, 24);
+            var healthyDoc = JsonDocument.Parse(healthy);
+            Assert.Equal("empty", healthyDoc.RootElement.GetProperty("status").GetString());
+            var healthyText = healthyDoc.RootElement.GetProperty("message").GetString()!;
+            Assert.Contains("genuinely clear", healthyText, StringComparison.Ordinal);
+            Assert.DoesNotContain("NEVER", healthyText, StringComparison.Ordinal);
 
             /*
                 ── the regression this file exists for ──
@@ -113,6 +129,17 @@ public sealed class DarlingBlockingStatsReadTests
     private static DateTime HoursAgo(int hours) =>
         DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow.AddHours(-hours));
 
+    /// <summary>A SUCCESSFUL collector run that found nothing — the denominator the verdict rests on.</summary>
+    private static async Task SeedCollectorRunAsync(
+        NpgsqlConnection connection, CancellationToken ct, string collector, DateTime at) =>
+        await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collection_log
+    (log_id, server_id, server_name, collector_name, collection_time,
+     duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            CollectionIdGenerator.Next(), ServerId, ServerName, collector,
+            DarlingMcpTestData.Naive(at), 100, "SUCCESS", null, 0, 80, 20);
+
     private static async Task SeedDeadlockAsync(NpgsqlConnection connection, CancellationToken ct, DateTime at) =>
         await DarlingMcpTestData.ExecAsync(connection, ct,
             "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, victim_process_id, victim_sql_text, deadlock_graph_xml) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
@@ -122,6 +149,7 @@ public sealed class DarlingBlockingStatsReadTests
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM deadlocks WHERE server_id = $1", ServerId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collection_log WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM config_monitored_servers WHERE server_id = $1", ServerId);
     }

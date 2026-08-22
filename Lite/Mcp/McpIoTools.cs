@@ -71,6 +71,22 @@ public sealed class McpIoTools
             if (hoursError != null) return hoursError;
 
             var points = await dataService.GetFileIoLatencyTrendAsync(resolved.ServerId, hours_back);
+
+            if (points.Count == 0)
+            {
+                /* Same two states as the memory trend, same probe discipline, same words as Darling's twin.
+                   The quiet-window sentence carries one extra clause the others do not need: this read's
+                   top_files CTE requires delta_reads or delta_writes above zero, so a genuinely idle file
+                   set is empty here even on a server whose file_io_stats collector ran every cycle. */
+                return await dataService.HasAnyFileIoStatAsync(resolved.ServerId)
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"No file I/O samples recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected file I/O stats before, so this window is genuinely quiet rather than broken — widen hours_back, or read it as no measurable read or write activity on any file in this window.")
+                    : McpHelpers.Status(
+                        "unavailable",
+                        $"No file I/O stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the file_io_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_file_io_stats will be equally empty until it does.");
+            }
+
             var result = points.Select(p => new
             {
                 time = p.CollectionTime.ToString("o"),
