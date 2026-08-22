@@ -22,9 +22,10 @@ public sealed class McpConfigTools
         {
             var rows = await dataService.GetLatestServerConfigAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return McpHelpers.Status(
-                    "unavailable",
-                    "No server configuration data available. The config collector may not have run yet.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "server_config")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        "No server configuration data available. The config collector may not have run yet.");
 
             return JsonSerializer.Serialize(new
             {
@@ -220,7 +221,8 @@ public sealed class McpConfigTools
         {
             var rows = await dataService.GetLatestTraceFlagsAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No trace flags found (none enabled, or the config collector has not run yet).");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "trace_flags")
+                    ?? McpHelpers.Status("empty", "No trace flags found (none enabled, or the config collector has not run yet).");
 
             return JsonSerializer.Serialize(new
             {

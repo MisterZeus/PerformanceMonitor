@@ -180,7 +180,8 @@ Not available on Azure SQL DB (ring buffer not exposed). For actionable interpre
             var rows = await dataService.GetMemoryPressureEventsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status("empty", "No memory pressure events found in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "memory_pressure_events")
+                    ?? McpHelpers.Status("empty", "No memory pressure events found in the requested time range.");
             }
 
             return JsonSerializer.Serialize(new

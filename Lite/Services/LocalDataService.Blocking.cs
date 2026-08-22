@@ -879,13 +879,19 @@ LIMIT 1";
     /// <summary>
     /// Gets lock wait stats trend data (LCK% wait types) for the blocking trends chart.
     /// Returns per-second rates grouped by wait type.
+    ///
+    /// <para>#2484: takes <paramref name="asOfUtc"/> so the MCP twin (get_lock_wait_trend) can anchor the
+    /// window at a past incident. Threaded as the anchor rather than as fromDate/toDate because those two
+    /// are SERVER-LOCAL and converted back to UTC inside GetTimeRange — handing them an instant already in
+    /// UTC would shift the window by the monitored server's offset. collection_time is stored in UTC, so
+    /// this read windows on the UTC bounds.</para>
     /// </summary>
-    public async Task<List<LockWaitTrendPoint>> GetLockWaitTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<LockWaitTrendPoint>> GetLockWaitTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 WITH raw AS

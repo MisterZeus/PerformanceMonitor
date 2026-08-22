@@ -341,6 +341,72 @@ public sealed class McpBlockingTools
         }
     }
 
+    [McpServerTool(Name = "get_lock_wait_trend"), Description("Gets the AGGREGATE lock-wait rate over time for a server: every LCK% wait type's wait milliseconds per second at each collection, the viewer's Blocking Trends lock-wait chart. get_wait_trend charts ONE named wait type and get_blocking_trend counts incidents; this is the whole lock family at once, as a rate rather than a count. Use it to see whether a server's lock pressure is rising when no single wait type dominates, to tell a few long blocks from constant low-grade contention, and to pick which LCK type to hand to get_wait_trend next. The rate is delta wait time divided by the seconds since the previous collection, so it is comparable across servers collecting on different cadences.")]
+    public static async Task<string> GetLockWaitTrend(
+        LocalDataService dataService,
+        ServerManager serverManager,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+    {
+        var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
+        if (error != null) return error;
+
+        try
+        {
+            var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+            if (hoursError != null) return hoursError;
+
+            var points = await dataService.GetLockWaitTrendAsync(
+                resolved.ServerId, hours_back, asOfUtc: windowEnd);
+
+            if (points.Count == 0)
+            {
+                /*
+                    The denominator here is the DATA, not collection_log — the opposite of the two trends
+                    above, and deliberately so. Those read EDGE tables, where a row exists only because
+                    something went wrong, so a healthy server has none and a data probe would report it as
+                    uncollected. wait_stats is PERIODIC: the collector writes a row every cycle for every
+                    wait type it observes, whatever the server is doing, so the presence of ANY wait sample
+                    is proof somebody looked.
+
+                    The LCK% filter is deliberately NOT applied to the probe. A server that has collected
+                    wait stats for months and never taken a lock wait is the all-clear this branch is for,
+                    and filtering the probe the same way would call that server uncollected. Darling's twin
+                    makes the same distinction with the same words.
+                */
+                return await dataService.HasAnyWaitStatAsync(resolved.ServerId)
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"No lock waits recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
+                    : McpHelpers.Status(
+                        "unavailable",
+                        $"No wait stats have EVER been recorded for {resolved.ServerName}, so this is NOT a report of a server without lock contention — nothing has been stored for it at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.");
+            }
+
+            /* Rows, not a pre-pivoted series per wait type. The caller decides whether to sum the family or
+               chart the members, and a pivot here would have to pick a top-N and silently drop the rest —
+               on a read whose premise is that no single LCK type dominates. */
+            var result = points.Select(p => new
+            {
+                collection_time = p.CollectionTime.ToString("o"),
+                wait_type = p.WaitType,
+                wait_time_ms_per_second = Math.Round(p.WaitTimeMsPerSecond, 3),
+            });
+
+            return JsonSerializer.Serialize(new
+            {
+                server = resolved.ServerName,
+                hours_back,
+                trend = result
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("get_lock_wait_trend", ex);
+        }
+    }
+
     /// <summary>
     /// The empty answer both trends give, and the whole point of #2485: <c>trend: []</c> is the same bytes
     /// on a server that had no blocking and on one that collected nothing, and an agent holding only the

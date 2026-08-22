@@ -32,6 +32,10 @@ internal static class McpInstructions
 
         ## Tool Reference
 
+        ### Reading an empty result
+
+        When a read comes back with no data, the `status` word says WHICH kind of nothing it is, and the three are not interchangeable. `empty` is a true negative: we looked and there was nothing to find. `unavailable` means this server could have that data and does not have it right now, so collection health is worth a look. `not_collected` means this server does not collect that at all — and when the reason is the ENGINE, the gap is PERMANENT: the collector serving that read does not run on this server's engine (an Azure SQL Database has no system_health session, no default trace and no SQL Agent), so there is no session to start, no collector to enable, and nothing to check. The message names the engine and the collector. Do not send anyone to go and fix it.
+
         ### Asking about a PAST window
 
         Every tool below that takes `hours_back` also takes `as_of`: an optional ISO-8601 UTC instant that moves the END of the window off "now". `hours_back` stays the window's LENGTH. So the four hours around last Tuesday 03:00 is `as_of=2026-08-19T05:00:00Z, hours_back=4` — not `hours_back=170`.
@@ -56,6 +60,7 @@ internal static class McpInstructions
         | `get_blocking_stats` | Blocking SEVERITY per minute: blocking duration (event count, total, max, avg wait) and deadlock severity (victim count plus total/max/avg wait across EVERY process in the graphs, not just victims). `get_blocking_trend` and `get_deadlock_trend` say how OFTEN; this says how BAD — ten one-second blocks and one ten-minute block are the same count and a different problem. An empty result distinguishes a genuinely clear window (`empty`) from a server where neither capture path has ever produced a row (`unavailable`), which is NOT a clean bill of health | `server_name`, `hours_back`, `as_of` |
         | `get_server_summary` | Quick health overview: CPU %, memory, blocking/deadlock counts | `server_name` |
         | `get_daily_summary` | Daily composite health band + wait/query/deadlock/blocking/CPU/memory/alert rollup for one day | `server_name`, `summary_date` (yyyy-MM-dd, default today) |
+        | `get_daily_summary_range` | The SAME rollup across a span of days — one row per collected day, the Performance Calendar's month grid. Use it when the question is WHICH day rather than how one day went: scan the bands, then call `get_daily_summary` for the day that stands out. A day with ANY collection appears even when every signal was quiet, so a day absent from the result is a gap in COLLECTION. `as_of` anchors the LAST day of the range. An empty result distinguishes a range outside this server's history (`empty`) from a server nothing has ever been collected for (`unavailable`) | `server_name`, `days_back` (default 30, max 366), `as_of` |
 
         ### Wait Statistics Tools
         | Tool | Purpose | Key Parameters |
@@ -105,6 +110,7 @@ internal static class McpInstructions
         | `get_long_query_completions` | Longest completed queries (rpc/batch over the trace threshold) + attentions/cancels from the opt-in long-query trace, duration DESC (empty until the collector is enabled) | `server_name`, `hours_back`, `limit`, `as_of` |
         | `get_blocking_trend` | Time-series of blocking event counts. An empty result distinguishes a genuine all-clear (`empty`, with the collector run counts in `hints` so you can see how many captures the window actually holds) from a window no collector covered (`unavailable`), which is NOT an all-clear | `server_name`, `hours_back`, `as_of` |
         | `get_deadlock_trend` | Time-series of deadlock event counts. An empty result distinguishes a genuine all-clear (`empty`, with the collector run counts in `hints` so you can see how many captures the window actually holds) from a window no collector covered (`unavailable`), which is NOT an all-clear | `server_name`, `hours_back`, `as_of` |
+        | `get_lock_wait_trend` | Every LCK% wait type's wait milliseconds per SECOND at each collection — the aggregate lock-wait lane. The two trends above count incidents and `get_wait_trend` charts ONE named wait type; this is the whole lock family as a rate, which is what shows lock pressure rising when no single type dominates. An empty result distinguishes a genuinely quiet window (`empty`, widen `hours_back`) from a server no wait stats have ever been stored for (`unavailable`), which is NOT a report of a server without lock contention | `server_name`, `hours_back`, `as_of` |
 
         ### Memory Tools
         | Tool | Purpose | Key Parameters |

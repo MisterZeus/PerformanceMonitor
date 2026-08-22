@@ -40,7 +40,8 @@ public sealed class DarlingMcpJobTools
         {
             var rows = await DarlingJobReader.GetRunningJobsAsync(postgres, resolved.ServerId);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No running SQL Agent jobs found (or the running_jobs collector has not run yet).");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "running_jobs")
+                    ?? McpHelpers.Status("empty", "No running SQL Agent jobs found (or the running_jobs collector has not run yet).");
 
             var jobs = rows.Select(r => new
             {

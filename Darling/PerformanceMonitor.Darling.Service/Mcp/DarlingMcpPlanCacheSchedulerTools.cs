@@ -104,7 +104,8 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
         {
             var item = await DarlingPlanCacheSchedulerReader.GetCpuSchedulerPressureAsync(postgres, resolved.ServerId);
             if (item == null)
-                return McpHelpers.Status("unavailable", "No CPU scheduler data available. The scheduler collector may not have run yet.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "cpu_scheduler_stats")
+                    ?? McpHelpers.Status("unavailable", "No CPU scheduler data available. The scheduler collector may not have run yet.");
 
             var workerUtilizationPercent = item.MaxWorkersCount > 0
                 ? Math.Round(item.TotalCurrentWorkersCount * 100.0 / item.MaxWorkersCount, 2)
