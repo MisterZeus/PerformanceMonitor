@@ -219,7 +219,9 @@ public sealed class LaneAxisAlignerTests
     /// Height is the dimension that DOES move the gutter - a taller plot gets denser Y ticks, which can add
     /// a decimal place and a digit of width. The WPF entry point therefore measures at the lanes' real
     /// height and falls back to a deliberately generous one, which is only safe because the gutter is
-    /// non-decreasing in height: measuring taller can over-reserve, never under-reserve. Pin that direction.
+    /// non-decreasing in height: measuring taller can over-reserve, never under-reserve. Pin that direction
+    /// across the whole range the aligner will ever measure at - its own clamp, 60 px to 4000 px - with the
+    /// fallback height sitting in the sequence at its true ordinal position.
     /// </summary>
     [Theory]
     [InlineData(IoLatencyMsMax)]
@@ -229,8 +231,14 @@ public sealed class LaneAxisAlignerTests
     [InlineData(WaitMsPerSecMax)]
     public void TheLeftGutter_NeverShrinksAsThePlotGetsTaller(double yMax)
     {
+        /* Sorted, not written in order by hand: the fallback height is one of the samples, and a claim about
+           "as the plot gets taller" is meaningless if the sequence stops ascending because that constant
+           moved. Sorting keeps the pin honest whatever value it takes. */
+        int[] heights = [60, 100, 150, 200, 320, 500, LaneAxisAligner.FallbackMeasureHeight, 800, 1200, 2000, 3000, 4000];
+        Array.Sort(heights);
+
         float previous = 0;
-        foreach (int height in new[] { 60, 100, 150, 200, 320, 500, 800, LaneAxisAligner.FallbackMeasureHeight })
+        foreach (int height in heights)
         {
             var plot = Lane(yMax);
             plot.RenderInMemory(LaneWidth, height);
