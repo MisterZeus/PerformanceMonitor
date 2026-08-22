@@ -278,6 +278,11 @@ public sealed class McpHealthTools
         var invalidLimit = McpHelpers.ValidateTop(limit);
         if (invalidLimit != null) return invalidLimit;
 
+        /* ResolveAsOf here, deliberately NOT ValidateWindow. These three reads have never capped
+           hours_back -- they Math.Abs() it and window on the result -- so routing them through the
+           shared validator would impose the 168-hour ceiling every other read carries, and take reach
+           away from exactly the read whose premise is looking FURTHER back than the default. The anchor
+           is validated because it is new; the span keeps the behaviour callers already have. */
         var anchorError = McpHelpers.ResolveAsOf(as_of, out var windowEnd);
         if (anchorError != null) return anchorError;
 
@@ -356,6 +361,11 @@ public sealed class McpHealthTools
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
+        /* ResolveAsOf here, deliberately NOT ValidateWindow. These three reads have never capped
+           hours_back -- they Math.Abs() it and window on the result -- so routing them through the
+           shared validator would impose the 168-hour ceiling every other read carries, and take reach
+           away from exactly the read whose premise is looking FURTHER back than the default. The anchor
+           is validated because it is new; the span keeps the behaviour callers already have. */
         var anchorError = McpHelpers.ResolveAsOf(as_of, out var windowEnd);
         if (anchorError != null) return anchorError;
 
@@ -419,6 +429,11 @@ public sealed class McpHealthTools
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
+        /* ResolveAsOf here, deliberately NOT ValidateWindow. These three reads have never capped
+           hours_back -- they Math.Abs() it and window on the result -- so routing them through the
+           shared validator would impose the 168-hour ceiling every other read carries, and take reach
+           away from exactly the read whose premise is looking FURTHER back than the default. The anchor
+           is validated because it is new; the span keeps the behaviour callers already have. */
         var anchorError = McpHelpers.ResolveAsOf(as_of, out var windowEnd);
         if (anchorError != null) return anchorError;
 
