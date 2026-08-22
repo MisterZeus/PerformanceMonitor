@@ -256,24 +256,12 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             Assert.Contains("Query Store may be OFF", neverText, StringComparison.Ordinal);
 
             /*
-                ── 2. recent rows but NO baseline ──
-                The branch this read exists to get right. Everything collected sits inside the window, so
-                there is nothing to compare against and no regression is detectable however bad one is.
+                ── 2. a baseline exists but nothing landed in the window ──
+                Seeded FIRST, and the ordering is load-bearing: once a row exists 30 minutes ago no window
+                a caller can legally ask for excludes it, so this branch is unreachable after the recent
+                row is planted. The four states are walked by moving hours_back over one fixed set of rows
+                rather than by deleting rows between assertions.
             */
-            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 100, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 1);
-
-            var noBaseline = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24));
-            Assert.Equal("unavailable", noBaseline.GetProperty("status").GetString());
-            var noBaselineText = noBaseline.GetProperty("message").GetString()!;
-            Assert.Contains("no baseline", noBaselineText, StringComparison.Ordinal);
-            Assert.Contains("NOT a clean bill of health", noBaselineText, StringComparison.Ordinal);
-
-            /* Widening would make the recent window bigger and the baseline SHORTER — the wrong direction. */
-            Assert.Contains("Shorten hours_back", noBaselineText, StringComparison.Ordinal);
-            Assert.DoesNotContain("Widen", noBaselineText, StringComparison.Ordinal);
-            Assert.NotEqual(neverText, noBaselineText);
-
-            /* ── 3. a baseline exists but nothing landed in the window ── */
             await SeedAsync(connection, ct, baseNow.AddHours(-40), 100, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 2);
 
             var noRecent = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 2));
@@ -282,13 +270,32 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             Assert.Contains("Widen hours_back", noRecentText, StringComparison.Ordinal);
             Assert.DoesNotContain("EVER", noRecentText, StringComparison.Ordinal);
 
-            /* ── 4. both sides collected, nothing regressed: the ONE good-news answer ── */
+            /* ── 3. both sides collected, nothing regressed: the ONE good-news answer ── */
+            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 100, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 1);
+
             var clear = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24));
             Assert.Equal("empty", clear.GetProperty("status").GetString());
             var clearText = clear.GetProperty("message").GetString()!;
             Assert.Contains("all-clear", clearText, StringComparison.Ordinal);
             Assert.DoesNotContain("EVER", clearText, StringComparison.Ordinal);
             Assert.DoesNotContain("Widen", clearText, StringComparison.Ordinal);
+
+            /*
+                ── 4. recent rows but NO baseline ──
+                The branch this read exists to get right, reached from the SAME rows by widening the window
+                until every one of them falls inside it. There is then nothing to compare against, and no
+                regression is detectable however bad one is.
+            */
+            var noBaseline = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 48));
+            Assert.Equal("unavailable", noBaseline.GetProperty("status").GetString());
+            var noBaselineText = noBaseline.GetProperty("message").GetString()!;
+            Assert.Contains("no baseline", noBaselineText, StringComparison.Ordinal);
+            Assert.Contains("NOT a clean bill of health", noBaselineText, StringComparison.Ordinal);
+
+            /* Widening would make the window bigger and the baseline SHORTER — the wrong direction. */
+            Assert.Contains("Shorten hours_back", noBaselineText, StringComparison.Ordinal);
+            Assert.DoesNotContain("Widen", noBaselineText, StringComparison.Ordinal);
+            Assert.NotEqual(neverText, noBaselineText);
 
             /* All four sentences are different sentences, not one sentence four times. */
             var messages = new[] { neverText, noBaselineText, noRecentText, clearText };
