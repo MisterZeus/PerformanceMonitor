@@ -82,6 +82,11 @@ public sealed class McpMissMessageParityPinTests
            CollectorEngineCapability and is byte-identical by construction rather than by pinning; what lives
            twice, and therefore belongs here, is the paragraph that teaches a caller how to read it. */
         "`not_collected` means this server does not collect that at all — and when the reason is the ENGINE, the gap is PERMANENT",
+
+        /* The PostgreSQL half of the same paragraph (#2532). An agent over MCP has no tabs: it asks a
+           read by name, so the instructions are the only place it can be told which family answers on
+           this engine. */
+        "a PostgreSQL target collects none of the SQL Server signals at all, and the `get_pg_*` reads are the ones that answer there",
     };
 
     [Theory]
