@@ -275,14 +275,14 @@ public sealed class McpBlockingTools
                     collection_log, which records a SUCCESS with zero rows for a collector that ran and saw
                     nothing. Darling's twin makes the same distinction with the same words.
                 */
-                var captures = await dataService.GetBlockingCaptureCountsAsync(
-                    resolved.ServerId, hours_back, asOfUtc: anchorEnd);
                 var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "blocked_process_report");
                 if (gated != null)
                 {
                     return gated;
                 }
 
+                var captures = await dataService.GetBlockingCaptureCountsAsync(
+                    resolved.ServerId, hours_back, asOfUtc: anchorEnd);
                 return await EmptyTrend(
                     "blocking", resolved.ServerName, hours_back, captures,
                     () => dataService.HasAnyBlockingCollectorRunAsync(resolved.ServerId));
@@ -326,14 +326,14 @@ public sealed class McpBlockingTools
             if (points.Count == 0)
             {
                 /* Same two facts as the blocking trend above, same denominator, same reason. */
-                var captures = await dataService.GetDeadlockCaptureCountsAsync(
-                    resolved.ServerId, hours_back, asOfUtc: windowEnd);
                 var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "deadlocks");
                 if (gated != null)
                 {
                     return gated;
                 }
 
+                var captures = await dataService.GetDeadlockCaptureCountsAsync(
+                    resolved.ServerId, hours_back, asOfUtc: windowEnd);
                 return await EmptyTrend(
                     /* SINGULAR: the subject lands in "No {subject} was recorded", and "no deadlocks
                        was recorded" is not a sentence. It also reads correctly in the other two,

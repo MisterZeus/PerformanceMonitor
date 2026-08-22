@@ -224,15 +224,24 @@ public sealed class DarlingMcpDataTools
             var points = await DarlingDataReader.GetWaitTrendAsync(postgres, resolved.ServerId, wait_type, start, now);
             if (points.Count == 0)
             {
+                /* The engine question comes BEFORE the distinct-values probe, not after it. Both are on
+                   the miss path, so either order keeps the property that matters — but a permanently gated
+                   engine takes this branch on every call, forever, and the probe below could never tell it
+                   anything. Asking first makes that case one query instead of two. */
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "wait_stats");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 /* Distinguish "unknown wait type here" from "nothing collected at all", handing back the
                    ones that do have data — Lite's get_wait_trend miss vocabulary. */
                 var collected = await DarlingDataReader.GetDistinctWaitTypesAsync(postgres, resolved.ServerId, start, now);
                 if (collected.Count == 0)
-                    return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "wait_stats")
-                        ?? McpHelpers.Status(
-                            "unavailable",
-                            $"No trend data for wait type '{wait_type}'. No wait stats have been collected for this server in the last {hours_back}h yet " +
-                            "(the collector may not have run, or delta wait stats need a second collection cycle).");
+                    return McpHelpers.Status(
+                        "unavailable",
+                        $"No trend data for wait type '{wait_type}'. No wait stats have been collected for this server in the last {hours_back}h yet " +
+                        "(the collector may not have run, or delta wait stats need a second collection cycle).");
 
                 return McpHelpers.Status(
                     "not_collected",

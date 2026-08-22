@@ -368,14 +368,14 @@ public sealed class DarlingMcpBlockingTools
                     from collection_log, which records a SUCCESS with zero rows for a collector that ran
                     and saw nothing. Probed only here, on the path that already found nothing.
                 */
-                var captures = await DarlingBlockingTrendReader.GetBlockingCaptureCountsAsync(
-                    postgres, resolved.ServerId, start, now);
                 var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report");
                 if (gated != null)
                 {
                     return gated;
                 }
 
+                var captures = await DarlingBlockingTrendReader.GetBlockingCaptureCountsAsync(
+                    postgres, resolved.ServerId, start, now);
                 return await EmptyTrend(
                     "blocking", resolved.ServerName, hours_back, captures,
                     () => DarlingBlockingTrendReader.HasAnyBlockingCollectorRunAsync(postgres, resolved.ServerId));
@@ -417,14 +417,14 @@ public sealed class DarlingMcpBlockingTools
             if (points.Count == 0)
             {
                 /* Same two facts as the blocking trend above, same denominator, same reason. */
-                var captures = await DarlingBlockingTrendReader.GetDeadlockCaptureCountsAsync(
-                    postgres, resolved.ServerId, start, now);
                 var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "deadlocks");
                 if (gated != null)
                 {
                     return gated;
                 }
 
+                var captures = await DarlingBlockingTrendReader.GetDeadlockCaptureCountsAsync(
+                    postgres, resolved.ServerId, start, now);
                 return await EmptyTrend(
                     /* SINGULAR: the subject lands in "No {subject} was recorded", and "no deadlocks
                        was recorded" is not a sentence. It also reads correctly in the other two,

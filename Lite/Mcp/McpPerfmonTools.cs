@@ -75,6 +75,16 @@ public sealed class McpPerfmonTools
             var points = await dataService.GetPerfmonTrendAsync(resolved.ServerId, counter_name, hours_back, asOfUtc: windowEnd);
             if (points.Count == 0)
             {
+                /* The engine question comes BEFORE the distinct-counter probe, not after it. Both are on
+                   the miss path, so either order keeps the property that matters — but a permanently gated
+                   engine takes this branch on every call, forever, and neither the probe nor the PLE branch
+                   below could tell it anything. Asking first makes that case one query instead of two. */
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "perfmon_stats");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 /* No points can mean three different things to a caller. Distinguish them so an LLM
                    doesn't read a bad counter name as "this metric looks fine." */
                 var collected = await dataService.GetDistinctPerfmonCountersAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
@@ -91,11 +101,10 @@ public sealed class McpPerfmonTools
                 /* Nothing collected at all for this server in the window: the collector likely hasn't
                    produced perfmon data yet (delta counters need two cycles). Not retrievable now. */
                 if (collected.Count == 0)
-                    return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "perfmon_stats")
-                        ?? McpHelpers.Status(
-                            "unavailable",
-                            $"No trend data for counter '{counter_name}'. No perfmon counters have been collected for this server in the last {hours_back}h yet " +
-                            "(the collector may not have run, or delta counters need a second collection cycle).");
+                    return McpHelpers.Status(
+                        "unavailable",
+                        $"No trend data for counter '{counter_name}'. No perfmon counters have been collected for this server in the last {hours_back}h yet " +
+                        "(the collector may not have run, or delta counters need a second collection cycle).");
 
                 /* Other counters exist but not this one: the name is almost certainly wrong. Hand back
                    the collected names so the caller can correct it. */
