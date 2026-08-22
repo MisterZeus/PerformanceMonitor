@@ -20,6 +20,14 @@ namespace PerformanceMonitor.Collectors;
 /// RemoteCollectorService.TempDb.cs. Always yields exactly one row — zeros when the result
 /// sets are empty — matching the original collector's behavior. Not applicable to Azure SQL
 /// Database; see <see cref="AppliesTo"/>.
+///
+/// <para><b>The third thing it captures, and why the DMV alone was not enough (#2515).</b>
+/// <c>dm_db_file_space_usage</c> describes the tempdb data files AS CURRENTLY ALLOCATED, so
+/// <c>total_reserved</c> ÷ (<c>total_reserved</c> + <c>unallocated</c>) is distance to the next
+/// AUTOGROW, not distance to the point where tempdb can grow no further. That reads the same on a
+/// pre-sized on-prem box only because such a tempdb has already reached its ceiling. Where the ceiling
+/// is a real value it is discoverable — <c>SUM(max_size)</c> over tempdb's ROWS files — so
+/// <c>max_size_mb</c> ships beside the allocation and the consumers divide by the ceiling instead.</para>
 /// </summary>
 public sealed class TempDbStatsCollector : CollectorDefinitionBase<TempDbStatsCollector.Row>
 {
@@ -37,7 +45,11 @@ public sealed class TempDbStatsCollector : CollectorDefinitionBase<TempDbStatsCo
         decimal UnallocatedMb,
         long TotalSessions,
         int TopSessionId,
-        decimal TopSessionMb);
+        decimal TopSessionMb,
+        /* The ROWS-file growth ceiling in MB. -1 = at least one data file is unlimited, so there is no
+           ceiling; 0 = the query returned NULL (no ROWS files visible). Appended LAST because both
+           writers are positional and the payload column had to append too. */
+        decimal MaxSizeMb);
 
     public override string Name => "tempdb_stats";
 
@@ -81,7 +93,25 @@ SELECT /* PerformanceMonitorLite */
     internal_object_reserved_mb = CONVERT(decimal(18,2), SUM(dsu.internal_object_reserved_page_count) * 8 / 1024.0),
     version_store_reserved_mb = CONVERT(decimal(18,2), SUM(dsu.version_store_reserved_page_count) * 8 / 1024.0),
     total_reserved_mb = CONVERT(decimal(18,2), SUM(dsu.user_object_reserved_page_count + dsu.internal_object_reserved_page_count + dsu.version_store_reserved_page_count) * 8 / 1024.0),
-    unallocated_mb = CONVERT(decimal(18,2), SUM(dsu.unallocated_extent_page_count) * 8 / 1024.0)
+    unallocated_mb = CONVERT(decimal(18,2), SUM(dsu.unallocated_extent_page_count) * 8 / 1024.0),
+    /* #2515: the ROWS-file growth ceiling, which is what the space alert's percentage divides by.
+       Restricted to type = 0 deliberately — dm_db_file_space_usage above reports DATA allocation, so
+       folding the log's cap into the same denominator would understate usage on every server.
+       MIN() decides the unlimited case rather than any(): one unlimited data file means tempdb as a
+       whole can grow without limit, and -1 sorts below every real cap so MIN finds it. max_size is int
+       and a wide tempdb can carry several files at the 16 TB page maximum, so it is widened to bigint
+       BEFORE the SUM rather than after it. */
+    max_size_mb =
+        (
+            SELECT
+                CASE
+                    WHEN MIN(df.max_size) = -1
+                    THEN CONVERT(decimal(18,2), -1)
+                    ELSE CONVERT(decimal(18,2), SUM(CONVERT(bigint, df.max_size)) * 8 / 1024.0)
+                END
+            FROM tempdb.sys.database_files AS df
+            WHERE df.type = 0 /*ROWS*/
+        )
 FROM tempdb.sys.dm_db_file_space_usage AS dsu
 OPTION(RECOMPILE);
 
@@ -103,6 +133,9 @@ OPTION(RECOMPILE);";
         new CollectorColumn("total_sessions_using_tempdb", CollectorColumnType.BigInt),
         new CollectorColumn("top_session_id", CollectorColumnType.Integer),
         new CollectorColumn("top_session_tempdb_mb", CollectorColumnType.Decimal, 18, 2),
+        /* Appended, never inserted: both stores generate their DDL from this list in order and both row
+           writers are positional, so a column added anywhere else would silently re-map history. */
+        new CollectorColumn("max_size_mb", CollectorColumnType.Decimal, 18, 2),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -111,6 +144,7 @@ OPTION(RECOMPILE);";
         int topSessionId = 0;
         long totalSessions = 0;
         decimal topSessionMb = 0;
+        decimal maxSizeMb = 0;
 
         if (await reader.ReadAsync(cancellationToken))
         {
@@ -119,6 +153,10 @@ OPTION(RECOMPILE);";
             versionStoreMb = reader.IsDBNull(2) ? 0m : reader.GetDecimal(2);
             totalReservedMb = reader.IsDBNull(3) ? 0m : reader.GetDecimal(3);
             unallocatedMb = reader.IsDBNull(4) ? 0m : reader.GetDecimal(4);
+            /* NULL means tempdb showed no ROWS files, which is not a measurement; 0 carries that through
+               to the consumers, where it reads as "no ceiling measured" and the denominator stays the
+               allocation — exactly what they did before this column existed. */
+            maxSizeMb = reader.IsDBNull(5) ? 0m : reader.GetDecimal(5);
         }
 
         if (await reader.NextResultAsync(cancellationToken) && await reader.ReadAsync(cancellationToken))
@@ -130,7 +168,7 @@ OPTION(RECOMPILE);";
 
         return new List<Row>
         {
-            new(userObjMb, internalObjMb, versionStoreMb, totalReservedMb, unallocatedMb, totalSessions, topSessionId, topSessionMb),
+            new(userObjMb, internalObjMb, versionStoreMb, totalReservedMb, unallocatedMb, totalSessions, topSessionId, topSessionMb, maxSizeMb),
         };
     }
 
@@ -144,6 +182,7 @@ OPTION(RECOMPILE);";
             .Value(row.UnallocatedMb)             /* unallocated_mb DECIMAL */
             .Value(row.TotalSessions)             /* total_sessions_using_tempdb BIGINT */
             .Value(row.TopSessionId)              /* top_session_id INTEGER */
-            .Value(row.TopSessionMb);             /* top_session_tempdb_mb DECIMAL */
+            .Value(row.TopSessionMb)              /* top_session_tempdb_mb DECIMAL */
+            .Value(row.MaxSizeMb);                /* max_size_mb DECIMAL */
     }
 }
