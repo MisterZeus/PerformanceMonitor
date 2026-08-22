@@ -190,26 +190,43 @@ public sealed class AsOfWindowAnchorTests : IClassFixture<SharedDuckDbFixture>, 
     /// The anchor reaches a read whose window is built by the SERVER-LOCAL helper, not just the UTC one.
     /// Two families, two time bases, one instant — a bug here would shift the window by the monitored
     /// server's offset and still look plausible.
+    ///
+    /// <para><b>The offset is SET, not read</b> (review catch). Reading whatever
+    /// <c>ServerTimeHelper.UtcOffsetMinutes</c> happens to be means running at 0 on any normal machine, and
+    /// at 0 a correct conversion and no conversion at all produce identical results — the test would pass
+    /// vacuously for exactly the bug its own summary names. UTC+5:30 is used because a half-hour offset also
+    /// catches an implementation that rounds to whole hours. Saved and restored, and this class shares the
+    /// <c>server-time-helper</c> collection so the write cannot land under a sibling class mid-read.</para>
     /// </summary>
     [Fact]
     public async Task TheAnchorAlsoMoves_AServerLocalWindow()
     {
-        var now = DateTime.UtcNow;
-        var incident = now.AddHours(-30);
+        var savedOffset = ServerTimeHelper.UtcOffsetMinutes;
+        try
+        {
+            ServerTimeHelper.UtcOffsetMinutes = 330; // UTC+5:30
 
-        /* sample_time is the monitored server's LOCAL wall clock, so the fixture is seeded in that base —
-           the read's window is server-local and the anchor arrives in UTC, and the point of the test is
-           that the conversion between them happens exactly once. */
-        var offset = ServerTimeHelper.UtcOffsetMinutes;
-        await SeedCpuAsync(incident.AddMinutes(offset), 91);
-        await SeedCpuAsync(now.AddMinutes(-10).AddMinutes(offset), 12);
+            var now = DateTime.UtcNow;
+            var incident = now.AddHours(-30);
 
-        var anchored = await McpCpuTools.GetCpuUtilization(
-            _dataService, _serverManager, "TestServer", 4, incident.AddMinutes(30).ToString("o"));
-        Assert.Equal(new[] { 91 }, SqlCpuIn(anchored));
+            /* sample_time is the monitored server's LOCAL wall clock, so the fixture is seeded in that base —
+               the read's window is server-local and the anchor arrives in UTC, and the point of the test is
+               that the conversion between them happens exactly once. */
+            var offset = ServerTimeHelper.UtcOffsetMinutes;
+            await SeedCpuAsync(incident.AddMinutes(offset), 91);
+            await SeedCpuAsync(now.AddMinutes(-10).AddMinutes(offset), 12);
 
-        var live = await McpCpuTools.GetCpuUtilization(_dataService, _serverManager, "TestServer");
-        Assert.Equal(new[] { 12 }, SqlCpuIn(live));
+            var anchored = await McpCpuTools.GetCpuUtilization(
+                _dataService, _serverManager, "TestServer", 4, incident.AddMinutes(30).ToString("o"));
+            Assert.Equal(new[] { 91 }, SqlCpuIn(anchored));
+
+            var live = await McpCpuTools.GetCpuUtilization(_dataService, _serverManager, "TestServer");
+            Assert.Equal(new[] { 12 }, SqlCpuIn(live));
+        }
+        finally
+        {
+            ServerTimeHelper.UtcOffsetMinutes = savedOffset;
+        }
     }
 
     // ── helpers ──
