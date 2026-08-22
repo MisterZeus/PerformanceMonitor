@@ -486,6 +486,12 @@ public sealed class McpHealthTools
                     Both empty is two facts, and the wrong one is the REASSURING one -- "nothing was
                     waiting" reads as all-clear and stops a caller looking. Same words as Darling's twin.
                 */
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "waiting_tasks");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 var everCollected = await dataService.HasAnyWaitingTaskSampleAsync(resolved.ServerId);
                 return everCollected
                     ? McpHelpers.Status(
@@ -551,6 +557,12 @@ public sealed class McpHealthTools
                 /* The denominator is whether we LOOKED, not whether we ever FOUND anything: these are
                    edge tables, and a healthy server that never blocked has no rows to find. Same words
                    as Darling's twin. */
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "blocked_process_report");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 var everRan =
                     await dataService.HasAnyBlockingCollectorRunAsync(resolved.ServerId)
                     || await dataService.HasAnyDeadlockCollectorRunAsync(resolved.ServerId);

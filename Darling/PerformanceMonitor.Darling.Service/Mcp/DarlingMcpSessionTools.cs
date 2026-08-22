@@ -49,7 +49,8 @@ public sealed class DarlingMcpSessionTools
         {
             var rows = await DarlingSessionReader.GetLatestSessionStatsAsync(postgres, resolved.ServerId);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No session statistics available. The session collector may not have run yet.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "session_stats")
+                    ?? McpHelpers.Status("unavailable", "No session statistics available. The session collector may not have run yet.");
 
             var totalConnections = rows.Sum(r => r.ConnectionCount);
             var totalRunning = rows.Sum(r => r.RunningCount);
@@ -110,7 +111,8 @@ public sealed class DarlingMcpSessionTools
             var rows = await DarlingSessionReader.GetActiveQueriesAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No active query snapshots found in the requested time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_snapshots")
+                    ?? McpHelpers.Status("empty", "No active query snapshots found in the requested time range.");
 
             IEnumerable<DarlingSessionReader.ActiveQueryRow> filtered = rows;
 
@@ -184,7 +186,8 @@ public sealed class DarlingMcpSessionTools
             var rows = await DarlingSessionReader.GetWaitingTasksAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No waiting tasks captured in the specified time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "waiting_tasks")
+                    ?? McpHelpers.Status("empty", "No waiting tasks captured in the specified time range.");
 
             var result = rows.Take(limit).Select(r => new
             {

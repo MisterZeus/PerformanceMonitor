@@ -112,7 +112,8 @@ public sealed class DarlingMcpConfigHistoryTools
             var snapshots = await DarlingConfigHistoryReader.GetDatabaseConfigSnapshotsAsync(postgres, resolved.ServerId);
             var changes = ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, windowStart, UpperEdge(as_of, windowEndNaive));
             if (changes.Count == 0)
-                return NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)));
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_config")
+                    ?? NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)));
 
             var result = changes.Select(c => new
             {
@@ -199,9 +200,10 @@ public sealed class DarlingMcpConfigHistoryTools
         {
             var rows = await DarlingConfigHistoryReader.GetLatestDatabaseScopedConfigAsync(postgres, resolved.ServerId);
             if (rows.Count == 0)
-                return McpHelpers.Status(
-                    "unavailable",
-                    "No database-scoped configuration data available. The config collector may not have run yet.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_scoped_config")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        "No database-scoped configuration data available. The config collector may not have run yet.");
 
             IEnumerable<DarlingConfigHistoryReader.DatabaseScopedConfigReadRow> filtered = rows;
             if (!string.IsNullOrEmpty(database_name))
@@ -246,9 +248,10 @@ public sealed class DarlingMcpConfigHistoryTools
         {
             var rows = await DarlingConfigHistoryReader.GetLatestQueryStoreHealthAsync(postgres, resolved.ServerId);
             if (rows.Count == 0)
-                return McpHelpers.Status(
-                    "unavailable",
-                    "No Query Store health data available. The query_store_health collector runs hourly (SQL Server 2016+); a server with no rows either predates Query Store or has not completed a cycle yet.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store_health")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        "No Query Store health data available. The query_store_health collector runs hourly (SQL Server 2016+); a server with no rows either predates Query Store or has not completed a cycle yet.");
 
             IEnumerable<DarlingConfigHistoryReader.QueryStoreHealthReadRow> filtered = rows;
             if (!string.IsNullOrEmpty(database_name))

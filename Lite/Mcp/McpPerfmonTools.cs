@@ -25,7 +25,8 @@ public sealed class McpPerfmonTools
             var rows = await dataService.GetLatestPerfmonStatsAsync(resolved.ServerId);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status("unavailable", "No perfmon stats available.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "perfmon_stats")
+                    ?? McpHelpers.Status("unavailable", "No perfmon stats available.");
             }
 
             IEnumerable<PerfmonRow> filtered = rows;
@@ -74,6 +75,16 @@ public sealed class McpPerfmonTools
             var points = await dataService.GetPerfmonTrendAsync(resolved.ServerId, counter_name, hours_back, asOfUtc: windowEnd);
             if (points.Count == 0)
             {
+                /* The engine question comes BEFORE the distinct-counter probe, not after it. Both are on
+                   the miss path, so either order keeps the property that matters — but a permanently gated
+                   engine takes this branch on every call, forever, and neither the probe nor the PLE branch
+                   below could tell it anything. Asking first makes that case one query instead of two. */
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "perfmon_stats");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 /* No points can mean three different things to a caller. Distinguish them so an LLM
                    doesn't read a bad counter name as "this metric looks fine." */
                 var collected = await dataService.GetDistinctPerfmonCountersAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);

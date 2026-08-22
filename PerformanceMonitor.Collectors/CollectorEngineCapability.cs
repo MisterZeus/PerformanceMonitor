@@ -121,6 +121,39 @@ public static class CollectorEngineCapability
             ["ag_replica_states"] = "the Always On availability replica states",
             ["ag_database_replica_states"] = "the Always On per-database replica states",
 
+            /* The collectors that run on EVERY SQL Server, and therefore had nothing to say while the
+               EDITION axis was the only one (#2532). On a PostgreSQL target every one of them is a
+               permanent gap, so the reads they serve now ask - and a read that asks without a noun phrase
+               here falls back to "the data this read is served from", which is true and tells an operator
+               nothing they did not already know. */
+            ["cpu_utilization"] = "the SQL Server CPU utilization history",
+            ["wait_stats"] = "the sys.dm_os_wait_stats cumulative totals",
+            ["waiting_tasks"] = "the sys.dm_os_waiting_tasks samples",
+            ["memory_stats"] = "the instance memory snapshot - server memory, buffer pool and plan cache",
+            ["memory_clerks"] = "the sys.dm_os_memory_clerks consumer list",
+            ["memory_grant_stats"] = "the resource-semaphore and memory-grant snapshot",
+            ["file_io_stats"] = "the sys.dm_io_virtual_file_stats per-file I/O totals",
+            ["tempdb_stats"] = "the tempdb space-usage snapshot",
+            ["perfmon_stats"] = "the sys.dm_os_performance_counters values",
+            ["query_stats"] = "the sys.dm_exec_query_stats plan-cache history",
+            ["query_snapshots"] = "the sys.dm_exec_requests active-query snapshots",
+            ["procedure_stats"] = "the sys.dm_exec_procedure_stats history",
+            ["query_store"] = "the Query Store runtime statistics",
+            ["query_store_health"] = "the per-database Query Store configuration and health",
+            ["plan_cache_stats"] = "the plan-cache composition statistics",
+            ["plan_correction"] = "the sys.dm_db_tuning_recommendations automatic plan corrections",
+            ["pvs_stats"] = "the persistent version store statistics",
+            ["session_stats"] = "the connection and session snapshot",
+            ["blocked_process_report"] = "the blocked process report capture",
+            ["deadlocks"] = "the captured deadlock graphs",
+            ["latch_stats"] = "the sys.dm_os_latch_stats totals",
+            ["spinlock_stats"] = "the sys.dm_os_spinlock_stats totals",
+            ["long_query_completions"] = "the long-running query completion capture",
+            ["database_config"] = "the sys.databases per-database settings",
+            ["database_scoped_config"] = "the sys.database_scoped_configurations settings",
+            ["database_size_stats"] = "the per-database file size and space usage",
+            ["index_object_stats"] = "the per-index usage, size and contention statistics",
+            ["server_properties"] = "the SERVERPROPERTY instance properties",
             /* The PostgreSQL side of the same table (#2532). The first two read an Aurora-only surface, so
                they are permanent gaps on stock PostgreSQL — the mirror of the twelve above, which are
                permanent gaps on Azure SQL Database. The other six are here because their reads ask the

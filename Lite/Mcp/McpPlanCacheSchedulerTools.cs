@@ -36,7 +36,8 @@ public sealed class McpPlanCacheSchedulerTools
             var summary = await dataService.GetPlanCacheSummaryAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             var cacheTypes = await dataService.GetPlanCacheSnapshotAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (summary.TotalPlans == 0 && cacheTypes.Count == 0)
-                return McpHelpers.Status("unavailable", "No plan cache statistics available in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "plan_cache_stats")
+                    ?? McpHelpers.Status("unavailable", "No plan cache statistics available in the requested time range.");
 
             var bloat = LocalDataService.ClassifyPlanCacheBloat(summary.TotalPlans, summary.SingleUsePlans);
             var singleUsePercent = summary.TotalPlans > 0

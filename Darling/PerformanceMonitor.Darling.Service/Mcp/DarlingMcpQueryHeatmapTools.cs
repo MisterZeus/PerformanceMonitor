@@ -177,9 +177,10 @@ public sealed class DarlingMcpQueryHeatmapTools
 
         if (!hasAny)
         {
-            return McpHelpers.Status(
-                "unavailable",
-                $"No query stats have EVER been collected for {serverName}, so this is NOT a report of a quiet server — there is nothing to draw. query_stats is a PERIODIC table rather than an edge table: the collector writes rows every cycle for whatever is in the plan cache, so an empty history means nobody looked. Check get_collection_health for this server.");
+            return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, serverId, serverName, "query_stats")
+                ?? McpHelpers.Status(
+                    "unavailable",
+                    $"No query stats have EVER been collected for {serverName}, so this is NOT a report of a quiet server — there is nothing to draw. query_stats is a PERIODIC table rather than an edge table: the collector writes rows every cycle for whatever is in the plan cache, so an empty history means nobody looked. Check get_collection_health for this server.");
         }
 
         if (!hasInWindow)
