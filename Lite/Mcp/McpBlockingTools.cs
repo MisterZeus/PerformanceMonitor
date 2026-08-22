@@ -32,7 +32,8 @@ public sealed class McpBlockingTools
             var rows = await dataService.GetRecentDeadlocksAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status("empty", "No deadlocks found in the specified time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "deadlocks")
+                    ?? McpHelpers.Status("empty", "No deadlocks found in the specified time range.");
             }
 
             var result = rows.Take(limit).Select(r => new
@@ -83,7 +84,8 @@ public sealed class McpBlockingTools
             var withXml = rows.Where(r => r.HasDeadlockXml).Take(limit).ToList();
             if (withXml.Count == 0)
             {
-                return McpHelpers.Status("empty", "No deadlock XML available in the specified time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "deadlocks")
+                    ?? McpHelpers.Status("empty", "No deadlock XML available in the specified time range.");
             }
 
             var result = withXml.Select(r => new
@@ -130,7 +132,8 @@ public sealed class McpBlockingTools
             var rows = await dataService.GetRecentBlockedProcessReportsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status("empty", "No blocked process reports found.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "blocked_process_report")
+                    ?? McpHelpers.Status("empty", "No blocked process reports found.");
             }
 
             var result = rows.Take(limit).Select(r => new
@@ -207,7 +210,8 @@ public sealed class McpBlockingTools
             var withXml = rows.Where(r => r.HasReportXml).Take(limit).ToList();
             if (withXml.Count == 0)
             {
-                return McpHelpers.Status("empty", "No blocked process report XML available in the specified time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "blocked_process_report")
+                    ?? McpHelpers.Status("empty", "No blocked process report XML available in the specified time range.");
             }
 
             var result = withXml.Select(r => new
@@ -273,6 +277,12 @@ public sealed class McpBlockingTools
                 */
                 var captures = await dataService.GetBlockingCaptureCountsAsync(
                     resolved.ServerId, hours_back, asOfUtc: anchorEnd);
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "blocked_process_report");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return await EmptyTrend(
                     "blocking", resolved.ServerName, hours_back, captures,
                     () => dataService.HasAnyBlockingCollectorRunAsync(resolved.ServerId));
@@ -318,6 +328,12 @@ public sealed class McpBlockingTools
                 /* Same two facts as the blocking trend above, same denominator, same reason. */
                 var captures = await dataService.GetDeadlockCaptureCountsAsync(
                     resolved.ServerId, hours_back, asOfUtc: windowEnd);
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "deadlocks");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return await EmptyTrend(
                     /* SINGULAR: the subject lands in "No {subject} was recorded", and "no deadlocks
                        was recorded" is not a sentence. It also reads correctly in the other two,
@@ -375,6 +391,12 @@ public sealed class McpBlockingTools
                     and filtering the probe the same way would call that server uncollected. Darling's twin
                     makes the same distinction with the same words.
                 */
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "wait_stats");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return await dataService.HasAnyWaitStatAsync(resolved.ServerId)
                     ? McpHelpers.Status(
                         "empty",

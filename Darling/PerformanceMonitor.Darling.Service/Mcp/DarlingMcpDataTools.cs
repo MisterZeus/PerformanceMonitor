@@ -65,7 +65,8 @@ public sealed class DarlingMcpDataTools
         {
             var rows = await DarlingDataReader.GetCpuUtilizationAsync(postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No CPU utilization data available.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "cpu_utilization")
+                    ?? McpHelpers.Status("unavailable", "No CPU utilization data available.");
 
             /* Downsample to 1-minute buckets to avoid overwhelming LLM context (Lite's projection). */
             var bucketed = rows
@@ -117,7 +118,8 @@ public sealed class DarlingMcpDataTools
             var now = windowEnd;
             var rows = await DarlingDataReader.GetWaitStatsAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No wait stats data available for the specified time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "wait_stats")
+                    ?? McpHelpers.Status("unavailable", "No wait stats data available for the specified time range.");
 
             var result = rows.Take(limit).Select(r =>
             {
@@ -173,6 +175,12 @@ public sealed class DarlingMcpDataTools
                     wants somebody to look at collection, and widening will never fill it. Probed only here,
                     against the SAME source the read walks.
                 */
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "wait_stats");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return await DarlingDataReader.HasAnyWaitStatAsync(postgres, resolved.ServerId)
                     ? McpHelpers.Status(
                         "empty",
@@ -220,10 +228,11 @@ public sealed class DarlingMcpDataTools
                    ones that do have data — Lite's get_wait_trend miss vocabulary. */
                 var collected = await DarlingDataReader.GetDistinctWaitTypesAsync(postgres, resolved.ServerId, start, now);
                 if (collected.Count == 0)
-                    return McpHelpers.Status(
-                        "unavailable",
-                        $"No trend data for wait type '{wait_type}'. No wait stats have been collected for this server in the last {hours_back}h yet " +
-                        "(the collector may not have run, or delta wait stats need a second collection cycle).");
+                    return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "wait_stats")
+                        ?? McpHelpers.Status(
+                            "unavailable",
+                            $"No trend data for wait type '{wait_type}'. No wait stats have been collected for this server in the last {hours_back}h yet " +
+                            "(the collector may not have run, or delta wait stats need a second collection cycle).");
 
                 return McpHelpers.Status(
                     "not_collected",
@@ -264,7 +273,8 @@ public sealed class DarlingMcpDataTools
         {
             var stats = await DarlingDataReader.GetLatestMemoryStatsAsync(postgres, resolved.ServerId);
             if (stats == null)
-                return McpHelpers.Status("unavailable", "No memory stats available.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_stats")
+                    ?? McpHelpers.Status("unavailable", "No memory stats available.");
 
             var utilization = stats.TotalPhysicalMemoryMb > 0
                 ? (stats.TotalPhysicalMemoryMb - stats.AvailablePhysicalMemoryMb) / stats.TotalPhysicalMemoryMb * 100
@@ -312,9 +322,10 @@ public sealed class DarlingMcpDataTools
                     the caller does need is to be told that an empty clerk list is NEVER a quiet period,
                     because on a live SQL Server it cannot be: the DMV always has clerks.
                 */
-                return McpHelpers.Status(
-                    "unavailable",
-                    $"No memory-clerk snapshot is available for {resolved.ServerName}. This read returns the LATEST snapshot rather than a window, so an empty result is never a quiet period — a live SQL Server always has memory clerks. It means nothing the memory_clerks collector stored is still retained, either because it has not run for this server or because its rows have aged out. Check get_collection_health and get_collection_log for the memory_clerks collector.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_clerks")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        $"No memory-clerk snapshot is available for {resolved.ServerName}. This read returns the LATEST snapshot rather than a window, so an empty result is never a quiet period — a live SQL Server always has memory clerks. It means nothing the memory_clerks collector stored is still retained, either because it has not run for this server or because its rows have aged out. Check get_collection_health and get_collection_log for the memory_clerks collector.");
 
             var result = rows.Select(r => new
             {
@@ -346,7 +357,8 @@ public sealed class DarlingMcpDataTools
         {
             var rows = await DarlingDataReader.GetLatestFileIoStatsAsync(postgres, resolved.ServerId);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No file I/O stats available.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "file_io_stats")
+                    ?? McpHelpers.Status("unavailable", "No file I/O stats available.");
 
             var result = rows.Select(r => new
             {
@@ -394,7 +406,8 @@ public sealed class DarlingMcpDataTools
         {
             var rows = await DarlingDataReader.GetTempDbTrendAsync(postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No TempDB data available.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "tempdb_stats")
+                    ?? McpHelpers.Status("unavailable", "No TempDB data available.");
 
             var result = rows.Select(r => new
             {
@@ -436,7 +449,8 @@ public sealed class DarlingMcpDataTools
         {
             var rows = await DarlingDataReader.GetLatestPerfmonStatsAsync(postgres, resolved.ServerId);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No perfmon stats available.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "perfmon_stats")
+                    ?? McpHelpers.Status("unavailable", "No perfmon stats available.");
 
             IEnumerable<DarlingDataReader.PerfmonRow> filtered = rows;
             if (!string.IsNullOrEmpty(counter_name))
@@ -502,7 +516,8 @@ public sealed class DarlingMcpDataTools
             var rows = await DarlingDataReader.GetTopQueriesByCpuAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, database_name, rollUpByHostObject: rollUp);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats")
+                    ?? McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
 
             var filtered = rows
                 .Where(r => !(parallel_only || min_dop > 1) || (r.MaxDop > 1 && r.MaxDop >= (min_dop > 1 ? min_dop : 2)))
@@ -619,9 +634,10 @@ public sealed class DarlingMcpDataTools
             var now = windowEnd;
             var rows = await DarlingDataReader.GetTopProceduresByCpuAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, database_name);
             if (rows.Count == 0)
-                return McpHelpers.Status(
-                    "unavailable",
-                    "No procedure stats available. Delta-based collection requires at least two collection cycles (~30 minutes) to produce non-zero values.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        "No procedure stats available. Delta-based collection requires at least two collection cycles (~30 minutes) to produce non-zero values.");
 
             /* #2320: same attributed-CPU disclosure as the queries tool — one shared computation,
                same concurrent independent reads. */
@@ -716,13 +732,14 @@ public sealed class DarlingMcpDataTools
             var truncated = floor is DateTime f && f > requestedStart.AddMinutes(90);
 
             if (rows.Count == 0)
-                return McpHelpers.Status(
-                    "unavailable",
-                    $"No Query Store rows for this server in the {hours_back}-hour window searched. Query Store " +
-                    "may not be enabled on the target databases -- or the window reaches past what the raw tier " +
-                    "retains (query_store_stats is dropped at 4 days when the rollups are armed), in which case " +
-                    "nothing was read for the older part of it. Try a shorter window before concluding the " +
-                    "queries did not run.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        $"No Query Store rows for this server in the {hours_back}-hour window searched. Query Store " +
+                        "may not be enabled on the target databases -- or the window reaches past what the raw tier " +
+                        "retains (query_store_stats is dropped at 4 days when the rollups are armed), in which case " +
+                        "nothing was read for the older part of it. Try a shorter window before concluding the " +
+                        "queries did not run.");
 
             var result = rows.Select(r => new
             {
@@ -1023,7 +1040,8 @@ public sealed class DarlingMcpDataTools
         {
             var row = await DarlingDataReader.GetLatestServerPropertiesAsync(postgres, resolved.ServerId);
             if (row == null)
-                return McpHelpers.Status("unavailable", "No server properties available. The properties collector may not have run yet.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "server_properties")
+                    ?? McpHelpers.Status("unavailable", "No server properties available. The properties collector may not have run yet.");
 
             return JsonSerializer.Serialize(new
             {
@@ -1212,6 +1230,12 @@ public sealed class DarlingMcpDataTools
                     "nothing was waiting" reads as an all-clear, while the truth may be that the
                     waiting_tasks collector never ran. A caller told all-clear stops looking.
                 */
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "waiting_tasks");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 var everCollected = await DarlingDataReader.HasAnyWaitingTaskSampleAsync(postgres, resolved.ServerId);
                 return everCollected
                     ? McpHelpers.Status(
@@ -1295,6 +1319,12 @@ public sealed class DarlingMcpDataTools
                     checked because either can be off alone, and the deadlock collector is separate from
                     both -- the verdict covers its series too.
                 */
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 var everRan =
                     await DarlingBlockingTrendReader.HasAnyBlockingCollectorRunAsync(postgres, resolved.ServerId)
                     || await DarlingBlockingTrendReader.HasAnyDeadlockCollectorRunAsync(postgres, resolved.ServerId);

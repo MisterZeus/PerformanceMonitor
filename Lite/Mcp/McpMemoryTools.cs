@@ -23,7 +23,8 @@ public sealed class McpMemoryTools
             var stats = await dataService.GetLatestMemoryStatsAsync(resolved.ServerId);
             if (stats == null)
             {
-                return McpHelpers.Status("unavailable", "No memory stats available.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "memory_stats")
+                    ?? McpHelpers.Status("unavailable", "No memory stats available.");
             }
 
             return JsonSerializer.Serialize(new
@@ -75,6 +76,12 @@ public sealed class McpMemoryTools
                     a server the collector has never touched wants somebody to go look at collection, and
                     widening will never fill it. Probed only here, against the SAME source the trend read.
                 */
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "memory_stats");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return await dataService.HasAnyMemoryStatAsync(resolved.ServerId)
                     ? McpHelpers.Status(
                         "empty",
@@ -129,9 +136,10 @@ public sealed class McpMemoryTools
                     NEVER a quiet period, because on a live SQL Server it cannot be. Same words as Darling's
                     twin.
                 */
-                return McpHelpers.Status(
-                    "unavailable",
-                    $"No memory-clerk snapshot is available for {resolved.ServerName}. This read returns the LATEST snapshot rather than a window, so an empty result is never a quiet period — a live SQL Server always has memory clerks. It means nothing the memory_clerks collector stored is still retained, either because it has not run for this server or because its rows have aged out. Check get_collection_health and get_collection_log for the memory_clerks collector.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "memory_clerks")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        $"No memory-clerk snapshot is available for {resolved.ServerName}. This read returns the LATEST snapshot rather than a window, so an empty result is never a quiet period — a live SQL Server always has memory clerks. It means nothing the memory_clerks collector stored is still retained, either because it has not run for this server or because its rows have aged out. Check get_collection_health and get_collection_log for the memory_clerks collector.");
 
             var result = rows.Select(r => new
             {
@@ -222,7 +230,8 @@ Not available on Azure SQL DB (ring buffer not exposed). For actionable interpre
             var rows = await dataService.GetResourceSemaphoreSnapshotAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status("unavailable", "No memory grant data available.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "memory_grant_stats")
+                    ?? McpHelpers.Status("unavailable", "No memory grant data available.");
             }
 
             var result = rows.Select(r => new
@@ -275,7 +284,8 @@ Not available on Azure SQL DB (ring buffer not exposed). For actionable interpre
             var rows = await dataService.GetMemoryGrantChartDataAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status("unavailable", "No memory grant data available.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "memory_grant_stats")
+                    ?? McpHelpers.Status("unavailable", "No memory grant data available.");
             }
 
             /* Return latest snapshot */

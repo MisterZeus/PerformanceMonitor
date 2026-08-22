@@ -23,7 +23,8 @@ public sealed class McpIoTools
             var rows = await dataService.GetLatestFileIoStatsAsync(resolved.ServerId);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status("unavailable", "No file I/O stats available.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "file_io_stats")
+                    ?? McpHelpers.Status("unavailable", "No file I/O stats available.");
             }
 
             var result = rows.Select(r => new
@@ -79,6 +80,12 @@ public sealed class McpIoTools
                    The quiet-window sentence carries one extra clause the others do not need: this read's
                    top_files CTE requires delta_reads or delta_writes above zero, so a genuinely idle file
                    set is empty here even on a server whose file_io_stats collector ran every cycle. */
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "file_io_stats");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return await dataService.HasAnyFileIoStatAsync(resolved.ServerId)
                     ? McpHelpers.Status(
                         "empty",

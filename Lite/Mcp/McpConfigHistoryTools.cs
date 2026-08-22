@@ -83,8 +83,9 @@ public sealed class McpConfigHistoryTools
 
             var rows = await dataService.GetDatabaseConfigChangesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty",
-                    $"No database configuration changes detected in the last {hours_back}h. Config is captured on connect, so at least two snapshots are needed to detect a change.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "database_config")
+                    ?? McpHelpers.Status("empty",
+                        $"No database configuration changes detected in the last {hours_back}h. Config is captured on connect, so at least two snapshots are needed to detect a change.");
 
             return JsonSerializer.Serialize(new
             {

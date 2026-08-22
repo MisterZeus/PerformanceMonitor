@@ -49,7 +49,8 @@ public sealed class DarlingMcpMemoryGrantTools
             var rows = await DarlingMemoryGrantReader.GetResourceSemaphoreLatestAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No memory grant data available.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_grant_stats")
+                    ?? McpHelpers.Status("unavailable", "No memory grant data available.");
 
             var grants = rows.Select(r => new
             {
@@ -101,7 +102,8 @@ public sealed class DarlingMcpMemoryGrantTools
             var rows = await DarlingMemoryGrantReader.GetMemoryGrantsLatestAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No memory grant data available.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_grant_stats")
+                    ?? McpHelpers.Status("unavailable", "No memory grant data available.");
 
             var grants = rows.Select(r => new
             {

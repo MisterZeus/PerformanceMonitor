@@ -71,6 +71,12 @@ public sealed class DarlingMcpTrendTools
                     collection, and widening will never fill it. Probed only here, on the path that already
                     found nothing, against the SAME source the trend read.
                 */
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_stats");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return await DarlingTrendReader.HasAnyMemoryStatAsync(postgres, resolved.ServerId)
                     ? McpHelpers.Status(
                         "empty",
@@ -144,10 +150,11 @@ public sealed class DarlingMcpTrendTools
                 /* Nothing collected at all for this server in the window: the collector likely hasn't
                    produced perfmon data yet (delta counters need two cycles). Not retrievable now. */
                 if (collected.Count == 0)
-                    return McpHelpers.Status(
-                        "unavailable",
-                        $"No trend data for counter '{counter_name}'. No perfmon counters have been collected for this server in the last {hours_back}h yet " +
-                        "(the collector may not have run, or delta counters need a second collection cycle).");
+                    return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "perfmon_stats")
+                        ?? McpHelpers.Status(
+                            "unavailable",
+                            $"No trend data for counter '{counter_name}'. No perfmon counters have been collected for this server in the last {hours_back}h yet " +
+                            "(the collector may not have run, or delta counters need a second collection cycle).");
 
                 /* Other counters exist but not this one: the name is almost certainly wrong. Hand back
                    the collected names so the caller can correct it. */
@@ -208,6 +215,12 @@ public sealed class DarlingMcpTrendTools
                    carries one extra clause the others do not need: this read's top_files CTE requires
                    delta_reads or delta_writes above zero, so a genuinely idle file set is empty here even
                    on a server whose file_io_stats collector ran every cycle. */
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "file_io_stats");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return await DarlingTrendReader.HasAnyFileIoStatAsync(postgres, resolved.ServerId)
                     ? McpHelpers.Status(
                         "empty",
@@ -264,12 +277,13 @@ public sealed class DarlingMcpTrendTools
                    last N hours" over a span the read never covered — for a query whose history had aged out of
                    the raw tier that is a false statement, not an incomplete one, and an agent acts on it by
                    concluding the query did not run. */
-                return McpHelpers.Status(
-                    "empty",
-                    $"No history found for query_hash '{query_hash}' in database '{database_name}' in the " +
-                    $"{history.Source} tier over the last {hours_back} hours. This means nothing was recorded " +
-                    "for that query_hash in that window in the tier searched — confirm the hash and database " +
-                    "with get_top_queries_by_cpu before concluding the query did not run.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats")
+                    ?? McpHelpers.Status(
+                        "empty",
+                        $"No history found for query_hash '{query_hash}' in database '{database_name}' in the " +
+                        $"{history.Source} tier over the last {hours_back} hours. This means nothing was recorded " +
+                        "for that query_hash in that window in the tier searched — confirm the hash and database " +
+                        "with get_top_queries_by_cpu before concluding the query did not run.");
             }
 
             /* The hourly rollup keeps executions, CPU and elapsed and nothing else. Those columns arrive as
@@ -347,6 +361,12 @@ public sealed class DarlingMcpTrendTools
                    does — v_query_stats is the payload-resolving view on a V38+ store, and probing a
                    different relation from the one the read walks is how an existence probe ends up
                    reporting the wrong branch. */
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return await DarlingTrendReader.HasAnyQueryStatAsync(postgres, resolved.ServerId)
                     ? McpHelpers.Status(
                         "empty",
@@ -387,6 +407,12 @@ public sealed class DarlingMcpTrendTools
 
             if (points.Count == 0)
             {
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return await EmptyTrendAsync(
                     DarlingTrendReader.HasAnyProcedureStatAsync(postgres, resolved.ServerId),
                     resolved.ServerName, hours_back, "stored-procedure",
@@ -427,6 +453,12 @@ public sealed class DarlingMcpTrendTools
                     every database on the instance. A server with no Query Store data is not a server with
                     no slow queries, so the message names that cause first.
                 */
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return await EmptyTrendAsync(
                     DarlingTrendReader.HasAnyQueryStoreStatAsync(postgres, resolved.ServerId),
                     resolved.ServerName, hours_back, "Query Store",

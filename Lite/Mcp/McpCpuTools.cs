@@ -28,7 +28,8 @@ public sealed class McpCpuTools
             var rows = await dataService.GetCpuUtilizationAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status("unavailable", "No CPU utilization data available.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "cpu_utilization")
+                    ?? McpHelpers.Status("unavailable", "No CPU utilization data available.");
             }
 
             /* Downsample to 1-minute buckets to avoid overwhelming LLM context */

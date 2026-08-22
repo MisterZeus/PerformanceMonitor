@@ -133,9 +133,10 @@ public sealed class DarlingMcpQueryStoreRegressionTools
 
         if (!hasBaseline && !hasRecent)
         {
-            return McpHelpers.Status(
-                "unavailable",
-                $"No Query Store data has EVER been collected for {serverName}, so this is NOT a report of zero regressions — there is nothing to compare. Query Store may be OFF on this server's databases, which get_query_store_health will say; otherwise check that collection is running for this server.");
+            return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, serverId, serverName, "query_store")
+                ?? McpHelpers.Status(
+                    "unavailable",
+                    $"No Query Store data has EVER been collected for {serverName}, so this is NOT a report of zero regressions — there is nothing to compare. Query Store may be OFF on this server's databases, which get_query_store_health will say; otherwise check that collection is running for this server.");
         }
 
         if (!hasBaseline)

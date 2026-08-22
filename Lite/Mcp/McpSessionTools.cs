@@ -30,7 +30,8 @@ public sealed class McpSessionTools
         {
             var rows = await dataService.GetLatestQuerySnapshotsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No active query snapshots found in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_snapshots")
+                    ?? McpHelpers.Status("empty", "No active query snapshots found in the requested time range.");
 
             IEnumerable<QuerySnapshotRow> filtered = rows;
 
@@ -95,7 +96,8 @@ public sealed class McpSessionTools
         {
             var rows = await dataService.GetLatestSessionStatsAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No session statistics available. The session collector may not have run yet.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "session_stats")
+                    ?? McpHelpers.Status("unavailable", "No session statistics available. The session collector may not have run yet.");
 
             var totalConnections = rows.Sum(r => r.ConnectionCount);
             var totalRunning = rows.Sum(r => r.RunningCount);

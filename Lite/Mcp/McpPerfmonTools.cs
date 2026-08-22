@@ -25,7 +25,8 @@ public sealed class McpPerfmonTools
             var rows = await dataService.GetLatestPerfmonStatsAsync(resolved.ServerId);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status("unavailable", "No perfmon stats available.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "perfmon_stats")
+                    ?? McpHelpers.Status("unavailable", "No perfmon stats available.");
             }
 
             IEnumerable<PerfmonRow> filtered = rows;
@@ -90,10 +91,11 @@ public sealed class McpPerfmonTools
                 /* Nothing collected at all for this server in the window: the collector likely hasn't
                    produced perfmon data yet (delta counters need two cycles). Not retrievable now. */
                 if (collected.Count == 0)
-                    return McpHelpers.Status(
-                        "unavailable",
-                        $"No trend data for counter '{counter_name}'. No perfmon counters have been collected for this server in the last {hours_back}h yet " +
-                        "(the collector may not have run, or delta counters need a second collection cycle).");
+                    return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "perfmon_stats")
+                        ?? McpHelpers.Status(
+                            "unavailable",
+                            $"No trend data for counter '{counter_name}'. No perfmon counters have been collected for this server in the last {hours_back}h yet " +
+                            "(the collector may not have run, or delta counters need a second collection cycle).");
 
                 /* Other counters exist but not this one: the name is almost certainly wrong. Hand back
                    the collected names so the caller can correct it. */

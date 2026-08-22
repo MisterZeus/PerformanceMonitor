@@ -32,7 +32,8 @@ public sealed class McpWaitTools
             var rows = await dataService.GetWaitStatsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status("unavailable", "No wait stats data available for the specified time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "wait_stats")
+                    ?? McpHelpers.Status("unavailable", "No wait stats data available for the specified time range.");
             }
 
             var result = rows.Take(limit).Select(r => new
@@ -84,6 +85,12 @@ public sealed class McpWaitTools
                     wants somebody to look at collection, and widening will never fill it. Same words as
                     Darling's twin.
                 */
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "wait_stats");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return await dataService.HasAnyWaitStatAsync(resolved.ServerId)
                     ? McpHelpers.Status(
                         "empty",
@@ -130,10 +137,11 @@ public sealed class McpWaitTools
                    unknown here vs. nothing collected at all, and hand back the ones that do have data. */
                 var collected = await dataService.GetDistinctWaitTypesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
                 if (collected.Count == 0)
-                    return McpHelpers.Status(
-                        "unavailable",
-                        $"No trend data for wait type '{wait_type}'. No wait stats have been collected for this server in the last {hours_back}h yet " +
-                        "(the collector may not have run, or delta wait stats need a second collection cycle).");
+                    return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "wait_stats")
+                        ?? McpHelpers.Status(
+                            "unavailable",
+                            $"No trend data for wait type '{wait_type}'. No wait stats have been collected for this server in the last {hours_back}h yet " +
+                            "(the collector may not have run, or delta wait stats need a second collection cycle).");
 
                 return McpHelpers.Status(
                     "not_collected",
@@ -185,7 +193,8 @@ public sealed class McpWaitTools
             var rows = await dataService.GetWaitingTasksAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status("empty", "No waiting tasks found.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "waiting_tasks")
+                    ?? McpHelpers.Status("empty", "No waiting tasks found.");
             }
 
             var result = rows.Take(limit).Select(r => new

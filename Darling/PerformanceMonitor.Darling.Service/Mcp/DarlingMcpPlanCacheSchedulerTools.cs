@@ -49,7 +49,8 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
             var rows = await DarlingPlanCacheSchedulerReader.GetPlanCacheBloatAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No plan cache statistics available in the requested time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "plan_cache_stats")
+                    ?? McpHelpers.Status("unavailable", "No plan cache statistics available in the requested time range.");
 
             var totalPlans = rows.Sum(r => (long)r.TotalPlans);
             var totalSingleUse = rows.Sum(r => (long)r.SingleUsePlans);

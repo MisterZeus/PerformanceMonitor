@@ -67,7 +67,8 @@ public sealed class DarlingMcpBlockingTools
             var rows = await DarlingBlockingReader.GetRecentBlockedProcessReportsAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No blocking events found in the specified time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report")
+                    ?? McpHelpers.Status("empty", "No blocking events found in the specified time range.");
 
             /* #2159: fingerprint the WHOLE window, then filter, then cap. Capping first would let `limit`
                discard the very incident the key names — the caller asked for one specific incident, not for
@@ -170,7 +171,8 @@ public sealed class DarlingMcpBlockingTools
             var rows = await DarlingBlockingReader.GetRecentDeadlocksAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No deadlocks found in the specified time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "deadlocks")
+                    ?? McpHelpers.Status("empty", "No deadlocks found in the specified time range.");
 
             /* #2159: see get_blocking — fingerprint the window, filter, then cap. */
             var examined = rows.Count;
@@ -243,7 +245,8 @@ public sealed class DarlingMcpBlockingTools
                consume one of the `limit` slots the caller wanted spent on real graphs. */
             var candidates = rows.Where(r => r.HasDeadlockXml).ToList();
             if (candidates.Count == 0)
-                return McpHelpers.Status("empty", "No deadlock XML available in the specified time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "deadlocks")
+                    ?? McpHelpers.Status("empty", "No deadlock XML available in the specified time range.");
 
             var examined = candidates.Count;
             var keys = DarlingIncidentFingerprint.DeadlockKeys(
@@ -309,7 +312,8 @@ public sealed class DarlingMcpBlockingTools
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             var withXml = rows.Where(r => r.HasReportXml).Take(limit).ToList();
             if (withXml.Count == 0)
-                return McpHelpers.Status("empty", "No blocked process report XML available in the specified time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report")
+                    ?? McpHelpers.Status("empty", "No blocked process report XML available in the specified time range.");
 
             var result = withXml.Select(r => new
             {
@@ -366,6 +370,12 @@ public sealed class DarlingMcpBlockingTools
                 */
                 var captures = await DarlingBlockingTrendReader.GetBlockingCaptureCountsAsync(
                     postgres, resolved.ServerId, start, now);
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return await EmptyTrend(
                     "blocking", resolved.ServerName, hours_back, captures,
                     () => DarlingBlockingTrendReader.HasAnyBlockingCollectorRunAsync(postgres, resolved.ServerId));
@@ -409,6 +419,12 @@ public sealed class DarlingMcpBlockingTools
                 /* Same two facts as the blocking trend above, same denominator, same reason. */
                 var captures = await DarlingBlockingTrendReader.GetDeadlockCaptureCountsAsync(
                     postgres, resolved.ServerId, start, now);
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "deadlocks");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return await EmptyTrend(
                     /* SINGULAR: the subject lands in "No {subject} was recorded", and "no deadlocks
                        was recorded" is not a sentence. It also reads correctly in the other two,
@@ -466,6 +482,12 @@ public sealed class DarlingMcpBlockingTools
                     wait stats for months and never taken a lock wait is the all-clear this branch is for,
                     and filtering the probe the same way would call that server uncollected.
                 */
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "wait_stats");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return await DarlingDataReader.HasAnyWaitStatAsync(postgres, resolved.ServerId)
                     ? McpHelpers.Status(
                         "empty",

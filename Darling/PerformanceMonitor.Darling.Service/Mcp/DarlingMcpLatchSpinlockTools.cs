@@ -59,7 +59,8 @@ public sealed class DarlingMcpLatchSpinlockTools
             var rows = await DarlingLatchSpinlockReader.GetLatchStatsTopNAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, top);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No latch statistics available in the requested time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "latch_stats")
+                    ?? McpHelpers.Status("unavailable", "No latch statistics available in the requested time range.");
 
             var latches = rows.Select(r => new
             {
@@ -113,7 +114,8 @@ public sealed class DarlingMcpLatchSpinlockTools
             var rows = await DarlingLatchSpinlockReader.GetSpinlockStatsTopNAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, top);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No spinlock statistics available in the requested time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "spinlock_stats")
+                    ?? McpHelpers.Status("unavailable", "No spinlock statistics available in the requested time range.");
 
             var spinlocks = rows.Select(r => new
             {

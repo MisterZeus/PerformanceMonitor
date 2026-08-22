@@ -83,9 +83,10 @@ public sealed class DarlingMcpConfigTools
         {
             var rows = await DarlingCurrentConfigReader.GetLatestDatabaseConfigAsync(postgres, resolved.ServerId);
             if (rows.Count == 0)
-                return McpHelpers.Status(
-                    "unavailable",
-                    "No database configuration data available. The config collector may not have run yet.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_config")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        "No database configuration data available. The config collector may not have run yet.");
 
             IEnumerable<DarlingCurrentConfigReader.DatabaseConfigReadRow> filtered = rows;
             if (!string.IsNullOrEmpty(database_name))

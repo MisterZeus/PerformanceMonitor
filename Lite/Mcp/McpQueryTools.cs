@@ -41,7 +41,8 @@ public sealed class McpQueryTools
             var rows = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_stats")
+                    ?? McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
             }
 
             var filtered = rows
@@ -151,9 +152,10 @@ public sealed class McpQueryTools
             var rows = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status(
-                    "unavailable",
-                    "No procedure stats available. Delta-based collection requires at least two collection cycles (~30 minutes) to produce non-zero values.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "procedure_stats")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        "No procedure stats available. Delta-based collection requires at least two collection cycles (~30 minutes) to produce non-zero values.");
             }
 
             /* #2320: same attributed-CPU disclosure as the queries tool — one shared computation, one
@@ -239,7 +241,8 @@ public sealed class McpQueryTools
             var rows = await dataService.GetQueryStoreTopQueriesAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status("unavailable", "No Query Store data available. Query Store may not be enabled on target databases.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_store")
+                    ?? McpHelpers.Status("unavailable", "No Query Store data available. Query Store may not be enabled on target databases.");
             }
 
             var result = rows.Select(r => new
@@ -368,9 +371,10 @@ public sealed class McpQueryTools
 
         if (!hasBaseline && !hasRecent)
         {
-            return McpHelpers.Status(
-                "unavailable",
-                $"No Query Store data has EVER been collected for {serverName}, so this is NOT a report of zero regressions — there is nothing to compare. Query Store may be OFF on this server's databases, which get_query_store_health will say; otherwise check that collection is running for this server.");
+            return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverId, serverName, "query_store")
+                ?? McpHelpers.Status(
+                    "unavailable",
+                    $"No Query Store data has EVER been collected for {serverName}, so this is NOT a report of zero regressions — there is nothing to compare. Query Store may be OFF on this server's databases, which get_query_store_health will say; otherwise check that collection is running for this server.");
         }
 
         if (!hasBaseline)
@@ -541,9 +545,10 @@ public sealed class McpQueryTools
 
         if (!hasAny)
         {
-            return McpHelpers.Status(
-                "unavailable",
-                $"No query stats have EVER been collected for {serverName}, so this is NOT a report of a quiet server — there is nothing to draw. query_stats is a PERIODIC table rather than an edge table: the collector writes rows every cycle for whatever is in the plan cache, so an empty history means nobody looked. Check get_collection_health for this server.");
+            return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverId, serverName, "query_stats")
+                ?? McpHelpers.Status(
+                    "unavailable",
+                    $"No query stats have EVER been collected for {serverName}, so this is NOT a report of a quiet server — there is nothing to draw. query_stats is a PERIODIC table rather than an edge table: the collector writes rows every cycle for whatever is in the plan cache, so an empty history means nobody looked. Check get_collection_health for this server.");
         }
 
         if (!hasInWindow)
@@ -591,6 +596,12 @@ public sealed class McpQueryTools
                 /* Same two states again, same words as Darling's twin. The probe reads v_query_stats
                    because THIS trend does; Darling's probes the base table because ITS trend does. Each
                    probe follows its own read — what the caller sees is one sentence, not two. */
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_stats");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return await dataService.HasAnyQueryStatAsync(resolved.ServerId)
                     ? McpHelpers.Status(
                         "empty",
@@ -629,6 +640,12 @@ public sealed class McpQueryTools
             var points = await dataService.GetProcedureDurationTrendAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (points.Count == 0)
             {
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "procedure_stats");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return await EmptyTrendAsync(
                     dataService.HasAnyProcedureStatAsync(resolved.ServerId), resolved.ServerName, hours_back,
                     "stored-procedure",
@@ -667,6 +684,12 @@ public sealed class McpQueryTools
                     every database on the instance. A server with no Query Store data is not a server with
                     no slow queries, so the message names that cause first.
                 */
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_store");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return await EmptyTrendAsync(
                     dataService.HasAnyQueryStoreStatAsync(resolved.ServerId), resolved.ServerName, hours_back,
                     "Query Store",
@@ -743,7 +766,8 @@ public sealed class McpQueryTools
             var rows = await dataService.GetQueryStatsHistoryAsync(resolved.ServerId, database_name, query_hash, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status("empty", $"No history found for query_hash '{query_hash}' in database '{database_name}' within the last {hours_back} hours.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_stats")
+                    ?? McpHelpers.Status("empty", $"No history found for query_hash '{query_hash}' in database '{database_name}' within the last {hours_back} hours.");
             }
 
             var result = rows.Select(r => new
