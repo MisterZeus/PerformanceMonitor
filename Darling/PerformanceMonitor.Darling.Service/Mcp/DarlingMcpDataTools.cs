@@ -1219,19 +1219,26 @@ public sealed class DarlingMcpDataTools
             if (blocking.Count == 0 && deadlocks.Count == 0)
             {
                 /*
-                    Same trap as the waits trend, and the reassuring answer is again the wrong one: an
-                    operator told "no blocking" stops looking. Both capture paths are checked, because
-                    either alone can be off on a given server -- reporting calm while the only source that
-                    would have shown it was never collected is the failure this avoids.
+                    The denominator is whether we LOOKED, not whether we ever FOUND anything. Blocking and
+                    deadlocks are edge tables: a server collected perfectly for months that simply never
+                    blocked has no rows at all, so asking "was an event ever captured" answers no and
+                    reports a healthy server as uncollected -- the reassuring-answer failure inverted, and
+                    a false alarm sends someone to fix collection that is working.
+
+                    So this asks collection_log for a SUCCESSFUL run of either capture path. Both are
+                    checked because either can be off alone, and the deadlock collector is separate from
+                    both -- the verdict covers its series too.
                 */
-                var everCaptured = await DarlingDataReader.HasAnyBlockingCaptureAsync(postgres, resolved.ServerId);
-                return everCaptured
+                var everRan =
+                    await DarlingBlockingTrendReader.HasAnyBlockingCollectorRunAsync(postgres, resolved.ServerId)
+                    || await DarlingBlockingTrendReader.HasAnyDeadlockCollectorRunAsync(postgres, resolved.ServerId);
+                return everRan
                     ? McpHelpers.Status(
                         "empty",
-                        $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {Math.Abs(hours_back)} hour(s). This server HAS captured blocking before, so the window is genuinely clear.")
+                        $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {Math.Abs(hours_back)} hour(s). The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind.")
                     : McpHelpers.Status(
                         "unavailable",
-                        $"No blocking has EVER been captured for {resolved.ServerName}, so this is NOT a clean bill of health — there is nothing to read. Blocked-process reports need the XE session running, or the DMV blocking snapshot collector enabled; check those before concluding this server does not block.");
+                        $"The blocking collectors have NEVER run successfully for {resolved.ServerName}, so this is NOT a clean bill of health — nothing looked. Blocked-process reports need the XE session running, or the DMV blocking snapshot collector enabled; check those before concluding this server does not block.");
             }
 
             return JsonSerializer.Serialize(new

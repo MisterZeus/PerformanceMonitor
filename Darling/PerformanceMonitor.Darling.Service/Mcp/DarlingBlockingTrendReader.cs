@@ -168,12 +168,14 @@ internal static class DarlingBlockingTrendReader
     /// server whose collectors have run before has a GAP in this window (widen it, or go look at collection
     /// health), while one that has never run them is not collecting blocking at all. Both are "not an
     /// all-clear" and they want different next moves. LIMIT 1, so it stops at the first row.</para>
-    /// <para>NOT the same question as the neighbouring <c>DarlingDataReader.HasAnyBlockingCaptureAsync</c>,
-    /// which asks whether an EVENT was ever captured. That one is right for get_blocking_stats, whose
-    /// verdict is about severity; it is wrong here, because a server that has been collected perfectly for
-    /// months and simply never blocked has no event rows and would be reported as never captured — the
-    /// reassuring-answer failure this read exists to prevent, inverted. Hence "collector run", not
-    /// "capture": the denominator is whether we LOOKED, not whether we found something.</para>
+    /// <para>NOT the same question as asking whether an EVENT was ever captured. A server collected
+    /// perfectly for months that simply never blocked has no event rows, and an event-existence probe
+    /// reports it as never captured — the reassuring-answer failure inverted, sending someone to fix
+    /// collection that is working. Hence "collector run", not "capture": the denominator is whether we
+    /// LOOKED, not whether we found something.</para>
+    /// <para>This applies to get_blocking_stats too, which originally used an event-existence probe on the
+    /// grounds that its verdict is about severity. That reasoning does not survive contact with a healthy
+    /// server: zero severity is the NORMAL state, so the same false alarm fires. It uses these.</para>
     /// </summary>
     public const string HasAnyBlockingCollectorRunSql = """
         SELECT 1
