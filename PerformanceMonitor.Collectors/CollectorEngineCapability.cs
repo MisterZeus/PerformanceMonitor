@@ -86,7 +86,6 @@ public static class CollectorEngineCapability
             ["default_trace_events"] = "the built-in default trace",
             ["cpu_scheduler_stats"] = "the sys.dm_os_schedulers scheduler snapshot",
             ["memory_pressure_events"] = "the RING_BUFFER_RESOURCE_MONITOR ring buffer",
-            ["tempdb_stats"] = "the tempdb space-usage snapshot",
             ["running_jobs"] = "the SQL Agent running-job snapshot",
             ["job_history"] = "the SQL Agent job history",
             ["agent_status"] = "the SQL Agent service status",

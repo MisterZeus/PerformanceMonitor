@@ -28,8 +28,7 @@ public sealed class McpTempDbTools
             var rows = await dataService.GetTempDbTrendAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "tempdb_stats")
-                    ?? McpHelpers.Status("unavailable", "No TempDB data available.");
+                return McpHelpers.Status("unavailable", "No TempDB data available.");
             }
 
             var result = rows.Select(r => new

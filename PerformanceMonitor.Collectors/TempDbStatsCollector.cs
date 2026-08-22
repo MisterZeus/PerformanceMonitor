@@ -18,8 +18,9 @@ namespace PerformanceMonitor.Collectors;
 /// TempDB space usage from tempdb.sys.dm_db_file_space_usage plus the top tempdb-consuming
 /// session (two result sets → one row). Extracted verbatim from Lite's
 /// RemoteCollectorService.TempDb.cs. Always yields exactly one row — zeros when the result
-/// sets are empty — matching the original collector's behavior. Not applicable to Azure SQL
-/// Database; see <see cref="AppliesTo"/>.
+/// sets are empty — matching the original collector's behavior. Applies to every SQL Server
+/// target, Azure SQL Database included; see <see cref="AppliesTo"/> for the measurement that
+/// removed the gate that used to exclude it.
 ///
 /// <para><b>The third thing it captures, and why the DMV alone was not enough (#2515).</b>
 /// <c>dm_db_file_space_usage</c> describes the tempdb data files AS CURRENTLY ALLOCATED, so
@@ -64,28 +65,63 @@ public sealed class TempDbStatsCollector : CollectorDefinitionBase<TempDbStatsCo
     public override string? WatermarkColumn => null;
 
     /// <summary>
-    /// Skips Azure SQL Database, which cannot serve this query at all.
+    /// Applies to every SQL Server target, Azure SQL Database included.
     ///
-    /// <para>The first result set reads <c>tempdb.sys.dm_db_file_space_usage</c> — a THREE-part
-    /// reference out of the connected database — and on Azure SQL DB that requires
-    /// <c>VIEW DATABASE PERFORMANCE STATE</c> <i>in tempdb</i>. A non-administrative login cannot hold
-    /// it there (tempdb permissions are not persistable on Azure SQL DB, and in an elastic pool the
-    /// database is not even the permission boundary), so every cycle failed with error 262 —
-    /// "VIEW DATABASE PERFORMANCE STATE permission denied in database 'tempdb'" — reported from the
-    /// field at 11x consecutive, which is exactly the collection-health pollution the msdb gate on the
-    /// Agent collectors exists to prevent.</para>
+    /// <para><b>The gate that used to be here, and why it is gone (#2512).</b> <c>!target.IsAzureSqlDb</c>
+    /// excluded the whole Azure SQL Database tier, both General Purpose and Hyperscale, on the premise that
+    /// the first result set's THREE-part <c>tempdb.sys.dm_db_file_space_usage</c> reference could not be
+    /// served there — that the collector "could only ever fail" on the platform. That premise was
+    /// checkable and it is false.</para>
     ///
-    /// <para>Azure Managed Instance keeps collecting: it has a real tempdb and full DMV access, so the
-    /// gate is <c>IsAzureSqlDb</c> specifically, not "anything Azure" — the same distinction
-    /// <see cref="ServerConfigCollector"/> and <see cref="TraceFlagsCollector"/> draw.</para>
+    /// <para><b>What was measured</b> (2026-08-22, this collector's SQL verbatim, both result sets, over an
+    /// Entra token). It binds and returns real data on both tiers. <c>GP_S_Gen5_2</c> (EngineEdition 5,
+    /// 12.0.2000.8): user 5.44 MB, internal 1.81 MB, version store 0.00 MB, unallocated 54.19 MB, and one
+    /// session over threshold. <c>HS_S_Gen5_2</c>: user 1.88 MB, unallocated 60.69 MB.
+    /// <c>SELECT COUNT(*) FROM tempdb.sys.dm_db_file_space_usage</c> returns 4 on both. No Azure-specific
+    /// query variant is needed, and the second result set (<c>sys.dm_db_session_space_usage</c>, two-part
+    /// and in-database) works too — so the one row this collector promises is a WHOLE row on Azure SQL
+    /// Database, which is the objection the old comment raised against recovering half of it.</para>
     ///
-    /// <para>The second result set (<c>sys.dm_db_session_space_usage</c>, two-part and in-database)
-    /// WOULD work on Azure SQL DB. Recovering that half needs an Azure-specific query variant rather
-    /// than a gate, so it is deliberately out of scope here: the immediate defect is a collector that
-    /// can only ever fail, and half a row would be a different contract than the one row this
-    /// collector promises.</para>
+    /// <para><b>And the figures describe something, rather than merely returning.</b> That was the open
+    /// question, so it was moved rather than reasoned about: allocating ~57 MB into a <c>#temp</c> table on
+    /// <c>GP_S_Gen5_2</c> moved <c>user_mb</c> 1.88 → 59.75 and <c>unallocated_mb</c> 60.69 → 2.69,
+    /// while <c>sys.dm_db_session_space_usage</c> attributed 59.25 MB to the session that did it. The
+    /// counters track actual allocation to within the reserved-versus-allocated difference you would expect,
+    /// and the session view attributes it to the right session. Not a constant, not a stub, and not another
+    /// database's tempdb.</para>
+    ///
+    /// <para><b>Why this is worth MORE here than on a box.</b> The tempdb ceiling on Azure SQL Database is
+    /// governed by the SERVICE TIER: you cannot add files and you cannot grow past the tier's cap. On a box
+    /// "tempdb is filling" means "go look at the disk". Here it means "you are approaching a hard limit you
+    /// cannot raise without changing service objective" — more actionable and more urgent, and
+    /// completely invisible for as long as this was gated off.</para>
+    ///
+    /// <para><b>What <c>unallocated_mb</c> is, precisely — do not overstate it.</b> It is free space in
+    /// the tempdb files AS CURRENTLY ALLOCATED. Azure SQL Database creates those files small (4 files,
+    /// ~62 MB total on both 2-vCore tiers measured) and autogrows them toward the tier cap, so on this
+    /// platform <c>total_reserved / (total_reserved + unallocated)</c> measures distance to the next
+    /// autogrow, not distance to the tier ceiling. One ordinary temp table moves it a long way: the
+    /// measurement above took that ratio from 3% to 96% with a single <c>#temp</c> — against the ALLOCATION.
+    /// #2515 settled that by changing the denominator rather than adding a size floor: the ceiling is
+    /// discoverable, so <c>max_size_mb</c> is collected beside the allocation and the consumers divide by
+    /// it. The same <c>#temp</c> reads 0.09% against the 65,536 MB ROWS ceiling, which is the number worth
+    /// alerting on. So the ratio DOES carry the <c>tempdb Space</c> alert on this tier now, and the absolute
+    /// MB and the trend are corroboration rather than the only signal.</para>
+    ///
+    /// <para><b>Permissions, which is what the #2150 field report was actually about.</b> Error 262,
+    /// "VIEW DATABASE PERFORMANCE STATE permission denied in database 'tempdb'", is a real outcome for a
+    /// login that lacks the grant — tempdb permissions are not persistable on Azure SQL Database, and in
+    /// an elastic pool the database is not the permission boundary. But that is a property of the LOGIN, not
+    /// of the tier, so it cannot be decided by a gate: it would have to deny every properly-permissioned
+    /// Azure SQL Database target to spare the one that is not. #2512 classifies 262 as PERMISSIONS in both
+    /// SKUs instead, so a login that genuinely cannot read this degrades to a non-fatal skip carrying an
+    /// explanatory message, rather than the 11x-consecutive ERROR that motivated the gate.</para>
+    ///
+    /// <para><b>Managed Instance is unchanged</b> — it was never gated, it has a real tempdb and full
+    /// DMV access, and <c>CollectorGateSurfacePinTests</c> asserts it explicitly so this cannot be
+    /// re-narrowed by accident later.</para>
     /// </summary>
-    public override bool AppliesTo(CollectorTargetInfo target) => !target.IsAzureSqlDb;
+    public override bool AppliesTo(CollectorTargetInfo target) => true;
 
     public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
 

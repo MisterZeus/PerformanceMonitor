@@ -394,8 +394,7 @@ public sealed class DarlingMcpDataTools
         {
             var rows = await DarlingDataReader.GetTempDbTrendAsync(postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "tempdb_stats")
-                    ?? McpHelpers.Status("unavailable", "No TempDB data available.");
+                return McpHelpers.Status("unavailable", "No TempDB data available.");
 
             var result = rows.Select(r => new
             {

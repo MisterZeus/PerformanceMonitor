@@ -613,7 +613,12 @@ public partial class RemoteCollectorService
                direct SQL failure so the health indicator stops showing OK (#1086). */
             var sqlError = ex.InnerException;
             errorMessage = ex.Message;
-            status = (sqlError.Number == 229 || sqlError.Number == 297 || sqlError.Number == 300)
+            /* #2512: the shared set. This copy was the narrowest of the four — no 916, no 8189, no 262
+               — for no stated reason beyond having been written before the others grew. The additions
+               are inert or correct here rather than merely tolerable: 8189 is sys.traces and cannot
+               arise from an XE session ensure at all, while 262 and 916 both mean the login was denied
+               where it asked, which is the PERMISSIONS this arm already records for 229/297/300. */
+            status = SqlServerPermissionErrors.IsPermissionDenied(sqlError.Number)
                 ? "PERMISSIONS"
                 : "ERROR";
             xeSessionUnavailable = true;
@@ -636,7 +641,8 @@ public partial class RemoteCollectorService
         {
             status = "ERROR";
             errorMessage = $"SQL Error #{ex.Number}: {ex.Message}"
-                + AzureDmvPermissionHint.For(ex.Number, _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition == 5);
+                + AzureDmvPermissionHint.For(
+                    ex.Number, _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition == 5, ex.Message);
             AppLogger.Error("Collector", $"  [{server.DisplayName}] {collectorName} SQL Error #{ex.Number}: {ex.Message}");
 
             if (RetryHelper.IsTransient(ex))
@@ -647,11 +653,14 @@ public partial class RemoteCollectorService
             {
                 AppLogger.Warn("Collector", $"Collector '{collectorName}' column not found for server '{server.DisplayName}' (possible version incompatibility): {ex.Message}");
             }
-            else if (ex.Number == 229 || ex.Number == 297 || ex.Number == 300 || ex.Number == 8189)
+            else if (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
             {
                 /* 8189 is sys.traces' own denial (ALTER TRACE missing) — a legitimate least-privilege
                    choice (#1823), so default_trace_events degrades as PERMISSIONS like every other
-                   denied collector instead of erroring every cycle. Mirrors Darling's classifier. */
+                   denied collector instead of erroring every cycle. #2512 moved the number set into
+                   SqlServerPermissionErrors so this no longer MIRRORS Darling's classifier by
+                   transcription — it IS Darling's classifier, and 262 (the tempdb denial behind the
+                   collector's old Azure SQL DB gate) reaches both SKUs at once. */
                 status = "PERMISSIONS";
                 AppLogger.Warn("Collector", $"Collector '{collectorName}' permission denied for server '{server.DisplayName}': {ex.Message}");
             }
