@@ -70,6 +70,30 @@ public sealed class DarlingMcpPgStatementTools
         }
         catch (Exception ex)
         {
+            /* #2554: a THROW is a miss too, and until now it was the one miss the capability answer could
+               not reach. The gate sat inside `if (rows.Count == 0)`, so it only ever spoke when the query
+               SUCCEEDED and returned nothing — and a stock-PostgreSQL caller, for whom pg_statement_stats
+               can never run at all (its AppliesTo is Aurora-only), got a raw SQL error where its sibling
+               get_pg_wait_stats gives the honest "does not run on that engine, and never will".
+
+               Consulted HERE rather than moved ahead of the read, which is what it looks like it should be.
+               DarlingEngineCapability's contract is explicit that every call site asks AFTER its read came
+               back empty, never before: a server whose registry row says one engine while its collected rows
+               say another — a re-registration, a restored database — must still get its DATA rather than a
+               confident explanation of why it cannot have any. Asking first would trade this defect for that
+               one, across every read. On the throw path there is no data to prefer, so the same contract
+               points the other way.
+
+               And this stays narrow rather than swallowing failures: NotCollectedStatusAsync returns null
+               unless the collector provably cannot run on this server's engine, so a transient error against
+               an Aurora target still surfaces as an error. */
+            var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
+                postgres, resolved.ServerId, resolved.ServerName, "pg_statement_stats");
+            if (gated != null)
+            {
+                return gated;
+            }
+
             return McpHelpers.Status("error", $"Reading PostgreSQL query stats failed: {ex.Message}");
         }
     }
