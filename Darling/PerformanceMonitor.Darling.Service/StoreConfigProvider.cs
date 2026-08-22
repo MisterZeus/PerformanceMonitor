@@ -335,7 +335,7 @@ public sealed class StoreConfigProvider
            so the worker's post-seed baseline read reflects the seeded state and triggers no spurious reload. */
         using var command = new NpgsqlCommand(@"
 INSERT INTO config_service (id, paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, plan_content_retention_days, compose_statement_timeout_seconds, config_version, updated_at, updated_by)
-VALUES (1, FALSE, $1, $7, $8, $9, $10, $2, $3, $4, $5, $11, 0, $6, 'seed')
+VALUES (1, FALSE, $1, $7, $8, $9, $10, $2, $3, $4, $5, $11, $12, 0, $6, 'seed')
 ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(config.CapturePlans);
         command.Parameters.AddWithValue(config.Mcp.Enabled);
