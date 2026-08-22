@@ -58,20 +58,18 @@ public class FileGrowthAlertStoreTests
     }
 
     [Fact]
-    public void TheProbeAsksForTheColumn_AndTheThreePlacesAgree()
+    public void TheProbeAsksForTheColumn_AndTheReaderStillFetchesItsOrdinal()
     {
         Assert.Contains(
             "table_name = 'config_alert_settings' AND column_name = 'file_growth_enabled'",
             ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
-        var mapParameters = typeof(ViewerDataService)
-            .GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
-            .GetParameters().Length;
-
-        var viewerSource = ReadViewerSource();
-
-        Assert.Contains($"reader.GetBoolean({mapParameters - 1})", viewerSource, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({mapParameters})", viewerSource, StringComparison.Ordinal);
+        /* Demoted at V81 (#2515), and it should have been at V80. This read `mapParameters - 1`, which is
+           the NEWEST sentinel's ordinal — correct only while V79 was the top rung, and from V80 onwards it
+           was quietly asserting a later rung's wiring while reading as though it still guarded this one.
+           Pinned at 54, this rung's own ordinal, which cannot slide. The "and no more than that" half
+           belongs to whichever rung is newest and lives there. */
+        Assert.Contains("reader.GetBoolean(54)", ReadViewerSource(), StringComparison.Ordinal);
     }
 
     [Fact]

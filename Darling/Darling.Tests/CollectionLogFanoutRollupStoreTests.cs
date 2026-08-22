@@ -17,7 +17,9 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// The V80 rung (#2472) — the per-database fan-out rollup on <c>collection_log</c>, and the top of the ladder.
+/// The V80 rung (#2472) — the per-database fan-out rollup on <c>collection_log</c>. No longer the top of the
+/// ladder: V81 (#2515) took that, and the assertions that belong to whichever rung is newest moved with it to
+/// <see cref="TempDbCeilingStoreTests"/>. What stays here is everything that is true of THIS rung forever.
 ///
 /// <para><b>What it is for.</b> Five collectors run once per DATABASE and the run writes ONE row whose
 /// <c>duration_ms</c> is the sum across all of them. So 8 databases at 10.1s and one at 62s beside seven at
@@ -32,14 +34,16 @@ namespace Darling.Tests;
 public class CollectionLogFanoutRollupStoreTests
 {
     [Fact]
-    public void TheRungIsRegisteredAndIsTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal("collection-log-fanout-rollup", PgMigrations.Scripts.Single(s => s.Version == 80).Name);
-        Assert.Equal(80, versions.Max());
-        Assert.Equal(80, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(80, StorageVersion.SchemaVersion);
+
+        /* Demoted at V81 (#2515): "80 is the maximum" was true of the LADDER while this was its top rung,
+           not of this rung, and leaving it here is how a demotion turns into a red build on the next one.
+           The density and ordering checks below stay — those are properties of the whole ladder that every
+           rung's test may assert. */
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
 
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
@@ -90,28 +94,22 @@ public class CollectionLogFanoutRollupStoreTests
     }
 
     [Fact]
-    public void TheProbeAsksForTheColumn_AndTheThreePlacesAgree()
+    public void TheProbeAsksForTheColumn_AndTheReaderStillFetchesItsOrdinal()
     {
         Assert.Contains(
             "table_name = 'collection_log' AND column_name = 'slowest_item_ms'",
             ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
-        var mapParameters = typeof(ViewerDataService)
-            .GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
-            .GetParameters().Length;
-
-        var viewerSource = ReadViewerSource();
-
-        /* Ordinals are positional: the sentinel was APPENDED, so the reader must ask for exactly one more
-           than it did and no more than that. */
-        Assert.Contains($"reader.GetBoolean({mapParameters - 1})", viewerSource, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({mapParameters})", viewerSource, StringComparison.Ordinal);
+        /* Demoted at V81 (#2515): this used to read `mapParameters - 1`, which is the NEWEST sentinel's
+           ordinal, so once a rung was appended it silently started testing that rung's wiring instead of
+           this one's. Pinned at 55 — this rung's own ordinal — which cannot slide. The "and no more than
+           that" half is the top rung's to assert, and it moved to TempDbCeilingStoreTests with it. */
+        Assert.Contains("reader.GetBoolean(55)", ReadViewerSource(), StringComparison.Ordinal);
     }
 
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreTo80()
+    public void TheProbeMapsAStoreAtExactly80To80()
     {
-        Assert.Equal(80, StorageVersion.SchemaVersion);
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService)
@@ -121,7 +119,8 @@ public class CollectionLogFanoutRollupStoreTests
         /* 55 positional sentinels, then this rung's own, then FALSE for anything a later rung appends. The
            leading count is FIXED at this rung's ordinal deliberately — see the note on V79's twin: deriving
            it from arity reads identically while this is the top rung, then slides one place right per new
-           rung, and the assertion keeps passing while quietly testing a newer arm. */
+           rung, and the assertion keeps passing while quietly testing a newer arm. V81 has since been
+           appended and this test needed no edit, which is the fixed count doing exactly what it is for. */
         var all = Enumerable.Repeat(true, 55).Cast<object>().ToArray();
         object[] Args(bool ownFlag) => all
             .Concat(new object[] { ownFlag })
