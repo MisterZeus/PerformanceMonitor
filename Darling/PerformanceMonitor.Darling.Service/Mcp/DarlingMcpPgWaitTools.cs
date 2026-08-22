@@ -50,11 +50,20 @@ public sealed class DarlingMcpPgWaitTools
                so, rather than letting a caller read "no waits" as "no waiting". */
             if (rows.Count == 0)
             {
-                return McpHelpers.Status(
-                    "unavailable",
-                    "No PostgreSQL wait data for this server and window. If this server is SQL Server, "
-                    + "use get_wait_stats instead; if it is PostgreSQL but not Aurora, cumulative wait "
-                    + "counters are not available (core PostgreSQL does not provide them).");
+                /* Both halves of the old ambiguity are answerable when the store knows the engine (#2532):
+                   a SQL Server target gets the dialect answer, a stock PostgreSQL one gets the Aurora-only
+                   answer, and both say the gap is permanent instead of inviting a hunt. So the sentence
+                   below is reached in exactly two states — an Aurora target with no rows in the window, or
+                   a row whose engine_kind is NULL — and it names those rather than repeating the two the
+                   capability answer has already ruled out. */
+                return await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_wait_stats")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        "No PostgreSQL wait data for this server and window. On Aurora, the pg_wait_stats "
+                        + "collector may not have completed a cycle yet. Otherwise the store has not "
+                        + "recorded this server's engine yet, and a target it cannot classify may not be a "
+                        + "PostgreSQL one at all — check list_servers.");
             }
 
             var totalWaitMs = rows.Sum(r => r.TotalWaitTimeMs);

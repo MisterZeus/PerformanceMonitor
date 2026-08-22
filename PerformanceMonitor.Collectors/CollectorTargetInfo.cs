@@ -17,10 +17,14 @@ namespace PerformanceMonitor.Collectors;
 /// "can this collector EVER run on this engine edition" is derived, and a fact it never varies
 /// sits at its CLR default in every shape it produces — so a gate written on it matches none of
 /// them and the derivation announces a permanent, unfixable engine gap for a collector that runs
-/// perfectly well. Adding a field that nothing gates on is fine (<see cref="PostgresVersionNum"/>
-/// is exactly that today); adding the GATE without extending the sweep is what breaks, and
-/// <c>EveryFactASqlServerGateReads_IsVariedBySweepOrFixedByEdition</c> fails the build when it
-/// happens rather than leaving it to be noticed (#2518).</para>
+/// perfectly well. Adding a field that nothing gates on is fine; adding the GATE without extending
+/// the sweep is what breaks, and <c>EveryFactASqlServerGateReads_IsVariedBySweepOrFixedByEdition</c>
+/// fails the build when it happens rather than leaving it to be noticed (#2518).</para>
+/// <para><b>The same rule holds one engine over</b> (#2532): a field a PostgreSQL
+/// <see cref="AppliesTo"/> gate reads must be swept by
+/// <see cref="CollectorEngineCapability.TargetsWithEngineKind"/>, or fixed by the engine kind the
+/// way <see cref="IsAurora"/> is. <c>EveryFactAPostgresGateReads_IsVariedBySweepOrFixedByKind</c> is
+/// the twin guard.</para>
 /// </summary>
 public sealed class CollectorTargetInfo
 {

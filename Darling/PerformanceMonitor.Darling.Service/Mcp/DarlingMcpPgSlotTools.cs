@@ -69,6 +69,16 @@ public sealed class DarlingMcpPgSlotTools
                a cluster-wide all-clear would be drawing the one conclusion this result cannot support. */
             if (rows.Count == 0)
             {
+                /* The engine question comes first (#2532): "this instance has no replication slots" is a
+                   real finding on a PostgreSQL target and a false one on a SQL Server target, where the
+                   collector has never run and never will. */
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_replication_slots");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return JsonSerializer.Serialize(new
                 {
                     server = resolved.ServerName,

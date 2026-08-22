@@ -206,20 +206,54 @@ public sealed class CollectorEngineCapabilityTests
 
     /// <summary>
     /// The prose table cannot outlive the gates it describes: every key must be a real collector, and every
-    /// key must be a collector that IS excluded somewhere — an entry for a collector nothing gates is prose
-    /// no message can ever reach, which is how a stale explanation survives unnoticed.
+    /// key must be a collector its OWN <c>AppliesTo</c> gate shuts out somewhere — an entry for a collector
+    /// nothing gates is prose no message can ever reach, which is how a stale explanation survives unnoticed.
+    ///
+    /// <para><b>"Its own gate", not "any gap at all" (#2532).</b> Since the kind axis landed, EVERY collector
+    /// is a permanent gap on some engine the store can record — a SQL Server one on both PostgreSQL tokens,
+    /// a PostgreSQL one on <c>sqlserver</c> — purely because of its DIALECT. So a check phrased as "is this a
+    /// gap somewhere" would now pass for every name anyone typed, which is the guard-that-stopped-guarding
+    /// shape. The dialect half is excluded deliberately, leaving exactly the original claim: the entry
+    /// describes a collector whose own precondition excludes it on some target it could otherwise be sent
+    /// at. That covers the twelve Azure SQL Database entries unchanged and the two Aurora-only PostgreSQL
+    /// ones on the same terms.</para>
     /// </summary>
     [Fact]
     public void EveryCapturePathEntry_NamesARealCollectorThatIsActuallyGatedSomewhere()
     {
-        var catalog = CollectorCatalog.All.Select(c => c.Name).ToHashSet(StringComparer.Ordinal);
-        var azureGaps = GapsOn(AzureSqlDb).ToHashSet(StringComparer.Ordinal);
+        var catalog = CollectorCatalog.All.ToDictionary(c => c.Name, StringComparer.Ordinal);
+        var wired = EngineCapabilityReadWiringTests.AllWiredCollectors();
+
+        Assert.NotEmpty(wired);
 
         foreach (var name in CollectorEngineCapability.CapturePathByCollector.Keys)
         {
-            Assert.True(catalog.Contains(name), $"CapturePathByCollector names '{name}', which is not a CollectorCatalog collector");
-            Assert.True(azureGaps.Contains(name), $"CapturePathByCollector still describes '{name}' as a gap, but its AppliesTo gate now lets it run on Azure SQL Database — drop the entry or re-check the gate");
+            Assert.True(catalog.ContainsKey(name), $"CapturePathByCollector names '{name}', which is not a CollectorCatalog collector");
+            Assert.True(
+                ExcludedByItsOwnGateSomewhere(catalog[name]) || wired.Contains(name),
+                $"CapturePathByCollector describes '{name}', but its AppliesTo gate now lets it run on every target " +
+                "of its own engine AND no shipped read asks the capability question about it — so the prose is " +
+                "unreachable. Drop the entry, re-check the gate, or wire the read that wanted it");
         }
+    }
+
+    /// <summary>
+    /// True when a definition's own <c>AppliesTo</c> — not the dispatch gate's engine half — excludes it from
+    /// every target of some engine the store can record. Derived from the two axes rather than listed, and
+    /// deliberately asked only about engines this definition's DIALECT matches, so a foreign-dialect gap
+    /// (which every collector has, on every other engine) cannot answer it.
+    /// </summary>
+    private static bool ExcludedByItsOwnGateSomewhere(ICollectorSchemaInfo definition)
+    {
+        if (definition.TargetEngine == CollectorTargetEngine.SqlServer
+            && !CollectorEngineCapability.IsCollectedOnEngineEdition(definition, AzureSqlDb))
+        {
+            return true;
+        }
+
+        return MonitoredEngineKind.All
+            .Where(kind => MonitoredEngineKind.EngineOf(kind) == definition.TargetEngine)
+            .Any(kind => !CollectorEngineCapability.IsCollectedOnEngineKind(definition, kind));
     }
 
     /// <summary>
@@ -284,8 +318,28 @@ public sealed class EngineCapabilityReadWiringTests
     private static readonly Regex CollectorConst = new(
         @"private const string (\w+) = ""([a-z_0-9]+)"";", RegexOptions.Compiled);
 
+    /// <summary>
+    /// Every collector name a shipped read asks the capability question about, across both SKUs. Exposed so
+    /// <see cref="CollectorEngineCapabilityTests.EveryCapturePathEntry_NamesARealCollectorThatIsActuallyGatedSomewhere"/>
+    /// can hold the prose table to the reads, rather than the reads being the only side that is checked.
+    /// </summary>
+    internal static SortedSet<string> AllWiredCollectors()
+    {
+        var wired = new SortedSet<string>(StringComparer.Ordinal);
+
+        foreach (var directory in new[] { DarlingMcp, LiteMcp })
+        {
+            foreach (var collectors in WiredReads(directory).Values)
+            {
+                wired.UnionWith(collectors);
+            }
+        }
+
+        return wired;
+    }
+
     /// <summary>tool name → the collector names its miss path asks the capability question about.</summary>
-    private static SortedDictionary<string, SortedSet<string>> WiredReads(string mcpDirectory)
+    internal static SortedDictionary<string, SortedSet<string>> WiredReads(string mcpDirectory)
     {
         var wired = new SortedDictionary<string, SortedSet<string>>(StringComparer.Ordinal);
 
@@ -335,7 +389,7 @@ public sealed class EngineCapabilityReadWiringTests
     [Theory]
     [InlineData(DarlingMcp)]
     [InlineData(LiteMcp)]
-    public void EveryWiredRead_NamesARealCollectorThatIsGatedOffOnAzureSqlDb(string mcpDirectory)
+    public void EveryWiredRead_NamesARealCollectorWhoseCapabilityBranchCanFire(string mcpDirectory)
     {
         var wired = WiredReads(mcpDirectory);
         var catalog = CollectorCatalog.All.Select(c => c.Name).ToHashSet(StringComparer.Ordinal);
@@ -357,13 +411,43 @@ public sealed class EngineCapabilityReadWiringTests
                     $"{tool} names '{collector}', which has no CapturePathByCollector entry — its message would fall back " +
                     "to the generic phrasing; add the noun phrase next to the others");
 
-                Assert.False(
-                    CollectorEngineCapability.IsCollectedOnEngineEdition(collector, CollectorEngineCapability.AzureSqlDatabaseEngineEdition),
-                    $"{tool} asks about '{collector}', but that collector's AppliesTo gate now lets it run on Azure SQL " +
-                    "Database, so the capability branch is dead code — either the gate changed and this read should stop " +
-                    "asking, or the gate changed by accident");
+                Assert.True(
+                    ReachableOnSomeEngine(collector),
+                    $"{tool} asks about '{collector}', but no engine the store can record produces a message for it, so " +
+                    "the capability branch is dead code — either a gate opened up and this read should stop asking, or " +
+                    "a gate changed by accident");
             }
         }
+    }
+
+    /// <summary>
+    /// True when SOME (engine kind, engine edition) pair the store can actually hold makes
+    /// <see cref="CollectorEngineCapability.NotCollectedMessage"/> speak about this collector — i.e. the
+    /// branch the read just added is reachable rather than dead.
+    ///
+    /// <para><b>Weaker than the Azure-specific check it replaced, and deliberately so (#2532).</b> That check
+    /// said "this collector is gated off on Azure SQL Database", which was the right claim while the EDITION
+    /// axis was the only one: a read wired to a collector that runs on every SQL Server had nothing to say
+    /// and the assertion caught it. The KIND axis changes that — every SQL Server collector is a permanent
+    /// gap on a PostgreSQL target and every PostgreSQL collector on a SQL Server one — so a read wired to
+    /// <c>wait_stats</c> now has something true and useful to say, and an assertion that still demanded an
+    /// Azure gap would refuse the wiring this issue is about. What is left is the property that actually
+    /// matters at a call site: the branch can fire. The sharper per-collector claims live where they belong,
+    /// in the derivation tests, over the gates rather than over the reads.</para>
+    /// </summary>
+    private static bool ReachableOnSomeEngine(string collectorName)
+    {
+        var kinds = new string?[] { null }.Concat(MonitoredEngineKind.All);
+        var editions = new[]
+        {
+            CollectorEngineCapability.UnknownEngineEdition,
+            3, /* Enterprise — a box edition, where nothing is an edition gap today */
+            CollectorEngineCapability.AzureSqlDatabaseEngineEdition,
+            CollectorEngineCapability.AzureManagedInstanceEngineEdition,
+        };
+
+        return kinds.Any(kind => editions.Any(edition =>
+            CollectorEngineCapability.NotCollectedMessage("probe", edition, kind, collectorName) is not null));
     }
 
     /// <summary>
