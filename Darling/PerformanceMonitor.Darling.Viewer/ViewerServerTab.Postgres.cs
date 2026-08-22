@@ -57,7 +57,8 @@ public partial class ViewerServerTab
     /// </summary>
     private void ApplyEngineTabSet()
     {
-        if (_server.EngineDescription is { } engine)
+        var engine = _server.EngineDescription;
+        if (engine is not null)
         {
             ServerEngineText.Text = engine;
             ServerEngineBadge.Visibility = Visibility.Visible;
@@ -89,7 +90,9 @@ public partial class ViewerServerTab
            worse answer than not offering. */
         DatabaseFilterButton.Visibility = Visibility.Collapsed;
 
-        PgEngineBanner.Text = $"{_server.DisplayName} runs {engineOrUnknown()}.";
+        /* IsPostgres is only true for a token the describer recognises, so `engine` has words here by
+           construction; the coalesce is the compiler's, not a state this can reach. */
+        PgEngineBanner.Text = $"{_server.DisplayName} runs {engine ?? "PostgreSQL"}.";
 
         /* Looked up by ID, never by position: the registry's order is the STRIP order and is free to change,
            while these three assignments are about which tab gets which framing. Indexing All[0..2] would
@@ -97,9 +100,6 @@ public partial class ViewerServerTab
         PgOverviewNote.Text = ViewerPostgresTabs.NoteFor("overview");
         PgActivityNote.Text = ViewerPostgresTabs.NoteFor("activity");
         PgVacuumNote.Text = ViewerPostgresTabs.NoteFor("vacuum");
-
-        string engineOrUnknown() =>
-            _server.EngineDescription ?? "an engine the store has not recorded";
     }
 
     // ─────────────────────────────────────────────────────────────────────────────────────────────
