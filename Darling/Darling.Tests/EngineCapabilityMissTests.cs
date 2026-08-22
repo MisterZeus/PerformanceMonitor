@@ -1,0 +1,571 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #2511, the derivation half: whether a collector can EVER run on an engine edition, answered by the
+/// collectors' OWN gates rather than by a list somebody typed.
+///
+/// <para>The assertions here are deliberately about PROPERTIES of the derivation, not an enumeration of
+/// today's gaps. An enumerated "these twelve are missing on Azure SQL DB" would be a second copy of the
+/// gates — it would conflict with any PR that changes one (#2512 is open against
+/// <c>TempDbStatsCollector</c>'s), and its failure would say "update the list" rather than "look at the
+/// gate". What is worth pinning is that the derivation distinguishes an ENGINE gap from the fixable facts
+/// that are not one.</para>
+/// </summary>
+public sealed class CollectorEngineCapabilityTests
+{
+    private const int Enterprise = 3;
+    private const int AzureSqlDb = CollectorEngineCapability.AzureSqlDatabaseEngineEdition;
+    private const int AzureMi = CollectorEngineCapability.AzureManagedInstanceEngineEdition;
+
+    /// <summary>Every SQL Server collector that no target of this engine edition can run.</summary>
+    private static string[] GapsOn(int engineEdition) => CollectorCatalog.All
+        .Where(c => c.TargetEngine == CollectorTargetEngine.SqlServer)
+        .Select(c => c.Name)
+        .Where(name => !CollectorEngineCapability.IsCollectedOnEngineEdition(name, engineEdition))
+        .OrderBy(n => n, StringComparer.Ordinal)
+        .ToArray();
+
+    /// <summary>
+    /// The measurement the issue was filed on: <c>sys.dm_xe_sessions</c> does not exist on Azure SQL
+    /// Database, so <c>system_health</c> can never be read there — and it reads fine everywhere else.
+    /// </summary>
+    [Fact]
+    public void SystemHealth_IsAPermanentGapOnAzureSqlDb_AndOnNothingElse()
+    {
+        Assert.False(CollectorEngineCapability.IsCollectedOnEngineEdition("system_health_events", AzureSqlDb));
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition("system_health_events", Enterprise));
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition("system_health_events", AzureMi));
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition("system_health_events", 2));
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition("system_health_events", 4));
+    }
+
+    /// <summary>
+    /// A gate that reads a FIXABLE fact is not an engine gap. <c>job_history</c> needs msdb access and
+    /// <c>running_jobs</c> needs msdb access and a non-RDS host; on a box edition both of those are things an
+    /// operator can change, so the honest answer there is "collected" and the read keeps its
+    /// <c>unavailable</c> vocabulary, which is what sends someone to look. Only the Azure SQL DB half of
+    /// those same gates is permanent.
+    ///
+    /// <para>This is the assertion that would fail if the sweep stopped varying a dimension: a sweep fixed at
+    /// <c>HasMsdbAccess = false</c>, or at <c>IsAwsRds = true</c>, would report both of these as permanent
+    /// engine gaps on an ordinary Enterprise box and tell an operator to stop looking at a problem they could
+    /// have fixed in a minute.</para>
+    /// </summary>
+    [Fact]
+    public void AFixableGate_IsNotReportedAsAnEngineGap()
+    {
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition("job_history", Enterprise));
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition("running_jobs", Enterprise));
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition("agent_status", Enterprise));
+
+        Assert.False(CollectorEngineCapability.IsCollectedOnEngineEdition("job_history", AzureSqlDb));
+        Assert.False(CollectorEngineCapability.IsCollectedOnEngineEdition("running_jobs", AzureSqlDb));
+        Assert.False(CollectorEngineCapability.IsCollectedOnEngineEdition("agent_status", AzureSqlDb));
+    }
+
+    /// <summary>
+    /// A VERSION floor is not an engine gap either, and the three collectors that carry one all name Azure
+    /// SQL DB as an explicit escape from it — so Azure SQL DB collects them. The issue listed these among
+    /// the "conditional gates" as though they were Azure gaps; they are the opposite, and a capability
+    /// helper that got this backwards would tell an Azure user their Query Store health is unobtainable.
+    /// </summary>
+    [Fact]
+    public void AVersionFloor_IsNotAnEngineGap_AndAzureSqlDbEscapesTheThreeThatHaveOne()
+    {
+        foreach (var name in new[] { "query_store_health", "plan_correction", "pvs_stats", "query_stats", "query_store" })
+        {
+            Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition(name, AzureSqlDb), name);
+            Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition(name, Enterprise), name);
+            Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition(name, 12), name);
+        }
+    }
+
+    /// <summary>
+    /// The box editions and Managed Instance have NO permanent gaps: every gate in the library that names
+    /// Azure names Azure SQL DATABASE specifically. Stated as a derived zero rather than as prose, so the day
+    /// a gate starts excluding Managed Instance this says so instead of a message quietly never appearing.
+    /// </summary>
+    [Fact]
+    public void BoxEditionsAndManagedInstance_HaveNoPermanentGaps()
+    {
+        Assert.Empty(GapsOn(Enterprise));
+        Assert.Empty(GapsOn(2));
+        Assert.Empty(GapsOn(4));
+        Assert.Empty(GapsOn(AzureMi));
+    }
+
+    /// <summary>A non-vacuity floor: the sweep must actually be finding gaps on Azure SQL DB, or every
+    /// assertion above about "not a gap" passes for free.</summary>
+    [Fact]
+    public void AzureSqlDb_HasRealGaps_SoTheOtherAssertionsAreNotVacuous()
+    {
+        var gaps = GapsOn(AzureSqlDb);
+        Assert.Contains("system_health_events", gaps);
+        Assert.True(gaps.Length >= 10, "expected the Azure SQL DB gap set to be substantial, got: " + string.Join(", ", gaps));
+    }
+
+    /// <summary>
+    /// "We do not know" must never render as "this will never work". A server that has not completed a
+    /// connect — and every PostgreSQL target, whose connector stamps 0 because <c>SERVERPROPERTY</c> does not
+    /// exist there — makes no claim at all.
+    /// </summary>
+    [Fact]
+    public void UnknownEngineEdition_MakesNoClaim()
+    {
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition("system_health_events", CollectorEngineCapability.UnknownEngineEdition));
+        Assert.Null(CollectorEngineCapability.NotCollectedMessage("srv", 0, "system_health_events"));
+    }
+
+    /// <summary>
+    /// A PostgreSQL collector asked about a SQL Server edition is not a gap — the question does not apply.
+    /// Without this, a Postgres read that ever passed its own collector name alongside a non-zero edition
+    /// would manufacture a confident claim about an engine it does not run on.
+    /// </summary>
+    [Fact]
+    public void APostgresCollector_IsNeverAGapOnASqlServerEdition()
+    {
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition("pg_wait_stats", Enterprise));
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition("pg_blocking", AzureSqlDb));
+    }
+
+    /// <summary>An unknown name follows <c>CollectorCatalog</c>'s own true-on-miss default: a typo must not
+    /// manufacture a permanent-gap claim. <see cref="EngineCapabilityReadWiringTests"/> is what stops that
+    /// default hiding a mis-wired read.</summary>
+    [Fact]
+    public void AnUnknownCollectorName_MakesNoClaim()
+    {
+        Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition("no_such_collector", AzureSqlDb));
+        Assert.Null(CollectorEngineCapability.NotCollectedMessage("srv", AzureSqlDb, "no_such_collector"));
+    }
+
+    /// <summary>
+    /// The message names the server, the engine (by name AND by number, so an operator can match it to
+    /// <c>SERVERPROPERTY</c>), and the collector; and it says the gap is permanent rather than pending.
+    /// </summary>
+    [Fact]
+    public void TheMessage_NamesTheEngineAndRefusesToSendAnyoneLooking()
+    {
+        var message = CollectorEngineCapability.NotCollectedMessage("azure-db-01", AzureSqlDb, "system_health_events");
+        Assert.NotNull(message);
+        Assert.Contains("azure-db-01", message, StringComparison.Ordinal);
+        Assert.Contains("Azure SQL Database", message, StringComparison.Ordinal);
+        Assert.Contains("EngineEdition 5", message, StringComparison.Ordinal);
+        Assert.Contains("system_health_events", message, StringComparison.Ordinal);
+        Assert.Contains("the system_health extended-events ring buffer", message, StringComparison.Ordinal);
+        Assert.Contains("and never will.", message, StringComparison.Ordinal);
+
+        /* The words the OLD message used are the ones that sent an Azure operator hunting. */
+        Assert.DoesNotContain("check that collection is running", message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Darling's connector keeps ONE edition table, the shared one. The existing
+    /// <c>DarlingCliCommandsTests.DescribeEngineEdition_MapsKnownEditions</c> pins the strings; this pins
+    /// that the two entry points are the same function rather than two switches that happen to agree today.
+    /// </summary>
+    [Fact]
+    public void TheConnectorAndTheCapabilityHelper_ShareOneEditionTable()
+    {
+        foreach (var edition in new[] { 1, 2, 3, 4, 5, 6, 8, 9, 11, 999 })
+        {
+            Assert.Equal(
+                CollectorEngineCapability.DescribeEngineEdition(edition),
+                DarlingServerConnector.DescribeEngineEdition(edition));
+        }
+    }
+
+    /// <summary>
+    /// The prose table cannot outlive the gates it describes: every key must be a real collector, and every
+    /// key must be a collector that IS excluded somewhere — an entry for a collector nothing gates is prose
+    /// no message can ever reach, which is how a stale explanation survives unnoticed.
+    /// </summary>
+    [Fact]
+    public void EveryCapturePathEntry_NamesARealCollectorThatIsActuallyGatedSomewhere()
+    {
+        var catalog = CollectorCatalog.All.Select(c => c.Name).ToHashSet(StringComparer.Ordinal);
+        var azureGaps = GapsOn(AzureSqlDb).ToHashSet(StringComparer.Ordinal);
+
+        foreach (var name in CollectorEngineCapability.CapturePathByCollector.Keys)
+        {
+            Assert.True(catalog.Contains(name), $"CapturePathByCollector names '{name}', which is not a CollectorCatalog collector");
+            Assert.True(azureGaps.Contains(name), $"CapturePathByCollector still describes '{name}' as a gap, but its AppliesTo gate now lets it run on Azure SQL Database — drop the entry or re-check the gate");
+        }
+    }
+
+    /// <summary>
+    /// The sweep must actually vary the dimensions the gates read. A sweep that quietly collapsed to one
+    /// target shape would still answer correctly for today's Azure gates and would start over-claiming the
+    /// moment a version- or msdb-shaped gate mattered, which is the failure
+    /// <see cref="AFixableGate_IsNotReportedAsAnEngineGap"/> would then report from a distance.
+    /// </summary>
+    [Fact]
+    public void TheSweep_VariesEveryDimensionTheGatesRead()
+    {
+        var targets = CollectorEngineCapability.TargetsWithEngineEdition(Enterprise).ToArray();
+
+        Assert.True(targets.Length >= 20, $"only {targets.Length} target shapes swept");
+        Assert.All(targets, t => Assert.False(t.IsAzureSqlDb));
+        Assert.All(targets, t => Assert.False(t.IsAzureManagedInstance));
+        Assert.All(targets, t => Assert.Equal(CollectorTargetEngine.SqlServer, t.Engine));
+
+        Assert.Contains(targets, t => t.SqlMajorVersion == 0);
+        Assert.Contains(targets, t => t.SqlMajorVersion == 13);
+        Assert.Contains(targets, t => t.SqlMajorVersion >= 17);
+        Assert.Contains(targets, t => t.HasMsdbAccess);
+        Assert.Contains(targets, t => !t.HasMsdbAccess);
+        Assert.Contains(targets, t => t.IsAwsRds);
+        Assert.Contains(targets, t => !t.IsAwsRds);
+
+        /* The Azure flags follow the edition rather than the sweep — they are what the probe derives from it. */
+        Assert.All(
+            CollectorEngineCapability.TargetsWithEngineEdition(AzureSqlDb),
+            t => Assert.True(t.IsAzureSqlDb && !t.IsAzureManagedInstance));
+    }
+}
+
+/// <summary>
+/// #2511, the wiring half: which READS ask the capability question, and whether the two SKUs ask it the
+/// same way. Read off both shipped MCP trees rather than from a list here — a transcribed list of wired
+/// reads would go stale in the direction that makes it pass.
+///
+/// <para><b>Why a source scan.</b> The failure mode is not a wrong answer, it is a read that never asks:
+/// it compiles, every other test passes, and an Azure caller keeps getting the old message. Nothing
+/// behavioural sees that on the SKU that was not touched, which is exactly how the divergence
+/// <c>McpMissMessageParityPinTests</c> exists for got there.</para>
+/// </summary>
+public sealed class EngineCapabilityReadWiringTests
+{
+    private const string DarlingMcp = "Darling/PerformanceMonitor.Darling.Service/Mcp";
+    private const string LiteMcp = "Lite/Mcp";
+
+    private static readonly Regex ToolMark = new(@"McpServerTool\(Name = ""([a-z_0-9]+)""", RegexOptions.Compiled);
+
+    /* The last argument of a NotCollectedStatusAsync call: a quoted collector name, or a const that names
+       one. No argument in these calls contains a parenthesis, so the non-greedy [^)]* is safe. */
+    private static readonly Regex WiringCall = new(
+        @"NotCollectedStatusAsync\([^)]*?,\s*(?:""([a-z_0-9]+)""|([A-Za-z_][A-Za-z0-9_]*))\)",
+        RegexOptions.Compiled);
+
+    private static readonly Regex CollectorConst = new(
+        @"private const string (\w+) = ""([a-z_0-9]+)"";", RegexOptions.Compiled);
+
+    /// <summary>tool name → the collector names its miss path asks the capability question about.</summary>
+    private static SortedDictionary<string, SortedSet<string>> WiredReads(string mcpDirectory)
+    {
+        var wired = new SortedDictionary<string, SortedSet<string>>(StringComparer.Ordinal);
+
+        foreach (var file in RepoFilesIn(mcpDirectory))
+        {
+            var source = File.ReadAllText(file).Replace("\r\n", "\n", StringComparison.Ordinal);
+            var consts = CollectorConst.Matches(source)
+                .ToDictionary(m => m.Groups[1].Value, m => m.Groups[2].Value, StringComparer.Ordinal);
+            var marks = ToolMark.Matches(source);
+
+            foreach (Match call in WiringCall.Matches(source))
+            {
+                var collector = call.Groups[1].Success
+                    ? call.Groups[1].Value
+                    : consts.TryGetValue(call.Groups[2].Value, out var resolved) ? resolved : call.Groups[2].Value;
+
+                /* The enclosing tool is the last McpServerTool mark before the call. */
+                var owner = marks.Where(m => m.Index < call.Index).LastOrDefault();
+                Assert.True(owner is not null, $"{Path.GetFileName(file)}: a capability call sits outside any MCP tool");
+
+                if (!wired.TryGetValue(owner!.Groups[1].Value, out var collectors))
+                {
+                    wired[owner.Groups[1].Value] = collectors = new SortedSet<string>(StringComparer.Ordinal);
+                }
+
+                collectors.Add(collector);
+            }
+        }
+
+        return wired;
+    }
+
+    private static HashSet<string> ToolsIn(string mcpDirectory)
+    {
+        var tools = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var file in RepoFilesIn(mcpDirectory))
+        {
+            foreach (Match mark in ToolMark.Matches(File.ReadAllText(file)))
+            {
+                tools.Add(mark.Groups[1].Value);
+            }
+        }
+
+        return tools;
+    }
+
+    [Theory]
+    [InlineData(DarlingMcp)]
+    [InlineData(LiteMcp)]
+    public void EveryWiredRead_NamesARealCollectorThatIsGatedOffOnAzureSqlDb(string mcpDirectory)
+    {
+        var wired = WiredReads(mcpDirectory);
+        var catalog = CollectorCatalog.All.Select(c => c.Name).ToHashSet(StringComparer.Ordinal);
+
+        /* A scan that parsed nothing passes for free — the worst outcome a check like this can have. */
+        Assert.True(wired.Count >= 17, $"only {wired.Count} wired reads found under {mcpDirectory} — the scan is broken, not the surface");
+
+        foreach (var (tool, collectors) in wired)
+        {
+            foreach (var collector in collectors)
+            {
+                Assert.True(
+                    catalog.Contains(collector),
+                    $"{tool} asks the capability question about '{collector}', which is not a CollectorCatalog name — " +
+                    "an unknown name answers \"supported\" and silently restores the message this change removed");
+
+                Assert.True(
+                    CollectorEngineCapability.CapturePathByCollector.ContainsKey(collector),
+                    $"{tool} names '{collector}', which has no CapturePathByCollector entry — its message would fall back " +
+                    "to the generic phrasing; add the noun phrase next to the others");
+
+                Assert.False(
+                    CollectorEngineCapability.IsCollectedOnEngineEdition(collector, CollectorEngineCapability.AzureSqlDatabaseEngineEdition),
+                    $"{tool} asks about '{collector}', but that collector's AppliesTo gate now lets it run on Azure SQL " +
+                    "Database, so the capability branch is dead code — either the gate changed and this read should stop " +
+                    "asking, or the gate changed by accident");
+            }
+        }
+    }
+
+    /// <summary>
+    /// The two SKUs wire the SAME reads to the SAME collectors. Compared only across tools BOTH surfaces
+    /// expose, so a tool that exists on one SKU only (Darling's get_ag_health) is not reported as drift —
+    /// and a tool that exists on both but is wired on one is, which is the drift that matters.
+    /// </summary>
+    [Fact]
+    public void BothSkus_WireTheSameReadsToTheSameCollectors()
+    {
+        var darling = WiredReads(DarlingMcp);
+        var lite = WiredReads(LiteMcp);
+        var darlingTools = ToolsIn(DarlingMcp);
+        var liteTools = ToolsIn(LiteMcp);
+
+        var shared = darlingTools.Intersect(liteTools, StringComparer.Ordinal).ToArray();
+        Assert.True(shared.Length >= 50, $"only {shared.Length} tools are common to both SKUs — the scan is broken");
+
+        var drift = new List<string>();
+        foreach (var tool in shared.OrderBy(t => t, StringComparer.Ordinal))
+        {
+            var d = darling.TryGetValue(tool, out var dc) ? string.Join("+", dc) : "";
+            var l = lite.TryGetValue(tool, out var lc) ? string.Join("+", lc) : "";
+            if (!string.Equals(d, l, StringComparison.Ordinal))
+            {
+                drift.Add($"{tool}: Darling=[{d}] Lite=[{l}]");
+            }
+        }
+
+        Assert.True(
+            drift.Count == 0,
+            "these reads exist on both SKUs but do not ask the engine-capability question identically, so an " +
+            "Azure caller is told different stories depending on which server they are pointed at: " +
+            string.Join("; ", drift));
+    }
+
+    /// <summary>The nine health-parser reads — the family the issue was filed on — are all wired, on both
+    /// SKUs. Named explicitly because they are the one set the live evidence covers.</summary>
+    [Theory]
+    [InlineData(DarlingMcp)]
+    [InlineData(LiteMcp)]
+    public void AllNineHealthParserReads_AskTheQuestion(string mcpDirectory)
+    {
+        var wired = WiredReads(mcpDirectory);
+        var healthParser = wired.Keys.Where(k => k.StartsWith("get_health_parser_", StringComparison.Ordinal)).ToArray();
+
+        Assert.Equal(9, healthParser.Length);
+        Assert.All(healthParser, tool => Assert.Equal(new[] { "system_health_events" }, wired[tool].ToArray()));
+    }
+
+    private static string[] RepoFilesIn(string relativeDirectory, [CallerFilePath] string thisFile = "")
+    {
+        for (var dir = new DirectoryInfo(Path.GetDirectoryName(thisFile)!); dir is not null; dir = dir.Parent)
+        {
+            var candidate = Path.Combine(dir.FullName, relativeDirectory);
+            if (Directory.Exists(candidate))
+            {
+                var files = Directory.GetFiles(candidate, "*.cs");
+                Assert.NotEmpty(files);
+                return files;
+            }
+        }
+
+        Assert.Fail($"could not find {relativeDirectory} above {thisFile}");
+        return Array.Empty<string>();
+    }
+}
+
+/// <summary>
+/// #2511 end to end against a live store: the SAME read, on two servers that differ only in
+/// <c>servers.sql_engine_edition</c>, must answer differently. Both directions, because a pin that only
+/// asserts the Azure branch would pass just as well if the read had stopped distinguishing anything and
+/// started saying <c>not_collected</c> to everyone.
+/// </summary>
+[Collection("live-postgres")]
+public sealed class EngineCapabilityMissLivePostgresTests
+{
+    private const string AzureServerName = "darling-engine-cap-azure";
+    private const string BoxServerName = "darling-engine-cap-box";
+
+    private static readonly int AzureServerId = ServerIdHelper.GetDeterministicHashCode(AzureServerName);
+    private static readonly int BoxServerId = ServerIdHelper.GetDeterministicHashCode(BoxServerName);
+
+    private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    [Fact]
+    public async Task TheSameEmptyRead_AnswersNotCollectedOnAzureSqlDb_AndUnavailableOnABox()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live engine-capability test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await RegisterAsync(connection, ct, AzureServerId, AzureServerName, engineEdition: 5);
+            await RegisterAsync(connection, ct, BoxServerId, BoxServerName, engineEdition: 3);
+
+            /* Neither server has a single collected row: the ONLY difference is the engine edition. */
+
+            /* ── Azure SQL Database: not_collected, naming the engine and the collector ── */
+            var azureHealth = await DarlingMcpHealthParserTools.GetSystemHealth(postgres, AzureServerName);
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(azureHealth));
+            Assert.Contains("Azure SQL Database", azureHealth, StringComparison.Ordinal);
+            Assert.Contains("system_health_events", azureHealth, StringComparison.Ordinal);
+            Assert.Contains(AzureServerName, azureHealth, StringComparison.Ordinal);
+
+            /* The never-captured branch of get_health_parser_significant_waits was the message quoted in the
+               issue. It must no longer tell an Azure caller to start a session that cannot exist. */
+            var azureWaits = await DarlingMcpHealthParserTools.GetSignificantWaits(postgres, AzureServerName);
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(azureWaits));
+            Assert.DoesNotContain("system_health session is started", azureWaits, StringComparison.Ordinal);
+
+            /* A read from a different family, sharing nothing but the helper. */
+            var azureFlags = await DarlingMcpConfigTools.GetTraceFlags(postgres, AzureServerName);
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(azureFlags));
+            Assert.Contains("trace_flags", azureFlags, StringComparison.Ordinal);
+
+            /* A third family, and deliberately NOT get_tempdb_trend: #2512 measured the tempdb DMVs
+               returning real data on Azure SQL Database (GP and Hyperscale), so #2516 opens that gate and
+               tempdb_stats stops being a permanent gap. Picking it as the example here would tie this test
+               to a gate that is moving. sys.configurations, DBCC TRACESTATUS and the default trace are
+               absent from the engine itself, so their gates are the durable ones to demonstrate with. */
+            var azureTrace = await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(postgres, AzureServerName);
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(azureTrace));
+            Assert.Contains("default_trace_events", azureTrace, StringComparison.Ordinal);
+
+            /* ── An Enterprise box, same empty store: every one of them keeps its own miss ── */
+            Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpHealthParserTools.GetSystemHealth(postgres, BoxServerName)));
+
+            var boxWaits = await DarlingMcpHealthParserTools.GetSignificantWaits(postgres, BoxServerName);
+            Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(boxWaits));
+            Assert.Contains("system_health session is started", boxWaits, StringComparison.Ordinal);
+
+            Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpConfigTools.GetTraceFlags(postgres, BoxServerName)));
+            Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(postgres, BoxServerName)));
+
+            /* A read whose collector runs everywhere is untouched on BOTH servers — the helper must not have
+               become a blanket "Azure gets not_collected" rule. */
+            Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(await DarlingMcpConfigTools.GetDatabaseConfig(postgres, AzureServerName)));
+            Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(await DarlingMcpConfigTools.GetDatabaseConfig(postgres, BoxServerName)));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// A registry row that never got an edition (a server that has not completed a connect) must keep the
+    /// old miss. "We do not know" rendering as "this will never work" would be the same defect wearing the
+    /// fix's clothes.
+    /// </summary>
+    [Fact]
+    public async Task AServerWithNoProbedEdition_KeepsItsOldMiss()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live engine-capability test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await RegisterAsync(connection, ct, BoxServerId, BoxServerName, engineEdition: null);
+
+            Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpHealthParserTools.GetSystemHealth(postgres, BoxServerName)));
+            Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(postgres, BoxServerName)));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>Column list copied from <c>DarlingMcpTestData.RegisterServerAsync</c>, plus the one column
+    /// this test exists to vary.</summary>
+    private static async Task RegisterAsync(
+        NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName, int? engineEdition)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, created_date, modified_date)
+VALUES ($1, $2, $3, TRUE, $4, 15, $5, $5)
+ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_engine_edition = EXCLUDED.sql_engine_edition;", connection);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(serverName);
+        command.Parameters.AddWithValue(serverName);
+        command.Parameters.AddWithValue((object?)engineEdition ?? DBNull.Value);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        using var cleanup = new NpgsqlCommand(
+            $"DELETE FROM servers WHERE server_id IN ({AzureServerId}, {BoxServerId});", connection);
+        await cleanup.ExecuteNonQueryAsync(ct);
+    }
+}

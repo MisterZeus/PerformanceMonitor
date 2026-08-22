@@ -77,6 +77,11 @@ public sealed class McpMissMessageParityPinTests
            quiet stretch. */
         ". A day with ANY collection appears here even when every signal was quiet, so this range is outside what the store holds for this server rather than a stretch of quiet days — widen days_back, or move as_of.",
         ", so the calendar is empty because nothing has been collected — not because those days were quiet. Check that the service is running and that the server is enabled for collection.",
+
+        /* The instructions' miss-vocabulary paragraph (#2511). The engine-gap MESSAGE itself is built by
+           CollectorEngineCapability and is byte-identical by construction rather than by pinning; what lives
+           twice, and therefore belongs here, is the paragraph that teaches a caller how to read it. */
+        "`not_collected` means this server does not collect that at all — and when the reason is the ENGINE, the gap is PERMANENT",
     };
 
     [Theory]
@@ -99,7 +104,7 @@ public sealed class McpMissMessageParityPinTests
     [Fact]
     public void ThePinCoversTheSentencesThisChangeMadeShared()
     {
-        Assert.True(SharedMissFragments().Count() >= 8,
+        Assert.True(SharedMissFragments().Count() >= 9,
             "the shared-sentence pin lost entries; a sentence that stops being pinned can drift between the SKUs unnoticed");
     }
 

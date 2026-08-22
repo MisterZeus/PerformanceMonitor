@@ -32,6 +32,10 @@ internal static class McpInstructions
 
         ## Tool Reference
 
+        ### Reading an empty result
+
+        When a read comes back with no data, the `status` word says WHICH kind of nothing it is, and the three are not interchangeable. `empty` is a true negative: we looked and there was nothing to find. `unavailable` means this server could have that data and does not have it right now, so collection health is worth a look. `not_collected` means this server does not collect that at all — and when the reason is the ENGINE, the gap is PERMANENT: the collector serving that read does not run on this server's engine (an Azure SQL Database has no system_health session, no default trace and no SQL Agent), so there is no session to start, no collector to enable, and nothing to check. The message names the engine and the collector. Do not send anyone to go and fix it.
+
         ### Asking about a PAST window
 
         Every tool below that takes `hours_back` also takes `as_of`: an optional ISO-8601 UTC instant that moves the END of the window off "now". `hours_back` stays the window's LENGTH. So the four hours around last Tuesday 03:00 is `as_of=2026-08-19T05:00:00Z, hours_back=4` — not `hours_back=170`.

@@ -19,6 +19,14 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpHealthParserTools
 {
+    /// <summary>
+    /// The collector every one of these nine reads is served by. Named once so the #2511 capability probe
+    /// asks about the same collector on every read and on both SKUs; a test scans both MCP trees for the
+    /// names passed to the probe and holds them to <c>CollectorCatalog</c>, because an unknown name would
+    /// answer "supported" and silently restore the old wrong message.
+    /// </summary>
+    private const string SystemHealthCollectorName = "system_health_events";
+
     [McpServerTool(Name = "get_health_parser_system_health"), Description("Gets parsed system_health extended event data: overall health indicators (spinlock backoffs, sick spinlocks, latch warnings, dump requests, non-yielding tasks, SQL vs system CPU, bad pages) captured by sp_server_diagnostics.")]
     public static async Task<string> GetSystemHealth(
         LocalDataService dataService,
@@ -38,7 +46,8 @@ public sealed class McpHealthParserTools
 
             var rows = await dataService.GetSystemHealthAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No system health data found in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, SystemHealthCollectorName)
+                    ?? McpHelpers.Status("empty", "No system health data found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -89,7 +98,8 @@ public sealed class McpHealthParserTools
 
             var rows = await dataService.GetSevereErrorsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No severe errors found in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, SystemHealthCollectorName)
+                    ?? McpHelpers.Status("empty", "No severe errors found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -131,7 +141,8 @@ public sealed class McpHealthParserTools
 
             var rows = await dataService.GetIoIssuesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No I/O issues found in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, SystemHealthCollectorName)
+                    ?? McpHelpers.Status("empty", "No I/O issues found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -173,7 +184,8 @@ public sealed class McpHealthParserTools
 
             var rows = await dataService.GetSchedulerIssuesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No scheduler issues found in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, SystemHealthCollectorName)
+                    ?? McpHelpers.Status("empty", "No scheduler issues found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -217,7 +229,8 @@ public sealed class McpHealthParserTools
 
             var rows = await dataService.GetMemoryConditionsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No memory condition events found in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, SystemHealthCollectorName)
+                    ?? McpHelpers.Status("empty", "No memory condition events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -284,7 +297,8 @@ public sealed class McpHealthParserTools
 
             var rows = await dataService.GetCpuTasksAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No CPU task events found in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, SystemHealthCollectorName)
+                    ?? McpHelpers.Status("empty", "No CPU task events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -330,7 +344,8 @@ public sealed class McpHealthParserTools
 
             var rows = await dataService.GetMemoryBrokerAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No memory broker events found in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, SystemHealthCollectorName)
+                    ?? McpHelpers.Status("empty", "No memory broker events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -378,7 +393,8 @@ public sealed class McpHealthParserTools
 
             var rows = await dataService.GetMemoryNodeOomAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No memory node OOM events found in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, SystemHealthCollectorName)
+                    ?? McpHelpers.Status("empty", "No memory node OOM events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -460,11 +476,23 @@ public sealed class McpHealthParserTools
 
                 var everCaptured = await dataService.HasAnySystemHealthEventOfTypeAsync(
                     resolved.ServerId, SystemHealthParser.WaitInfoEvent);
-                return everCaptured
-                    ? McpHelpers.Status(
+                if (everCaptured)
+                {
+                    return McpHelpers.Status(
                         "empty",
-                        $"No wait_info events were captured for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS captured them before, so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.")
-                    : McpHelpers.Status(
+                        $"No wait_info events were captured for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS captured them before, so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.");
+                }
+
+                /*
+                    #2511 adds a FOURTH nothing, and it is the one that was being mis-explained. On an engine
+                    whose system_health collector is gated off there is no session to start and no collection
+                    to check, so the advice below is advice about something that cannot exist. The engine
+                    answer goes first because it is the stronger claim; the text after it stays exactly right
+                    for every engine that DOES collect this.
+                */
+                return await McpEngineCapability.NotCollectedStatusAsync(
+                        dataService, resolved.ServerId, resolved.ServerName, SystemHealthCollectorName)
+                    ?? McpHelpers.Status(
                         "unavailable",
                         $"No wait_info events have EVER been captured for {resolved.ServerName}, so this is NOT an all-clear — there is nothing here to be clear about. This read is served from the collected system_health ring buffer: check that collection is running for this server and that its system_health session is started before concluding nothing was waiting.");
             }
