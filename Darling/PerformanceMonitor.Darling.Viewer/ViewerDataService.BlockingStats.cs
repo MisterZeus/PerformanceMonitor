@@ -28,21 +28,6 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed record BlockingDurationStatsPoint(
     DateTime Time, int EventCount, long TotalDurationMs, long MaxDurationMs, double AvgDurationMs);
 
-/// <summary>
-/// One per-minute bucket of deadlock SEVERITY (the Blocking Stats sub-tab's deadlock companion to
-/// <see cref="BlockingDurationStatsPoint"/>): the count of deadlock VICTIM processes in the bucket plus the
-/// total / max / avg deadlock <c>wait_time_ms</c> over EVERY process in the bucket's graphs. The on-the-fly
-/// Darling equivalent of the Dashboard's pre-aggregated <c>collect.blocking_deadlock_stats</c>
-/// (<c>victim_count</c> / <c>total_deadlock_wait_time_ms</c>) — computed by parsing the
-/// <c>deadlock_graph_xml</c> the store already keeps, so (like the blocking-duration aggregate) it needs no
-/// collector and no schema change. Matches the Dashboard analyzer's exact semantics
-/// (<c>26_blocking_deadlock_analyzer.sql</c>: <c>victim_count = SUM(CASE WHEN … VICTIM)</c>,
-/// <c>total_deadlock_wait_time_ms = SUM(every process's wait_time)</c>) via the shared
-/// <see cref="DeadlockGraphParser"/>'s per-process <see cref="DeadlockProcessNode.IsVictim"/> /
-/// <see cref="DeadlockProcessNode.WaitTimeMs"/>.
-/// </summary>
-public sealed record DeadlockSeverityStatsPoint(
-    DateTime Time, int VictimCount, long TotalWaitMs, long MaxWaitMs, double AvgWaitMs);
 
 public sealed partial class ViewerDataService
 {
@@ -188,62 +173,14 @@ public sealed partial class ViewerDataService
     /// Pure + off-WPF so Darling.Tests pin it without a live store; the ORDER BY is re-applied here because the
     /// dictionary rollup does not preserve the read order.
     /// </summary>
+    /// <summary>
+    /// Delegates to <see cref="DeadlockSeverityAggregator"/> in Common.
+    /// <para>The arithmetic moved there so the headless service's Blocking Stats endpoint (#2484) could
+    /// reach it. Two copies of "what counts as a victim" is how two surfaces end up quietly disagreeing
+    /// about the same deadlock. This entry point stays because the pins that cover the aggregation are
+    /// written against it.</para>
+    /// </summary>
     internal static List<DeadlockSeverityStatsPoint> AggregateDeadlockSeverity(
-        IReadOnlyList<(DateTime? DeadlockTime, string? Xml)> graphs)
-    {
-        var buckets = new Dictionary<DateTime, DeadlockSeverityAccumulator>();
-
-        foreach (var (deadlockTime, xml) in graphs)
-        {
-            if (deadlockTime is not { } dt)
-                continue;
-
-            var model = DeadlockGraphParser.Parse(xml);
-            if (model.IsEmpty)
-                continue;
-
-            var bucket = TruncateToMinute(dt);
-            if (!buckets.TryGetValue(bucket, out var acc))
-            {
-                acc = new DeadlockSeverityAccumulator();
-                buckets[bucket] = acc;
-            }
-
-            foreach (var process in model.Processes)
-            {
-                if (process.IsVictim)
-                    acc.VictimCount++;
-                acc.TotalWaitMs += process.WaitTimeMs;
-                if (process.WaitTimeMs > acc.MaxWaitMs)
-                    acc.MaxWaitMs = process.WaitTimeMs;
-                acc.ProcessCount++;
-            }
-        }
-
-        return buckets
-            .OrderBy(kvp => kvp.Key)
-            .Select(kvp => new DeadlockSeverityStatsPoint(
-                kvp.Key,
-                kvp.Value.VictimCount,
-                kvp.Value.TotalWaitMs,
-                kvp.Value.MaxWaitMs,
-                kvp.Value.ProcessCount > 0 ? (double)kvp.Value.TotalWaitMs / kvp.Value.ProcessCount : 0.0))
-            .ToList();
-    }
-
-    /// <summary>Mutable per-bucket accumulator for <see cref="AggregateDeadlockSeverity"/> (a reference type so
-    /// the <c>TryGetValue</c> handle mutates the stored instance in place — one alloc per populated minute,
-    /// which is negligible at deadlock volumes).</summary>
-    private sealed class DeadlockSeverityAccumulator
-    {
-        public int VictimCount;
-        public long TotalWaitMs;
-        public long MaxWaitMs;
-        public int ProcessCount;
-    }
-
-    /// <summary>Truncates to the minute to match Postgres <c>DATE_TRUNC('minute', …)</c> (the count trend's
-    /// bucketing), preserving the value's <see cref="DateTimeKind"/> (naive UTC from the store).</summary>
-    private static DateTime TruncateToMinute(DateTime value) =>
-        new(value.Ticks - (value.Ticks % TimeSpan.TicksPerMinute), value.Kind);
+        IReadOnlyList<(DateTime? DeadlockTime, string? Xml)> graphs) =>
+        DeadlockSeverityAggregator.Aggregate(graphs);
 }
