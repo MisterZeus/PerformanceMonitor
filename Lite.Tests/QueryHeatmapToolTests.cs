@@ -154,6 +154,18 @@ public sealed class QueryHeatmapToolTests : IClassFixture<SharedDuckDbFixture>, 
             System.Globalization.DateTimeStyles.RoundtripKind)).ToArray();
         Assert.Equal(times.OrderBy(t => t).ToArray(), times);
 
+        /*
+            The reported window has to be the window the read USED. It spans exactly hours_back and brackets
+            every bin that came back. Taken after the read returns it drifts by the read's own duration —
+            on the one read whose entire output is a time axis, so a window that disagrees with the bins
+            under it is worse here than almost anywhere (review catch on the first cut of this file).
+        */
+        var windowStart = ParseUtc(grid.GetProperty("window_start").GetString()!);
+        var windowEnd = ParseUtc(grid.GetProperty("window_end").GetString()!);
+        Assert.Equal(24.0, (windowEnd - windowStart).TotalHours, 3);
+        Assert.True(windowStart <= times[0], "window_start is after the first bin the read returned");
+        Assert.True(windowEnd >= times[^1], "window_end is before the last bin the read returned");
+
         var bucket0 = cells.Single(c => c.GetProperty("bucket_index").GetInt32() == 0);
         Assert.Equal(1, bucket0.GetProperty("query_count").GetInt64());
         Assert.Equal("0xLOW", bucket0.GetProperty("top_query_hash").GetString());
@@ -239,6 +251,9 @@ public sealed class QueryHeatmapToolTests : IClassFixture<SharedDuckDbFixture>, 
     }
 
     private static JsonElement Root(string json) => JsonDocument.Parse(json).RootElement;
+
+    private static DateTime ParseUtc(string value) => DateTime.Parse(
+        value, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
 
     private static DateTime Truncate(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);

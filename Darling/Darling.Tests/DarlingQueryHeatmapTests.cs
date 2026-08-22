@@ -428,6 +428,18 @@ public sealed class DarlingQueryHeatmapLiveTests
                 System.Globalization.DateTimeStyles.RoundtripKind)).ToArray();
             Assert.Equal(times.OrderBy(t => t).ToArray(), times);
 
+            /*
+                The reported window has to be the window the read USED. Here it is by construction — the
+                tool computes start/end once and passes them into the query — and the pin keeps it that
+                way: computed after the read instead, it would drift by the read's own duration, on the one
+                read whose entire output is a time axis.
+            */
+            var windowStart = ParseUtc(grid.GetProperty("window_start").GetString()!);
+            var windowEnd = ParseUtc(grid.GetProperty("window_end").GetString()!);
+            Assert.Equal(24.0, (windowEnd - windowStart).TotalHours, 3);
+            Assert.True(windowStart <= times[0], "window_start is after the first bin the read returned");
+            Assert.True(windowEnd >= times[^1], "window_end is before the last bin the read returned");
+
             /* The first bin: bucket 0 holds the 0.5 ms query, bucket 2 holds the two ~50 ms ones, and the
                cell's top query is the most-EXECUTED of them rather than the slowest. */
             var bucket0 = cells.Single(c => c.GetProperty("bucket_index").GetInt32() == 0);
@@ -491,6 +503,9 @@ public sealed class DarlingQueryHeatmapLiveTests
     }
 
     private static JsonElement Root(string json) => JsonDocument.Parse(json).RootElement;
+
+    private static DateTime ParseUtc(string value) => DateTime.Parse(
+        value, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
 
     /// <summary>Floors to the top of the hour, which is also a 5-minute boundary on date_bin's epoch grid
     /// (the minutes from year 1 to 1970 divide by both 5 and 60), so the seeded rows land where the test

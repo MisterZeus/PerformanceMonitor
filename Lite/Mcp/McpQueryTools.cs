@@ -418,6 +418,14 @@ public sealed class McpQueryTools
                 field whose whole reason for existing is that the cap should not have to be inferred.
             */
             var databases = string.IsNullOrWhiteSpace(database_name) ? null : new[] { database_name };
+
+            /* Captured BEFORE the read, whose window is its own internal UtcNow. Taken afterwards it would
+               report a window the query never used — off by however long the read took, and this read is
+               the one whose whole output is a time axis, so a window that disagrees with the bins under it
+               is worse here than almost anywhere. Hoisting shrinks the skew to call-entry overhead; the
+               same move GetTopQueriesByCpu makes above, for the same reason. Darling's twin has no skew at
+               all because it computes the window itself and passes it in. */
+            var windowEnd = DateTime.UtcNow;
             var rows = await dataService.GetQueryHeatmapCellsAsync(
                 resolved.ServerId, parsedMetric, hours_back, bucket_minutes, limit + 1, databases);
 
@@ -452,7 +460,6 @@ public sealed class McpQueryTools
             cells = cells.OrderBy(c => c.TimeBucket).ThenBy(c => c.BucketIndex).ToList();
 
             var labels = LocalDataService.HeatmapBucketLabelsFor(parsedMetric);
-            var end = DateTime.UtcNow;
 
             return JsonSerializer.Serialize(new
             {
@@ -461,8 +468,8 @@ public sealed class McpQueryTools
                 metric = LocalDataService.HeatmapMetricName(parsedMetric),
                 metric_unit = LocalDataService.HeatmapMetricUnit(parsedMetric),
                 database_name,
-                window_start = end.AddHours(-hours_back).ToString("o"),
-                window_end = end.ToString("o"),
+                window_start = windowEnd.AddHours(-hours_back).ToString("o"),
+                window_end = windowEnd.ToString("o"),
                 bucket_minutes,
                 /* The same bin width the desktop viewer hardcodes, so the two surfaces cannot disagree
                    about the same server over the same window. */
