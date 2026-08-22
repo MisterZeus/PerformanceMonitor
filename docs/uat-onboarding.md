@@ -485,7 +485,7 @@ Invoke-RestMethod http://localhost:5153/api/ping
 
 Be clear about this before you file it as a bug. The web dashboard reads the store as the least-privilege
 `viewer` role. Its `/api/read/*` surface is machine-derived from the MCP tool catalog minus an explicit
-exclusion list — 92 read endpoints out of 111 tools — and these are the exclusions that matter to you:
+exclusion list — 93 read endpoints out of 112 tools — and these are the exclusions that matter to you:
 
 - **No plan analysis.** The whole `analyze_query_plan` / `analyze_procedure_plan` / `analyze_query_store_plan` /
   `analyze_plan_xml` family is excluded. **Use the WPF viewer for plans** — it has the graphical plan viewer,
@@ -502,7 +502,7 @@ page carries one of **two** tab sets, chosen from the engine the store recorded 
 - **SQL Server — twelve sub-tabs.** Overview, Wait Stats, CPU, Memory, Blocking, File I/O, Queries,
   Configuration, Config Changes, Activity, System Events, Collection Health.
 - **PostgreSQL — six.** Overview, Activity, Vacuum, Waits, I/O, Replication. Six is the design and not a
-  shortfall: it is where all eight `get_pg_*` reads live, and the SQL Server tabs it does not have (tempdb,
+  shortfall: it is where all nine `get_pg_*` reads live, and the SQL Server tabs it does not have (tempdb,
   Query Store, trace flags, plan cache, the `system_health` ring buffer) have no PostgreSQL analogue to fill
   them. Vacuum is deliberately one tab rather than three — an old xmin horizon starves vacuum, starved vacuum
   falls behind on freezing, and freezing falling behind is what ends in wraparound; read separately each looks
@@ -512,7 +512,7 @@ page carries one of **two** tab sets, chosen from the engine the store recorded 
   positive PostgreSQL claim moves a server off the default. A server that has never connected will therefore
   show SQL Server tabs until it does.
 
-Between them the two sets reach **80 of the 92** read endpoints, 81 across all five pages, against the viewer's
+Between them the two sets reach **81 of the 93** read endpoints, 82 across all five pages, against the viewer's
 nineteen top-level per-server tabs (65 counting their inner tabs). So most of what the viewer shows is now
 here, and what is not divides into three groups.
 
@@ -527,13 +527,13 @@ its avg CPU and avg duration over the window plus a grid of its per-collection s
 are exactly the queries the table shows** — the picker indexes into the rows rendered directly above it, rather
 than reading a second, wider list that could offer a query the table does not.
 
-**The eight `get_pg_*` PostgreSQL reads are on the web now, and are still absent from the WPF viewer.** That
+**The nine `get_pg_*` PostgreSQL reads are on the web now, and are still absent from the WPF viewer.** That
 is the current state of [#2530](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2530): the web
 dashboard renders the six PostgreSQL tabs above at any target whose `engine_kind` says PostgreSQL, and the
 desktop viewer has no PostgreSQL screens at all — so on Windows a PostgreSQL target is still readable only
 through MCP. If you are evaluating this for PostgreSQL monitoring, know which surface you are evaluating.
 
-**Two of the eight PostgreSQL capture paths are Amazon Aurora-only**, so on a stock PostgreSQL target two
+**Two of the nine PostgreSQL capture paths are Amazon Aurora-only**, so on a stock PostgreSQL target two
 panels are permanently empty — and neither is a fault. `get_pg_wait_stats` reads `aurora_stat_system_waits()`
 and `get_pg_top_queries` reads `aurora_stat_statements()`; core PostgreSQL has an equivalent of neither, in any
 version. Both answer `not_collected` there, naming the server, the engine and the collector and saying the gap

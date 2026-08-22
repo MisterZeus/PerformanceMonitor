@@ -74,6 +74,11 @@ public sealed class CrossAppMcpToolInventoryPinTests
            this to Lite would require a PostgreSQL target Lite cannot have, so it belongs here with the rest. */
         "get_pg_blocking",
 
+        /* get_pg_database_stats (#2539) — the pg_stat_database counters. Same architectural reason as the
+           eight above: Lite has no PostgreSQL target and cannot acquire one, and DuckDbSchemaGenerator
+           filters the table out, so there is nothing for a Lite twin to read. */
+        "get_pg_database_stats",
+
         /* #2068: the store self-metrics read (get_store_metrics) over collect.store_metrics — the central
            Postgres store measuring ITSELF (hypertable sizes/compression, payload dims, whole-store growth)
            for capacity forecasting. Darling-ONLY by architecture, not a "not ported yet" item: Lite is a

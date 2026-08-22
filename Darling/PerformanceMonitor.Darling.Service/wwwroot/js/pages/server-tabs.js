@@ -1318,9 +1318,11 @@ export const SERVER_TABS = [
  * trace flags, plan cache and the system_health ring buffer have no PostgreSQL analogue, and rendering them at a
  * PostgreSQL target is the defect this registry removes rather than a shape to reproduce.
  *
- * Every one of the eight get_pg_* reads the service serves lands on exactly one of these tabs, and a pin asserts
- * it in both directions — so a ninth PostgreSQL read cannot ship reachable only through MCP, which is how these
- * eight spent three releases.
+ * Every get_pg_* read the service serves lands on exactly one of these tabs, and a pin asserts it in both
+ * directions — derived from the dispatch, so a NEW PostgreSQL read cannot ship reachable only through MCP,
+ * which is how the first eight spent three releases. It has already caught one: #2539's
+ * get_pg_database_stats landed on dev while this was in review, and the pin refused the merge until the
+ * Activity tab showed it.
  *
  * THE ENGINE-NEUTRAL BORROWING, and why it is only three reads. get_collection_health, get_collection_log and
  * get_analysis_findings read the collection log and the findings store — neither is a SQL Server collector's
@@ -1481,6 +1483,31 @@ export const POSTGRES_TABS = [
         ctx.label + ", by total execution time",
         "No query statistics in this window."
       ),
+      /* Directly UNDER the query shapes, because that is the question it answers (#2539). A statement whose
+         time makes no sense from its row count usually spilled, and pg_stat_database's temp counters are the
+         only evidence of that we collect — the statement stats themselves cannot see it. The deadlock and
+         rollback counters ride along because they come from the same free read; the raw blks_hit / blks_read
+         columns do not, because `cache_hit_pct` and the read's own `cache_finding` say what they are for
+         without a third and fourth column of block counts to be misread as a workload measure. */
+      ...fanout("get_pg_database_stats", { server, hours: ctx.hours, limit: 20 }, [
+        {
+          title: "Database Activity",
+          subtitle: ctx.label + ", totals over the databases returned",
+          viz: "stat",
+          stats: PG_DATABASE_STATS,
+          span: 2,
+          emptyText: "No database recorded transactions, block accesses, temp files or deadlocks in this window.",
+        },
+        {
+          title: "By Database",
+          subtitle: ctx.label + ", biggest spiller first",
+          viz: "table",
+          rowsKey: "databases",
+          columns: PG_DATABASE_COLUMNS,
+          emptyText:
+            "No per-database activity in this window. These are windowed DIFFERENCES, so a single snapshot is not enough — the panel above says which of the two it is.",
+        },
+      ]),
     ],
   },
 
@@ -2537,6 +2564,22 @@ const PG_BLOCKING_STATS = [
   { key: "cycles_sampled", label: "Cycles", format: "int" },
 ];
 
+/* Every total here is summed over the rows the read's LIMIT let through, and the read names that in the
+   field itself (`cache_hit_pct_of_returned`), so the labels do too rather than promising a cluster figure the
+   number structurally is not. `limit_reached` is what turns that caveat into something a reader can act on. */
+const PG_DATABASE_STATS = [
+  { key: "database_count", label: "Databases returned", format: "int" },
+  { key: "total_temp_files", label: "Temp files", format: "int" },
+  { key: "total_temp_bytes", label: "Temp bytes", format: "int" },
+  { key: "top_spiller", label: "Biggest spiller", format: "text", small: true },
+  { key: "total_deadlocks", label: "Deadlocks", format: "int" },
+  { key: "cache_hit_pct_of_returned", label: "Cache hit % (of returned)", format: "num2" },
+  { key: "limit_reached", label: "Limit reached", format: "bool" },
+  /* Named on the tile rather than only per row: every total beside it is a LOWER BOUND when this is true,
+     and a reader has to see that before drawing a conclusion from any of them. */
+  { key: "statistics_were_reset_in_window", label: "Stats reset in window", format: "bool" },
+];
+
 const PG_IO_SUMMARY_STATS = [
   { key: "combination_count", label: "Combinations", format: "int" },
   { key: "total_reads", label: "Reads", format: "int" },
@@ -2687,6 +2730,28 @@ const PG_IO_COLUMNS = [
   { key: "write_time_ms", label: "Write Time", format: "ms" },
   { key: "write_counters_tracked", label: "Writes Tracked", format: "bool" },
   { key: "stats_reset", label: "Stats Reset", format: "time" },
+];
+
+/* The read's own `*_finding` prose travels beside each number, because none of these three is actionable
+   from the figure alone — a 99% cache hit ratio is meaningless without knowing the working set, and a
+   rollback ratio is a fault only against what the application is supposed to do. */
+const PG_DATABASE_COLUMNS = [
+  { key: "database", label: "Database" },
+  { key: "temp_files", label: "Temp Files", format: "int" },
+  { key: "temp_bytes", label: "Temp Bytes", format: "int" },
+  { key: "avg_temp_file_bytes", label: "Avg Temp File (bytes)", format: "int" },
+  { key: "spill_finding", label: "Spills", wrap: true },
+  { key: "cache_hit_pct", label: "Cache Hit %", format: "num2" },
+  { key: "cache_finding", label: "Cache", wrap: true },
+  { key: "deadlocks", label: "Deadlocks", format: "int" },
+  { key: "xact_commit", label: "Commits", format: "int" },
+  { key: "xact_rollback", label: "Rollbacks", format: "int" },
+  { key: "rollback_pct", label: "Rollback %", format: "num2" },
+  { key: "rollback_finding", label: "Rollbacks", wrap: true },
+  /* The reset evidence. Without it every total in the row is a lower bound and nothing on screen says so. */
+  { key: "counters_were_reset", label: "Reset", format: "bool" },
+  { key: "reset_note", label: "Reset Note", wrap: true },
+  { key: "sample_count", label: "Samples", format: "int" },
 ];
 
 const PG_SLOT_COLUMNS = [

@@ -139,6 +139,7 @@ public static class PgMigrations
         new Migration(80, "collection-log-fanout-rollup", V80Sql),
         new Migration(81, "tempdb-max-size", V81Sql),
         new Migration(82, "server-engine-kind", V82Sql),
+        new Migration(83, "pg-database-stats", V83Sql),
     };
 
     /// <summary>
@@ -1726,6 +1727,47 @@ CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen
     private const string V82Sql = @"
 ALTER TABLE collect.servers
     ADD COLUMN IF NOT EXISTS engine_kind text;";
+
+    /// <summary>
+    /// V83 — <c>collect.pg_database_stats</c>, the <c>pg_stat_database</c> counters (#2539): temp-file
+    /// spills, the buffer-cache hit ratio, deadlocks, and the commit/rollback split. Four questions nothing
+    /// collected, off one cluster-wide view that needs no extension and nothing configured on the target.
+    ///
+    /// <para><b>Per-database rows, and the grain is the point.</b> <c>stats_reset</c> is per database
+    /// (<c>pg_stat_reset()</c> resets the database it is connected to), so an aggregate would have to pick
+    /// one reset timestamp for a set of rows that legitimately disagree — and a single database's reset
+    /// would then corrupt the cluster's delta with nothing left in the data to say so. The full argument is
+    /// on <c>PgDatabaseStatsCollector</c>.</para>
+    ///
+    /// <para><b>Every counter column is NULLABLE</b>, matching V69's reasoning: these are cumulative
+    /// counters that get differenced at read time, and a NOT NULL 0 default would turn "not reported" into
+    /// a measurement. <c>database_name</c> is nullable because PostgreSQL genuinely emits a NULL-named row
+    /// for shared relations, and <c>stats_reset</c> is nullable because it is NULL until the first reset —
+    /// the common case, and it means exactly "never reset".</para>
+    ///
+    /// <para>Additive and view-less exactly like V63-V69 and V71: a fresh store gets the table from V1's
+    /// generated schema, and this rung is what an already-existing store gets. A store monitoring no
+    /// PostgreSQL target carries one more empty table and nothing else changes.</para>
+    /// </summary>
+    private const string V83Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_database_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    xact_commit bigint,
+    xact_rollback bigint,
+    blks_read bigint,
+    blks_hit bigint,
+    temp_files bigint,
+    temp_bytes bigint,
+    deadlocks bigint,
+    stats_reset timestamp
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_database_stats_time
+    ON collect.pg_database_stats(server_id, collection_time);";
 
     /// <summary>
     /// V81 — tempdb's growth CEILING on <c>tempdb_stats</c> (#2515). <c>dm_db_file_space_usage</c>, which is

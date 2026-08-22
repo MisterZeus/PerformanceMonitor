@@ -22,7 +22,8 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// The V82 rung (#2530) — <c>collect.servers.engine_kind</c>, and the top of the ladder.
+/// The V82 rung (#2530) — <c>collect.servers.engine_kind</c>. No longer the top of the ladder: V83 (#2539)
+/// took that, and with it the top-of-ladder pins and the sliding <c>mapParameters - 1</c> probe ordinal.
 ///
 /// <para><b>What it fixes.</b> The registry recorded <c>sql_engine_edition</c> and <c>sql_major_version</c>
 /// and nothing that says a target is PostgreSQL. <c>SERVERPROPERTY</c> does not exist on PostgreSQL, so the
@@ -49,14 +50,18 @@ public sealed class MonitoredEngineKindStoreTests
     /* ---------------- the rung ---------------- */
 
     [Fact]
-    public void TheRungIsRegisteredAndIsTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal("server-engine-kind", PgMigrations.Scripts.Single(s => s.Version == 82).Name);
-        Assert.Equal(82, versions.Max());
-        Assert.Equal(82, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(82, StorageVersion.SchemaVersion);
+
+        /* V83 (#2539) took the top of the ladder, so this rung's own test no longer claims it. What it
+           still owns is that 82 EXISTS, is ordered, and sits in the dense run — the invariants that keep a
+           rung from being silently skipped. The top-of-ladder pins live with whichever rung is newest;
+           leaving a stale copy here would fail every future rung's PR for a reason in someone else's file. */
+        Assert.Contains(82, versions);
+        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
 
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
@@ -110,24 +115,17 @@ public sealed class MonitoredEngineKindStoreTests
             "table_name = 'servers' AND column_name = 'engine_kind'",
             ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
-        var mapParameters = typeof(ViewerDataService)
-            .GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
-            .GetParameters().Length;
-
         var viewerSource = ReadViewerSource();
 
-        /* Ordinals are positional: the sentinel was APPENDED, so the reader must ask for exactly one more
-           than it did and no more than that. This form belongs to whichever rung is NEWEST — the older rungs'
-           twins pin their own fixed ordinal instead, because `mapParameters - 1` slides one place right per
-           new rung and keeps passing while testing somebody else's wiring. */
-        Assert.Contains($"reader.GetBoolean({mapParameters - 1})", viewerSource, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({mapParameters})", viewerSource, StringComparison.Ordinal);
+        /* Ordinals are positional and this rung's is FIXED at 57 now that V83 (#2539) is the newest — the
+           `mapParameters - 1` form belongs to whichever rung is on top, because it slides one place right
+           per new rung and would keep passing while quietly testing somebody else's wiring. */
+        Assert.Contains("reader.GetBoolean(57)", viewerSource, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreTo82()
+    public void TheProbeMapsAStoreAtThisRungTo82()
     {
-        Assert.Equal(82, StorageVersion.SchemaVersion);
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService)

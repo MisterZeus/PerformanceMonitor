@@ -616,6 +616,12 @@ public sealed class DarlingMcpHostService : BackgroundService
                    sampled, so "no blocking" here means "none was sampled" and the tool reports its own
                    capture count so that distinction cannot be lost. */
                 .WithGeminiCompatibleTools<DarlingMcpPgBlockingTools>()
+                /* get_pg_database_stats — four questions off one cluster-wide view: temp-file spills (the
+                   PostgreSQL answer to "why is this query slow" that no other read here can give on a stock
+                   target), the buffer-cache hit ratio, a server-recorded deadlock count, and the
+                   commit/rollback split. The one read whose reset handling is part of its contract: a
+                   statistics reset is reported as a reset rather than surfacing as a negative rate. */
+                .WithGeminiCompatibleTools<DarlingMcpPgDatabaseTools>()
                 .WithGeminiCompatibleTools<DarlingMcpMemoryGrantTools>()
                 .WithGeminiCompatibleTools<DarlingMcpPlanCacheSchedulerTools>()
                 .WithGeminiCompatibleTools<DarlingMcpJobTools>()

@@ -168,6 +168,8 @@ public static class CollectorEngineCapability
             ["pg_replication_slots"] = "the pg_replication_slots WAL-retention snapshot",
             ["pg_wraparound_stats"] = "the per-database transaction-ID freeze headroom",
             ["pg_xmin_horizon"] = "the xmin-horizon holders behind vacuum",
+            ["pg_database_stats"] = "the pg_stat_database per-database counters - temp-file spills, cache "
+                                  + "hit ratio, deadlocks and the commit/rollback split",
         };
 
     /// <summary>
