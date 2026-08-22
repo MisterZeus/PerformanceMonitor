@@ -68,6 +68,30 @@ ORDER BY collection_time DESC, wait_duration_ms DESC";
     }
 
     /// <summary>
+    /// Whether the waiting-task collector has EVER sampled this server, ignoring any window.
+    /// <para>Separates an all-clear from missing data. The wrong answer here is the REASSURING one:
+    /// "nothing was waiting" stops a caller looking, where "never collected" sends them to check the
+    /// collector. Darling's twin is <c>DarlingDataReader.HasAnyWaitingTaskSampleAsync</c>.</para>
+    /// <para>Reads <c>v_waiting_tasks</c>, the same source every other reader in this file uses. A probe
+    /// on the base table could report that a server has been sampled for rows the trend itself cannot
+    /// see, which would pick the wrong branch in exactly the case this exists to get right.</para>
+    /// </summary>
+    public async Task<bool> HasAnyWaitingTaskSampleAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT 1
+FROM v_waiting_tasks
+WHERE server_id = $1
+LIMIT 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return await command.ExecuteScalarAsync() is not null and not DBNull;
+    }
+
+    /// <summary>
     /// Gets waiting task duration trend grouped by wait type for charting.
     /// </summary>
     public async Task<List<WaitingTaskTrendPoint>> GetWaitingTaskTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)

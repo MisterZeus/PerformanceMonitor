@@ -339,4 +339,64 @@ public sealed class McpHealthTools
             return McpHelpers.FormatError("get_collection_log", ex);
         }
     }
+
+    [McpServerTool(Name = "get_current_waits_trend"), Description("Gets the two Current Waits series over time for a server: waiting-task total wait duration per wait type per collection, and blocked-session counts per database per collection. get_waiting_tasks answers 'what is waiting right now' and can never say whether it is worse than an hour ago — this is that question. Read the two series together: a wait-type spike with no blocked sessions is a resource wait, the same spike with them is contention.")]
+    public static async Task<string> GetCurrentWaitsTrend(
+        LocalDataService dataService,
+        ServerManager serverManager,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Hours of history. Default 4.")] int hours_back = 4,
+        [Description("Limit the blocked-session series to one database. Omit for all databases.")] string? database_name = null)
+    {
+        var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
+        if (error != null) return error;
+
+        try
+        {
+            var hours = Math.Abs(hours_back);
+            var filter = string.IsNullOrWhiteSpace(database_name) ? null : new[] { database_name };
+
+            var waits = await dataService.GetWaitingTaskTrendAsync(resolved.ServerId, hours);
+            var blocked = await dataService.GetBlockedSessionTrendAsync(resolved.ServerId, hours, databaseNames: filter);
+
+            if (waits.Count == 0 && blocked.Count == 0)
+            {
+                /*
+                    Both empty is two facts, and the wrong one is the REASSURING one -- "nothing was
+                    waiting" reads as all-clear and stops a caller looking. Same words as Darling's twin.
+                */
+                var everCollected = await dataService.HasAnyWaitingTaskSampleAsync(resolved.ServerId);
+                return everCollected
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"Nothing was waiting on {resolved.ServerName} in the last {hours} hour(s). The collector HAS sampled this server, so this is a genuine all-clear for the window rather than missing data.")
+                    : McpHelpers.Status(
+                        "unavailable",
+                        $"No waiting-task samples have EVER been recorded for {resolved.ServerName}, so this is NOT an all-clear — there is nothing to read. Check that collection is running for this server before concluding it was quiet.");
+            }
+
+            return JsonSerializer.Serialize(new
+            {
+                server = resolved.ServerName,
+                hours_back = hours,
+                database_name,
+                waiting_tasks = waits.Select(w => new
+                {
+                    collection_time = w.CollectionTime.ToString("o"),
+                    wait_type = w.WaitType,
+                    total_wait_ms = w.TotalWaitMs,
+                }),
+                blocked_sessions = blocked.Select(b => new
+                {
+                    collection_time = b.CollectionTime.ToString("o"),
+                    database_name = b.DatabaseName,
+                    blocked_count = b.BlockedCount,
+                }),
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("get_current_waits_trend", ex);
+        }
+    }
 }
