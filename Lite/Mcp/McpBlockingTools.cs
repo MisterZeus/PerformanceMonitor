@@ -267,7 +267,7 @@ public sealed class McpBlockingTools
                     resolved.ServerId, hours_back, windowStart, windowEnd);
                 return await EmptyTrend(
                     "blocking", resolved.ServerName, hours_back, captures,
-                    () => dataService.HasAnyBlockingCaptureAsync(resolved.ServerId));
+                    () => dataService.HasAnyBlockingCollectorRunAsync(resolved.ServerId));
             }
 
             var result = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count });
@@ -317,7 +317,7 @@ public sealed class McpBlockingTools
                        was recorded" is not a sentence. It also reads correctly in the other two,
                        where it modifies the collector rather than the event. */
                     "deadlock", resolved.ServerName, hours_back, captures,
-                    () => dataService.HasAnyDeadlockCaptureAsync(resolved.ServerId));
+                    () => dataService.HasAnyDeadlockCollectorRunAsync(resolved.ServerId));
             }
 
             var result = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count });

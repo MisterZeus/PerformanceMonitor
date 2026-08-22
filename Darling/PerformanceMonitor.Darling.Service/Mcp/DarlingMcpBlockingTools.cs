@@ -363,7 +363,7 @@ public sealed class DarlingMcpBlockingTools
                     postgres, resolved.ServerId, start, now);
                 return await EmptyTrend(
                     "blocking", resolved.ServerName, hours_back, captures,
-                    () => DarlingBlockingTrendReader.HasAnyBlockingCaptureAsync(postgres, resolved.ServerId));
+                    () => DarlingBlockingTrendReader.HasAnyBlockingCollectorRunAsync(postgres, resolved.ServerId));
             }
 
             return JsonSerializer.Serialize(new
@@ -408,7 +408,7 @@ public sealed class DarlingMcpBlockingTools
                        was recorded" is not a sentence. It also reads correctly in the other two,
                        where it modifies the collector rather than the event. */
                     "deadlock", resolved.ServerName, hours_back, captures,
-                    () => DarlingBlockingTrendReader.HasAnyDeadlockCaptureAsync(postgres, resolved.ServerId));
+                    () => DarlingBlockingTrendReader.HasAnyDeadlockCollectorRunAsync(postgres, resolved.ServerId));
             }
 
             return JsonSerializer.Serialize(new

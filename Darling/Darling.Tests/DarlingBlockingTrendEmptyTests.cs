@@ -241,12 +241,12 @@ public sealed class DarlingBlockingTrendEmptyTests
     /// exactly the case the probe exists to get right.
     /// </summary>
     [Fact]
-    public void CaptureProbes_CoverBothPaths_AndReadTheSameSourceTheLogReadDoes()
+    public void CollectorRunProbes_CoverBothPaths_AndReadTheSameSourceTheLogReadDoes()
     {
         foreach (var sql in new[]
                  {
                      DarlingBlockingTrendReader.BlockingCaptureCountsSql,
-                     DarlingBlockingTrendReader.HasAnyBlockingCaptureSql,
+                     DarlingBlockingTrendReader.HasAnyBlockingCollectorRunSql,
                  })
         {
             Assert.Contains("v_collection_log", sql, StringComparison.Ordinal);
@@ -261,7 +261,7 @@ public sealed class DarlingBlockingTrendEmptyTests
         foreach (var sql in new[]
                  {
                      DarlingBlockingTrendReader.DeadlockCaptureCountsSql,
-                     DarlingBlockingTrendReader.HasAnyDeadlockCaptureSql,
+                     DarlingBlockingTrendReader.HasAnyDeadlockCollectorRunSql,
                  })
         {
             Assert.Contains("v_collection_log", sql, StringComparison.Ordinal);
@@ -271,8 +271,8 @@ public sealed class DarlingBlockingTrendEmptyTests
 
         /* The existence probes stop at the first row rather than scanning: they run on a path that already
            found nothing, and their only job is to pick which sentence is true. */
-        Assert.Contains("LIMIT 1", DarlingBlockingTrendReader.HasAnyBlockingCaptureSql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT 1", DarlingBlockingTrendReader.HasAnyDeadlockCaptureSql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 1", DarlingBlockingTrendReader.HasAnyBlockingCollectorRunSql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 1", DarlingBlockingTrendReader.HasAnyDeadlockCollectorRunSql, StringComparison.Ordinal);
     }
 
     private static DateTime MinutesAgo(int minutes) =>

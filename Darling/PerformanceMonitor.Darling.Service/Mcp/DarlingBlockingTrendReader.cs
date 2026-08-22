@@ -168,8 +168,14 @@ internal static class DarlingBlockingTrendReader
     /// server whose collectors have run before has a GAP in this window (widen it, or go look at collection
     /// health), while one that has never run them is not collecting blocking at all. Both are "not an
     /// all-clear" and they want different next moves. LIMIT 1, so it stops at the first row.</para>
+    /// <para>NOT the same question as the neighbouring <c>DarlingDataReader.HasAnyBlockingCaptureAsync</c>,
+    /// which asks whether an EVENT was ever captured. That one is right for get_blocking_stats, whose
+    /// verdict is about severity; it is wrong here, because a server that has been collected perfectly for
+    /// months and simply never blocked has no event rows and would be reported as never captured — the
+    /// reassuring-answer failure this read exists to prevent, inverted. Hence "collector run", not
+    /// "capture": the denominator is whether we LOOKED, not whether we found something.</para>
     /// </summary>
-    public const string HasAnyBlockingCaptureSql = """
+    public const string HasAnyBlockingCollectorRunSql = """
         SELECT 1
         FROM v_collection_log
         WHERE server_id = $1
@@ -179,8 +185,8 @@ internal static class DarlingBlockingTrendReader
         """;
 
     /// <summary>Whether the deadlock collector has EVER run successfully for this server. See
-    /// <see cref="HasAnyBlockingCaptureSql"/> for why the question is asked at all.</summary>
-    public const string HasAnyDeadlockCaptureSql = """
+    /// <see cref="HasAnyBlockingCollectorRunSql"/> for why the question is asked at all.</summary>
+    public const string HasAnyDeadlockCollectorRunSql = """
         SELECT 1
         FROM v_collection_log
         WHERE server_id = $1
@@ -199,15 +205,15 @@ internal static class DarlingBlockingTrendReader
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
         => ReadCaptureCountsAsync(postgres, DeadlockCaptureCountsSql, serverId, startUtc, endUtc, cancellationToken);
 
-    /// <summary>Runs <see cref="HasAnyBlockingCaptureSql"/>.</summary>
-    public static Task<bool> HasAnyBlockingCaptureAsync(
+    /// <summary>Runs <see cref="HasAnyBlockingCollectorRunSql"/>.</summary>
+    public static Task<bool> HasAnyBlockingCollectorRunAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
-        => HasAnyCaptureAsync(postgres, HasAnyBlockingCaptureSql, serverId, cancellationToken);
+        => HasAnyCaptureAsync(postgres, HasAnyBlockingCollectorRunSql, serverId, cancellationToken);
 
-    /// <summary>Runs <see cref="HasAnyDeadlockCaptureSql"/>.</summary>
-    public static Task<bool> HasAnyDeadlockCaptureAsync(
+    /// <summary>Runs <see cref="HasAnyDeadlockCollectorRunSql"/>.</summary>
+    public static Task<bool> HasAnyDeadlockCollectorRunAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
-        => HasAnyCaptureAsync(postgres, HasAnyDeadlockCaptureSql, serverId, cancellationToken);
+        => HasAnyCaptureAsync(postgres, HasAnyDeadlockCollectorRunSql, serverId, cancellationToken);
 
     /// <summary>Both capture-count reads share a (collector_name, COUNT(*), MIN, MAX) shape, so one mapper
     /// serves them. COUNT(*) is bigint in Postgres.</summary>
