@@ -163,17 +163,6 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// Parses each deadlock graph via the shared <see cref="DeadlockGraphParser"/> and rolls the processes up
-    /// into per-minute severity buckets (bucketed on <c>deadlock_time</c> truncated to the minute, matching the
-    /// count trend's <c>DATE_TRUNC('minute', deadlock_time)</c>). Per bucket: <c>victim_count</c> = SUM of
-    /// <see cref="DeadlockProcessNode.IsVictim"/>, and total / max / avg deadlock wait over EVERY process's
-    /// <see cref="DeadlockProcessNode.WaitTimeMs"/> (avg is process-weighted = total ÷ process count) — the
-    /// Dashboard <c>collect.blocking_deadlock_stats</c> semantics. A graph with no parseable process (empty /
-    /// malformed XML) or a null <c>deadlock_time</c> (unplaceable on the time axis) contributes nothing.
-    /// Pure + off-WPF so Darling.Tests pin it without a live store; the ORDER BY is re-applied here because the
-    /// dictionary rollup does not preserve the read order.
-    /// </summary>
-    /// <summary>
     /// Delegates to <see cref="DeadlockSeverityAggregator"/> in Common.
     /// <para>The arithmetic moved there so the headless service's Blocking Stats endpoint (#2484) could
     /// reach it. Two copies of "what counts as a victim" is how two surfaces end up quietly disagreeing

@@ -36,7 +36,9 @@ public sealed record DeadlockSeverityStatsPoint(
 public static class DeadlockSeverityAggregator
 {
     /// <summary>
-    /// Buckets graphs by the minute of their deadlock time. Pure: no store access, so it is testable
+    /// Buckets graphs by the minute of their DEADLOCK time — the same truncation the count trend applies
+    /// as <c>DATE_TRUNC('minute', deadlock_time)</c>, so a severity chart and a count chart drawn over the
+    /// same window line up bucket for bucket. Pure: no store access, so it is testable
     /// without one, which is how the viewer's copy was already pinned.
     /// </summary>
     public static List<DeadlockSeverityStatsPoint> Aggregate(
