@@ -199,9 +199,13 @@ public static class CollectorEngineCapability
             ? described
             : "the data this read is served from";
 
+        /* "this server does not collect X" rather than "X is not collected", so the sentence reads correctly
+           whether the capture path is singular ("the system_health extended-events ring buffer") or plural
+           ("the Always On availability replica states"). Number agreement belongs in the template, not in a
+           per-entry special case that the next entry would get wrong. */
         return $"{serverName} runs on {DescribeEngineEdition(engineEdition)} (EngineEdition {engineEdition}). " +
                $"The {collectorName} collector does not run on that engine — its own AppliesTo gate excludes it — " +
-               $"so {capturePath} is not collected for this server and never will be. This is a permanent engine " +
+               $"so this server does not collect {capturePath}, and never will. This is a permanent engine " +
                "capability gap, not a collection outage: checking collection health, enabling a collector or " +
                "starting a capture cannot change it.";
     }

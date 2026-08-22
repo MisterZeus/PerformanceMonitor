@@ -176,7 +176,7 @@ public sealed class CollectorEngineCapabilityTests
         Assert.Contains("EngineEdition 5", message, StringComparison.Ordinal);
         Assert.Contains("system_health_events", message, StringComparison.Ordinal);
         Assert.Contains("the system_health extended-events ring buffer", message, StringComparison.Ordinal);
-        Assert.Contains("never will be", message, StringComparison.Ordinal);
+        Assert.Contains("and never will.", message, StringComparison.Ordinal);
 
         /* The words the OLD message used are the ones that sent an Azure operator hunting. */
         Assert.DoesNotContain("check that collection is running", message, StringComparison.OrdinalIgnoreCase);
