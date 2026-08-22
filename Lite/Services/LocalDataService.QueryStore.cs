@@ -983,7 +983,8 @@ ORDER BY point_time";
             {
                 CollectionTime = reader.GetDateTime(0),
                 Value = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
-                ExecutionCount = reader.IsDBNull(2) ? 0 : (long)ToDouble(reader.GetValue(2))
+                ExecutionCount = reader.IsDBNull(2) ? 0 : (long)ToDouble(reader.GetValue(2)),
+                ExecutionsPerSecond = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2))
             });
         }
         return items;

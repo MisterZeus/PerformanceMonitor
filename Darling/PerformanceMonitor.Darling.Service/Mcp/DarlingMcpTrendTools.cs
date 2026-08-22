@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
@@ -21,7 +22,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 
 /// <summary>
 /// The windowed-trend data-read MCP tools — get_memory_trend / get_perfmon_trend / get_file_io_trend /
-/// get_query_trend / get_query_duration_trend — served over Darling's Postgres store. These are the trend
+/// get_query_trend / get_query_duration_trend / get_procedure_duration_trend /
+/// get_query_store_duration_trend — served over Darling's Postgres store. These are the trend
 /// siblings of the merged core data-read tools (<see cref="DarlingMcpDataTools"/>): each is a per-second /
 /// per-collection time-series over the respective collected table, the SAME shape a client already sees on
 /// Lite / the Dashboard. Every tool body mirrors LITE's <c>Mcp*Tools</c> trend tools field-for-field
@@ -349,24 +351,131 @@ public sealed class DarlingMcpTrendTools
                         $"No query stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the query_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_top_queries_by_cpu will be equally empty until it does.");
             }
 
-            var result = points.Select(p => new
-            {
-                time = p.CollectionTime.ToString("o"),
-                value = p.Value,
-                execution_count = p.ExecutionCount
-            });
-
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.ServerName,
-                hours_back,
-                trend = result
-            }, McpHelpers.JsonOptions);
+            /* The two siblings below serialize through the SAME helper, so the three Performance-Trends
+               reads cannot advertise three different field sets for one shape. */
+            return SerializeTrend(resolved.ServerName, hours_back, points);
         }
         catch (Exception ex)
         {
             return McpHelpers.FormatError("get_query_duration_trend", ex);
         }
+    }
+
+    [McpServerTool(Name = "get_procedure_duration_trend"), Description("Gets a time-series of stored-procedure elapsed time per second and executions per second over time, summed across every procedure. The sibling of get_query_duration_trend, and NOT a duplicate of it: query_stats attributes a procedure's work to the individual statements inside it, so a procedure that got slower is smeared across however many statements it runs. This charges the whole call to the procedure. Read the two together to tell an ad-hoc SQL regression from a procedure regression.")]
+    public static async Task<string> GetProcedureDurationTrend(
+        NpgsqlDataSource postgres,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Hours of history. Default 24.")] int hours_back = 24)
+    {
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        if (error != null) return error;
+
+        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        if (validation != null) return validation;
+
+        try
+        {
+            var now = DateTime.UtcNow;
+            var points = await DarlingTrendReader.GetProcedureDurationTrendAsync(
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+
+            if (points.Count == 0)
+            {
+                return await EmptyTrendAsync(
+                    DarlingTrendReader.HasAnyProcedureStatAsync(postgres, resolved.ServerId),
+                    resolved.ServerName, hours_back, "stored-procedure",
+                    "Check that collection is running and that the server is enabled. A server that genuinely runs no stored procedures also lands here, and that is a real answer rather than a fault.");
+            }
+
+            return SerializeTrend(resolved.ServerName, hours_back, points);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("get_procedure_duration_trend", ex);
+        }
+    }
+
+    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran.")]
+    public static async Task<string> GetQueryStoreDurationTrend(
+        NpgsqlDataSource postgres,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Hours of history. Default 24.")] int hours_back = 24)
+    {
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        if (error != null) return error;
+
+        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        if (validation != null) return validation;
+
+        try
+        {
+            var now = DateTime.UtcNow;
+            var points = await DarlingTrendReader.GetQueryStoreDurationTrendAsync(
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+
+            if (points.Count == 0)
+            {
+                /*
+                    The one empty answer here that is NOT about the collector: Query Store can be off on
+                    every database on the instance. A server with no Query Store data is not a server with
+                    no slow queries, so the message names that cause first.
+                */
+                return await EmptyTrendAsync(
+                    DarlingTrendReader.HasAnyQueryStoreStatAsync(postgres, resolved.ServerId),
+                    resolved.ServerName, hours_back, "Query Store",
+                    "Query Store may be OFF on this server's databases — that, not an absence of slow queries, is the usual cause. Check QUERY_STORE = ON per database, then that collection is running for this server.");
+            }
+
+            return SerializeTrend(resolved.ServerName, hours_back, points);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("get_query_store_duration_trend", ex);
+        }
+    }
+
+    /// <summary>
+    /// The one payload shape the three Performance-Trends siblings share, so a caller can chart them on one
+    /// axis without learning three field names.
+    /// <para><c>execution_count</c> and <c>executions_per_second</c> are the SAME quantity. The first
+    /// shipped truncated to an integer, which on a quiet server turns 0.4 executions a second into a
+    /// reported ZERO - an idle server, when the truth was a slow one. It is kept so a consumer reading it
+    /// does not break; read <c>executions_per_second</c>.</para>
+    /// </summary>
+    private static string SerializeTrend(
+        string serverName, int hours_back, List<DarlingTrendReader.QueryDurationTrendPoint> points) =>
+        JsonSerializer.Serialize(new
+        {
+            server = serverName,
+            hours_back,
+            trend = points.Select(p => new
+            {
+                time = p.CollectionTime.ToString("o"),
+                value = p.Value,
+                execution_count = p.ExecutionCount,
+                executions_per_second = p.ExecutionsPerSecond,
+            }),
+        }, McpHelpers.JsonOptions);
+
+    /// <summary>
+    /// The two-branch empty answer the two new Performance-Trends siblings share (#2484), phrased to match
+    /// the one get_query_duration_trend already ships (#2485) so the three reads tell one story.
+    /// <para>Zero points is two facts wanting opposite responses. A server that HAS been sampled and was
+    /// quiet in this window wants the window widened; a server that has never been sampled wants somebody
+    /// to go look at why. Both are literally "no trend data", and the probe — one LIMIT 1 against the same
+    /// table the trend reads, run only on this path — is what separates them.</para>
+    /// </summary>
+    private static async Task<string> EmptyTrendAsync(
+        Task<bool> probe, string serverName, int hours_back, string what, string checkThis)
+    {
+        var everSampled = await probe;
+        return everSampled
+            ? McpHelpers.Status(
+                "empty",
+                $"No {what} samples were recorded for {serverName} in the last {hours_back} hour(s). This server HAS been sampled before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
+            : McpHelpers.Status(
+                "unavailable",
+                $"No {what} samples have EVER been recorded for {serverName}. This is not an empty window — nothing at all has been stored for this server, so it is NOT a quiet server. {checkThis}");
     }
 
     /// <summary>
