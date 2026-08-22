@@ -694,14 +694,64 @@ export const SERVER_TABS = [
         ctx.label,
         "No active-query snapshots in this window."
       ),
+      /* #2484: the viewer's Performance Trends tab is four charts over three reads. Duration and the
+         execution rate come from ONE payload -- via fanout, not two line() calls, because the tab must not
+         fetch the same read twice. They get separate charts rather than separate series because ms/sec and
+         executions/sec are two units, and one y-domain cannot hold both honestly. */
+      ...fanout("get_query_duration_trend", { server, hours: ctx.hours }, [
+        {
+          title: "Query Duration Trend",
+          subtitle: ctx.label,
+          viz: "line",
+          rowsKey: "trend",
+          xKey: "time",
+          series: DURATION_SERIES,
+          format: "ms",
+          span: 2,
+          emptyText: "No query duration samples in this window.",
+        },
+        {
+          title: "Executions per Second",
+          subtitle: ctx.label,
+          viz: "line",
+          rowsKey: "trend",
+          xKey: "time",
+          series: EXECUTION_RATE_SERIES,
+          span: 2,
+          emptyText: "No query executions recorded in this window.",
+        },
+      ]),
       line(
-        "Query Duration Trend",
-        "get_query_duration_trend",
+        "Procedure Duration Trend",
+        "get_procedure_duration_trend",
         { server, hours: ctx.hours },
         "trend",
         "time",
         DURATION_SERIES,
-        { subtitle: ctx.label, format: "ms", span: 2, emptyText: "No query duration samples in this window." }
+        {
+          subtitle: ctx.label,
+          format: "ms",
+          span: 2,
+          emptyText:
+            "No stored-procedure activity in this window. A server that runs no procedures lands here too, " +
+            "and the read says which of the two it found.",
+        }
+      ),
+      line(
+        "Query Store Duration Trend",
+        "get_query_store_duration_trend",
+        { server, hours: ctx.hours },
+        "trend",
+        "time",
+        DURATION_SERIES,
+        {
+          subtitle: ctx.label,
+          format: "ms",
+          span: 2,
+          emptyText:
+            "No Query Store activity in this window. If Query Store is off on this server's databases the " +
+            "read says so rather than showing an empty chart.",
+        }
       ),
       table(
         "Top Queries by CPU",
@@ -1186,10 +1236,17 @@ const DEADLOCK_SEVERITY_SERIES = [
   { key: "max_wait_ms", label: "Max Wait (ms)" },
 ];
 
-/* get_query_duration_trend returns {time, value, execution_count}. Only `value` (milliseconds) is charted —
-   an execution count on the same axis would be a second unit sharing one y-domain, which is the mistake the
-   CPU chart's dropped idle_cpu series exists to avoid. The count is in the Query Store / top-query tables. */
+/* The three Performance-Trends reads all return {time, value, execution_count, executions_per_second} and
+   share this series: `value` is milliseconds per second. The execution rate is NOT charted beside it — a
+   count and a millisecond on one y-domain is the mistake the CPU chart's dropped idle_cpu series exists to
+   avoid — it gets its own panel off the same payload. */
 const DURATION_SERIES = [{ key: "value", label: "Avg duration" }];
+
+/* #2484: executions/sec, the viewer's fourth Performance-Trends chart. Charts executions_per_second and
+   not execution_count: the two are the same quantity, and the integer one reports ZERO on any server
+   running under one execution a second, which would draw a flat line along the axis for a server that is
+   simply quiet rather than idle. */
+const EXECUTION_RATE_SERIES = [{ key: "executions_per_second", label: "Executions/sec" }];
 
 const GRANT_SERIES = [
   { key: "granted_memory_mb", label: "Granted" },

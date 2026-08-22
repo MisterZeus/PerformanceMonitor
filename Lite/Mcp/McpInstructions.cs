@@ -75,7 +75,9 @@ internal static class McpInstructions
         | `get_top_procedures_by_cpu` | Expensive stored procedures by CPU time, with the same `cpu_attribution` disclosure | `server_name`, `hours_back`, `top`, `database_name` |
         | `get_query_store_top` | Expensive queries from Query Store (persistent) | `server_name`, `hours_back`, `top`, `database_name` |
         | `get_query_trend` | Time-series for a specific query by query_hash | `query_hash` (required), `database_name` (required), `server_name`, `hours_back` |
-        | `get_query_duration_trend` | Average query duration over time (detect degradation). An empty result distinguishes a quiet window (`empty`, widen `hours_back`) from a server nothing has ever been collected for (`unavailable`, collection is not running) | `server_name`, `hours_back` |
+        | `get_query_duration_trend` | Overall query elapsed-ms/sec + executions/sec over time, from the PLAN CACHE. `execution_count` and `executions_per_second` are the same quantity; the first is truncated to an integer, so read the second on a quiet server. An empty result distinguishes a quiet window (`empty`, widen `hours_back`) from a server nothing has ever been collected for (`unavailable`, collection is not running) | `server_name`, `hours_back` |
+        | `get_procedure_duration_trend` | The same series over procedure_stats. NOT a duplicate: query_stats smears a procedure's work across the statements inside it, this charges the whole call to the procedure. Read both to tell an ad-hoc regression from a procedure regression | `server_name`, `hours_back` |
+        | `get_query_store_duration_trend` | The same series over Query Store, which persists per interval and survives a plan-cache eviction or a restart. Each interval is counted once, at the hour the work RAN. Its `unavailable` names the cause the plan-cache trends do not have: Query Store may be OFF on every database | `server_name`, `hours_back` |
 
         ### Blocking & Deadlock Tools
         | Tool | Purpose | Key Parameters |

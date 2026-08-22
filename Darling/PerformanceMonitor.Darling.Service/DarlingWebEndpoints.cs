@@ -1135,7 +1135,9 @@ public static class DarlingWebEndpoints
             ["get_file_io_trend"] = R(CatTrends, "File-IO throughput over time.", PServer(), PHours(24)),
             ["get_memory_trend"] = R(CatTrends, "Memory usage over time.", PServer(), PHours(24)),
             ["get_perfmon_trend"] = R(CatTrends, "One perfmon counter over time (requires counter_name).", PReqText("counter_name"), PServer(), PHours(24)),
+            ["get_procedure_duration_trend"] = R(CatTrends, "Stored-procedure elapsed ms/sec + executions/sec over time.", PServer(), PHours(24)),
             ["get_query_duration_trend"] = R(CatTrends, "Query-duration percentiles over time.", PServer(), PHours(24)),
+            ["get_query_store_duration_trend"] = R(CatTrends, "Query Store duration ms/sec + executions/sec over time.", PServer(), PHours(24)),
             ["get_query_trend"] = R(CatTrends, "One query's metrics over time (requires query_hash + database_name).", PReqText("query_hash"), PReqText("database_name"), PServer(), PHours(24)),
 
             /* ── health / overview (DarlingMcpHealthTools / DarlingMcpFleetTools) ── */
@@ -1579,7 +1581,9 @@ public static class DarlingWebEndpoints
             ["get_perfmon_trend"] = (c, pg, an) => RequireText(c, "counter_name", out var counter)
                 ? DarlingMcpTrendTools.GetPerfmonTrend(pg, counter, Server(c), Hours(c, 24))
                 : MissingParam("counter_name"),
+            ["get_procedure_duration_trend"] = (c, pg, an) => DarlingMcpTrendTools.GetProcedureDurationTrend(pg, Server(c), Hours(c, 24)),
             ["get_query_duration_trend"] = (c, pg, an) => DarlingMcpTrendTools.GetQueryDurationTrend(pg, Server(c), Hours(c, 24)),
+            ["get_query_store_duration_trend"] = (c, pg, an) => DarlingMcpTrendTools.GetQueryStoreDurationTrend(pg, Server(c), Hours(c, 24)),
             ["get_query_trend"] = (c, pg, an) => RequireText(c, "query_hash", out var queryHash)
                 ? (RequireText(c, "database_name", out var db)
                     ? DarlingMcpTrendTools.GetQueryTrend(pg, queryHash, db, Server(c), Hours(c, 24))
