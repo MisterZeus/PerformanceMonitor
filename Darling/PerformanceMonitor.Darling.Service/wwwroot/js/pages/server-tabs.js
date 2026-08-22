@@ -378,6 +378,20 @@ export const SERVER_TABS = [
         "No findings in this window. Findings are written by the analysis pass, which needs at least 24 hours of collected history."
       ),
       stat("Daily Summary", "get_daily_summary", { server }, DAILY_STATS, "today (UTC)", 2),
+      /* #2484: the month range behind the desktop viewer's Performance Calendar. A SECOND read rather than a
+         wider get_daily_summary, which is also why it can sit beside the tile above: a tab must not fetch one
+         read twice, so the today tile and the month grid cannot be the same read. The span is a fixed 30 days
+         and says so, deliberately not ctx.hours — the page's range tops out well short of a month, and a
+         calendar drawn over six hours is not a calendar. */
+      table(
+        "Daily Health Calendar",
+        "get_daily_summary_range",
+        { server, days_back: 30 },
+        "days",
+        DAILY_RANGE_COLUMNS,
+        "last 30 days (UTC)",
+        "No collected days in this range. A day with ANY collection appears here even when every signal was quiet, so a missing day is a gap in collection rather than a quiet one."
+      ),
     ],
   },
 
@@ -572,6 +586,16 @@ export const SERVER_TABS = [
           emptyText: "No blocked sessions in this window.",
         },
       ]),
+      /* #2484: the aggregate lock-wait lane, the third chart on the viewer's Blocking Trends tab. Charts ONE
+         numeric key and lets the read's own (collection, wait type) grouping stand, the same choice the two
+         Current Waits panels below make — the wait type is the grouping the read already applied, not a
+         second axis. get_wait_trend can chart one LCK type; this is the whole family. */
+      line("Lock Waits", "get_lock_wait_trend", { server, hours: ctx.hours }, "trend", "collection_time", LOCK_WAIT_SERIES, {
+        subtitle: ctx.label,
+        emptyText:
+          "No lock waits in this window. If wait stats have never been collected for this server the read " +
+          "says so explicitly rather than reporting an absence of lock contention.",
+      }),
       /* #2484: severity, the companion to the two count trends at the top of this tab. One read, two
          charts, via fanout for the same reason as above. */
       ...fanout("get_blocking_stats", { server, hours: ctx.hours }, [
@@ -1175,6 +1199,23 @@ const DAILY_STATS = [
   { key: "collection_errors", label: "Collection errors", format: "int" },
 ];
 
+/* #2484: one row per collected day, the Performance Calendar's month grid as a table. Band first, because
+   the point of the read is to scan for the day that stands out and then drill in with get_daily_summary. */
+const DAILY_RANGE_COLUMNS = [
+  { key: "summary_date", label: "Date" },
+  { key: "health_band", label: "Band" },
+  { key: "top_wait_type", label: "Top wait" },
+  { key: "total_wait_time_sec", label: "Total wait (s)", format: "int" },
+  { key: "unique_queries", label: "Unique queries", format: "int" },
+  { key: "blocking_events", label: "Blocking", format: "int" },
+  { key: "max_block_duration_ms", label: "Peak block", format: "ms" },
+  { key: "deadlock_count", label: "Deadlocks", format: "int" },
+  { key: "high_cpu_events", label: "High CPU", format: "int" },
+  { key: "memory_pressure_events", label: "Mem pressure", format: "int" },
+  { key: "alert_count", label: "Alerts", format: "int" },
+  { key: "collection_errors", label: "Collection errors", format: "int" },
+];
+
 const SCHEDULER_STATS = [
   { key: "pressure_level", label: "Pressure", format: "text", small: true },
   { key: "schedulers", label: "Schedulers", format: "int" },
@@ -1249,6 +1290,10 @@ const MEMORY_SERIES = [
 
 /* The two trend reads that return {time, count}. */
 const COUNT_SERIES = [{ key: "count", label: "Events" }];
+
+/* #2484: the aggregate lock-wait rate. One numeric key, per the same reasoning as the Current Waits series
+   below — the LCK wait type is the grouping the read applied, not a second axis. */
+const LOCK_WAIT_SERIES = [{ key: "wait_time_ms_per_second", label: "Lock wait (ms/sec)" }];
 
 /* #2484: the two Current Waits series. Each charts ONE numeric key; the wait type and database name are
    the grouping the read already applied, not extra axes. */

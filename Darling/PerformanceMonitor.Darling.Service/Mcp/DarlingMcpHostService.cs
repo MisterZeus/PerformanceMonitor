@@ -630,10 +630,12 @@ public sealed class DarlingMcpHostService : BackgroundService
                    get_mute_rules via the service-side PgMuteRuleStore), the CURRENT-config snapshot trio
                    (get_server_config / get_database_config / get_trace_flags — latest capture, the companion to
                    the *_changes diff tools), and the health overview (get_server_summary + the daily rollup
-                   get_daily_summary, folded through the shared DailyHealthBandCalculator). Same names Lite and
-                   the Dashboard expose, all STORED reads over Darling's Postgres store (no live hit). The
-                   blocking-trend / deadlock-trend, memory-pressure-event, and wait-type siblings ride along on
-                   the existing blocking / memory-grant / core data-read classes above. */
+                   get_daily_summary and its #2484 range sibling get_daily_summary_range — the Performance
+                   Calendar's month grid — both folded through the shared DailyHealthBandCalculator). Same
+                   names Lite and the Dashboard expose, all STORED reads over Darling's Postgres store (no live
+                   hit). The blocking-trend / deadlock-trend / lock-wait-trend, memory-pressure-event, and
+                   wait-type siblings ride along on the existing blocking / memory-grant / core data-read
+                   classes above. */
                 .WithGeminiCompatibleTools<DarlingMcpAlertTools>()
                 .WithGeminiCompatibleTools<DarlingMcpConfigTools>()
                 .WithGeminiCompatibleTools<DarlingMcpHealthTools>()
