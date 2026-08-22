@@ -255,6 +255,40 @@ function Get-DarlingProcessesUnderPath([string]$root) {
     return @($hits)
 }
 
+# True for a process that stopping the service will take with it: the service's own executable, and
+# anything under pg-runtime (the bundled PostgreSQL, which the service starts and stops).
+#
+# This exists because the stop guard has to run TWICE, and the two runs are asking different questions.
+# Before the service is stopped, every install is holding its own tree - the service exe is right there and
+# the store's postmaster is under pg-runtime - so an unfiltered check refuses every real upgrade there has
+# ever been. Filtering those two out leaves exactly the processes a service stop will NOT clear: an
+# operator's own psql.exe, a shell whose working directory is the install folder, a Darling Viewer someone
+# left open holding viewer\*.dll. Catching those BEFORE the stop costs nothing but a re-run; catching them
+# after costs an outage.
+#
+# The Viewer is deliberately NOT on this list even though we ship it. It is a separate process that the
+# service does not own and stopping the service does not close, so it holds viewer\ exactly as hard as any
+# other application would.
+# The separator comes from the runtime rather than being typed as '\'. This script only ever RUNS on
+# Windows, but this particular predicate decides which processes are EXCUSED from a guard, and a rule that
+# excuses things is the one worth being able to test on the machine it was written on. A hardcoded
+# backslash makes it verifiable only on the box it already shipped to.
+function Test-DarlingProcessStopsWithTheService([string]$processPath, [string]$installRoot) {
+    if ([string]::IsNullOrEmpty($processPath)) { return $false }
+
+    $sep = [IO.Path]::DirectorySeparatorChar
+    try { $root = [IO.Path]::GetFullPath($installRoot).TrimEnd($sep, [IO.Path]::AltDirectorySeparatorChar) }
+    catch { return $false }
+
+    if ($processPath.Equals(($root + $sep + 'PerformanceMonitor.Darling.Service.exe'), [StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+
+    # The trailing separator is what keeps pg-runtime-prev - the rescued previous runtime, a real directory
+    # in this layout - from matching a pg-runtime prefix test.
+    return $processPath.StartsWith(($root + $sep + 'pg-runtime' + $sep), [StringComparison]::OrdinalIgnoreCase)
+}
+
 function Get-DarlingDirectoryBytes([string]$path) {
     try {
         $files = @(Get-ChildItem -LiteralPath $path -File -Recurse -Force -ErrorAction SilentlyContinue)
@@ -482,14 +516,22 @@ else {
 
 # ============================ the stop guard ============================
 
-$holders = Get-DarlingProcessesUnderPath $InstallRoot
+# PHASE ONE, before anything is stopped: the processes a service stop will NOT clear.
+#
+# The service's own exe and the bundled PostgreSQL under pg-runtime are filtered out here because they are
+# about to be stopped on purpose. Without that filter this guard refuses EVERY upgrade of a running install
+# - the service is always holding its own tree - which is a guard that fails closed on the happy path and
+# trains people to pass -SkipStopGuard, i.e. a guard that has stopped guarding by being unusable.
+$holders = @(Get-DarlingProcessesUnderPath $InstallRoot |
+    Where-Object { -not (Test-DarlingProcessStopsWithTheService $_.Path $InstallRoot) })
+
 if ($holders.Count -gt 0 -and -not $SkipStopGuard) {
     # Parenthesised before -join on purpose: `$x | ForEach-Object { ... } -join ', '` binds -join to
     # ForEach-Object as a parameter and throws, which is a fine way to lose a deploy to a formatting bug.
     $names = @($holders | ForEach-Object { "$($_.ProcessName) (pid $($_.Id))" })
-    Note "Processes are running out of the install tree:"
+    Note "Processes are running out of the install tree that stopping the service will not close:"
     foreach ($name in $names) { Note "  $name" }
-    Fail "Close them and re-run. Nothing has been stopped or copied. Do NOT kill them blindly — the bundled PostgreSQL runs from $InstallRoot\pg-runtime and killing it takes the store down; stopping the service stops it properly. If these are your own psql.exe or a shell sitting in the install directory, just exit them. Use -SkipStopGuard only if you are certain the copy will not hit a locked file."
+    Fail "Close them and re-run. NOTHING has been stopped or copied — the service is still running and the install is untouched. Do NOT kill them blindly. If these are your own psql.exe or a shell sitting in the install directory, or a Darling Viewer you left open, just exit them. Use -SkipStopGuard only if you are certain the copy will not hit a locked file."
 }
 
 # ============================ stop, back up, prune, copy, start ============================
@@ -510,6 +552,20 @@ if ($service -and $service.Status -ne 'Stopped') {
 }
 Good "Service is stopped."
 
+# PHASE TWO, now that it is down: anything STILL holding the tree, with no exclusions at all.
+#
+# Everything phase one filtered out should be gone by now, so a hit here is the interesting case rather
+# than the normal one - most often a postmaster under pg-runtime that outlived the service stop, which is
+# precisely the process nothing may kill. Phase one cannot see this and phase two cannot see phase one's
+# cases without an outage, which is why there are two.
+$stillHolding = Get-DarlingProcessesUnderPath $InstallRoot
+if ($stillHolding.Count -gt 0 -and -not $SkipStopGuard) {
+    $names = @($stillHolding | ForEach-Object { "$($_.ProcessName) (pid $($_.Id))" })
+    Note "The service is stopped, but processes are STILL running out of the install tree:"
+    foreach ($name in $names) { Note "  $name" }
+    Fail "Nothing has been copied, so the install is intact — but the service is now STOPPED. Either close these and re-run (safe, and it will reuse the backup it is about to take), or abandon the upgrade with: Start-Service '$serviceName'. Do NOT kill anything under $InstallRoot\pg-runtime — that is the bundled PostgreSQL and killing it takes the store down; give a postmaster that outlived the stop a few seconds and re-run."
+}
+
 $backups = Get-DarlingRollbackBackups $InstallRoot
 $nowUtc = [datetime]::UtcNow
 
@@ -521,9 +577,18 @@ else {
     Note "Backing up the install root's files to $backupPath ..."
     try {
         New-Item -ItemType Directory -Path $backupPath -Force | Out-Null
-        # FILES only, not subdirectories. viewer\ and wwwroot\ come back from the zip, pg-runtime is
-        # extracted on first run, and copying the store's own runtime into a backup would multiply the
-        # size of these directories by an order of magnitude for no rollback value whatsoever.
+        # FILES only, not subdirectories - the shape the documented procedure has always used, and the
+        # reason a backup is ~120 MB rather than ~1 GB. pg-runtime is the bundled PostgreSQL (extracted on
+        # first run, and hundreds of megabytes of it), and viewer\ / wwwroot\ / runtimes\ all come back
+        # from the zip.
+        #
+        # SO A BACKUP IS NOT A WHOLE-TREE SNAPSHOT, and the difference matters in exactly one scenario:
+        # a copy that dies PARTWAY can leave viewer\ / wwwroot\ / runtimes\ mixed old-and-new, and
+        # restoring these files over the top does not unmix them. The complete revert is these files PLUS
+        # the previous version's zip re-extracted. Backing those directories up instead was considered and
+        # rejected: it multiplies what #2525 is about - retained disk - to cover a case whose real fix is
+        # re-extracting a zip you still have, and it still would not cover pg-runtime. The failure paths
+        # below say this rather than leaving an operator to discover it while recovering.
         Get-ChildItem -LiteralPath $InstallRoot -File -Force | Copy-Item -Destination $backupPath -Force
     }
     catch {
@@ -565,7 +630,7 @@ foreach ($attempt in 1, 2) {
             Start-Sleep -Seconds 10
         }
         else {
-            Fail "The copy failed twice ($($_.Exception.Message)). The service is STOPPED and the install tree may be HALF WRITTEN — do not start it. Re-run this script with the same arguments: it will reuse the rollback backup it already took rather than replacing it, and finish the copy. If the copy cannot be made to work, restore the files from the newest _rollback_manual_* directory."
+            Fail "The copy failed twice ($($_.Exception.Message)). The service is STOPPED and the install tree may be HALF WRITTEN — do not start it. Re-run this script with the same arguments: it will reuse the rollback backup it already took rather than replacing it, and finish the copy, which is the FIRST thing to try. To go back to the old version instead, note that a half-written tree needs BOTH halves: re-extract the PREVIOUS version's zip over $InstallRoot (that restores viewer\, wwwroot\ and runtimes\, which the backup does not hold), then copy the files from the newest _rollback_manual_* directory over the top. Restoring only the backup leaves old root binaries paired with partly-new subdirectories."
         }
     }
 }

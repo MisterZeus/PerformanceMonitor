@@ -382,6 +382,121 @@ public sealed class DarlingDeployRollbackRetentionTests
     }
 
     /// <summary>
+    /// The stop guard runs TWICE, and each run has to be on the correct side of <c>Stop-Service</c>.
+    ///
+    /// <para><b>This is the ordering bug review caught, and it made the script refuse every real
+    /// upgrade.</b> There was one unfiltered check and it ran BEFORE the service was stopped — so it found
+    /// the service's own <c>PerformanceMonitor.Darling.Service.exe</c>, which lives in the install root and
+    /// is running by definition on any install worth upgrading, and failed. A guard that fails closed on the
+    /// happy path is not a strict guard, it is a guard that teaches people to pass
+    /// <c>-SkipStopGuard</c>, and then it guards nothing at all. The same disease as #2525's 46 warnings,
+    /// caught one layer earlier.</para>
+    ///
+    /// <para>So: phase one runs before the stop and filters out what the stop will clear — the service exe
+    /// and the bundled PostgreSQL under <c>pg-runtime</c> — which leaves an operator's own <c>psql.exe</c>
+    /// or a left-open Viewer, caught at the cost of a re-run and no outage. Phase two runs after the stop
+    /// with no exclusions, where anything remaining is genuinely interesting. Neither phase can see the
+    /// other's cases, which is why there are two, and the ordering IS the correctness — hence a test about
+    /// ordering rather than about text.</para>
+    /// </summary>
+    [Fact]
+    public void TheDeployScript_ChecksForHoldersBothBeforeAndAfterStoppingTheService()
+    {
+        var script = DeployScript;
+
+        var phaseOne = script.IndexOf("$holders = @(Get-DarlingProcessesUnderPath $InstallRoot |", StringComparison.Ordinal);
+        var stop = script.IndexOf("Stop-Service -Name $serviceName", StringComparison.Ordinal);
+        var phaseTwo = script.IndexOf("$stillHolding = Get-DarlingProcessesUnderPath $InstallRoot", StringComparison.Ordinal);
+
+        Assert.True(phaseOne >= 0, "upgrade-darling.ps1 no longer runs a pre-stop holder check (#2525)");
+        Assert.True(stop >= 0, "upgrade-darling.ps1 no longer stops the service");
+        Assert.True(phaseTwo >= 0, "upgrade-darling.ps1 no longer re-checks for holders after the stop (#2525)");
+
+        Assert.True(phaseOne < stop, "the pre-stop holder check must run BEFORE Stop-Service, or it costs an outage it did not need to");
+        Assert.True(phaseTwo > stop, "the unfiltered holder check must run AFTER Stop-Service — before it, the service's own exe is always holding the tree and the guard refuses every upgrade");
+
+        /* Phase one MUST filter, phase two MUST NOT. Getting either backwards reproduces the bug. */
+        var phaseOneCall = script.Substring(phaseOne, script.IndexOf("if ($holders.Count", StringComparison.Ordinal) - phaseOne);
+        Assert.Contains("Test-DarlingProcessStopsWithTheService", phaseOneCall, StringComparison.Ordinal);
+
+        var phaseTwoCall = script.Substring(phaseTwo, script.IndexOf("if ($stillHolding.Count", StringComparison.Ordinal) - phaseTwo);
+        Assert.DoesNotContain("Test-DarlingProcessStopsWithTheService", phaseTwoCall, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// What the pre-stop filter does and does not excuse, run as shipped.
+    ///
+    /// <para>The service exe and the bundled PostgreSQL are excused because the stop clears them. The
+    /// <b>Viewer is not</b>, and that is the case worth pinning: we ship it, it lives under the install
+    /// root, and it is the intuitive thing to add to an exclusion list — but it is a separate process the
+    /// service does not own, stopping the service does not close it, and it holds <c>viewer\*.dll</c>
+    /// exactly as hard as any other application would. Excusing it would let the copy walk into the locked
+    /// file this guard exists to prevent.</para>
+    /// </summary>
+    [Fact]
+    public void TheDeployScript_ExcusesOnlyWhatTheServiceStopActuallyCloses()
+    {
+        const string root = @"C:\PerformanceMonitorDarling";
+
+        (string Path, bool Excused, string Because)[] cases =
+        [
+            (root + @"\PerformanceMonitor.Darling.Service.exe", true, "the service being upgraded — the stop clears it"),
+            (root + @"\pg-runtime\pgsql\bin\postgres.exe", true, "the bundled store — the service stops it"),
+            (root + @"\pg-runtime\pgsql\bin\psql.exe", true, "under pg-runtime, so the same"),
+            (root + @"\viewer\PerformanceMonitor.Darling.Viewer.exe", false, "ours, but the stop does not close it and it holds viewer\\"),
+            (@"C:\tools\psql.exe", false, "an operator's own, not under the install root at all"),
+            (root + @"\PerformanceMonitor.Darling.Service.Extra.exe", false, "not the service exe, however similar the name"),
+            ("", false, "nothing at all"),
+        ];
+
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(DeployScript, "Test-DarlingProcessStopsWithTheService"));
+        foreach (var (path, _, _) in cases)
+        {
+            probe.AppendLine($"Test-DarlingProcessStopsWithTheService '{path}' '{root}'");
+        }
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+        Assert.Equal(cases.Length, answers.Count);
+
+        var wrong = new List<string>();
+        for (var i = 0; i < cases.Length; i++)
+        {
+            var (path, excused, because) = cases[i];
+            if (!string.Equals(answers[i], excused ? "True" : "False", StringComparison.OrdinalIgnoreCase))
+            {
+                wrong.Add($"'{path}': said {answers[i]}, expected {excused} ({because})");
+            }
+        }
+
+        Assert.True(wrong.Count == 0, "the pre-stop filter excuses the wrong processes (#2525):\n  " + string.Join("\n  ", wrong));
+    }
+
+    /// <summary>
+    /// A rollback backup holds the install root's FILES and not its subdirectories, so the guidance after a
+    /// failed copy has to name both halves of a revert: re-extract the previous zip (for <c>viewer\</c>,
+    /// <c>wwwroot\</c>, <c>runtimes\</c>) and then restore the backup's files over it.
+    ///
+    /// <para>Backing those directories up instead was rejected — it multiplies exactly the retained disk
+    /// #2525 is about, to cover a case whose real fix is a zip the operator still has, and it would still
+    /// not cover <c>pg-runtime</c>. That makes the accuracy of this message the whole mitigation, which is
+    /// why it is pinned rather than trusted.</para>
+    /// </summary>
+    [Fact]
+    public void TheDeployScript_TellsTheTruthAboutWhatARollbackBackupDoesNotHold()
+    {
+        var script = DeployScript;
+
+        var failure = script.IndexOf("The copy failed twice", StringComparison.Ordinal);
+        Assert.True(failure >= 0, "upgrade-darling.ps1 no longer reports a double copy failure (#2525)");
+
+        var message = script.Substring(failure, Math.Min(1200, script.Length - failure));
+
+        Assert.Contains("re-extract the PREVIOUS version's zip", message, StringComparison.Ordinal);
+        Assert.Contains("which the backup does not hold", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The prune enumerates the install root and tests the REAL directory names rather than handing a
     /// wildcard to the filesystem.
     ///
