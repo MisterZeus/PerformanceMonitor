@@ -12,7 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 
-namespace PerformanceMonitor.Darling.Service.Mcp;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// Reads I/O by (backend_type, object, context) from <c>pg_io_stats</c>, differenced across the window.

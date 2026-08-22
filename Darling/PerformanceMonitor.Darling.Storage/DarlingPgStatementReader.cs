@@ -12,7 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 
-namespace PerformanceMonitor.Darling.Service.Mcp;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// Reads the PostgreSQL statement store (<c>pg_statement_stats</c>) — the top-queries surface for an

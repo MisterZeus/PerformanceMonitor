@@ -12,7 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 
-namespace PerformanceMonitor.Darling.Service.Mcp;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// Reads what is holding back the xmin horizon (<c>pg_xmin_horizon</c>), by cause.
