@@ -131,7 +131,7 @@ That was not always true: through 3.5.0 the ZIP was a portable build with no run
 | file_io_stats | 1 min | `sys.dm_io_virtual_file_stats` (deltas) |
 | memory_stats | 1 min | `sys.dm_os_sys_memory` + memory counters |
 | memory_grant_stats | 1 min | `sys.dm_exec_query_memory_grants` |
-| tempdb_stats | 1 min | `sys.dm_db_file_space_usage` |
+| tempdb_stats | 1 min | `sys.dm_db_file_space_usage` + `tempdb.sys.database_files` (the ROWS files' growth ceiling) |
 | perfmon_stats | 1 min | `sys.dm_os_performance_counters` (deltas) |
 | deadlocks | 5 min | dedicated `PerformanceMonitor_Deadlock` XE session (`xml_deadlock_report`; `database_xml_deadlock_report` on Azure SQL DB) |
 | dmv_blocking_snapshot | 1 min | `sys.dm_os_waiting_tasks` + `sys.dm_exec_*` (always-on blocking fallback when the blocked-process-report XE is unavailable) |
@@ -254,7 +254,7 @@ Every edition includes a real-time alert engine that monitors for performance is
 | **Deadlocks** | 1 | Fires when new deadlocks are detected since the last check |
 | **Poison waits** | 100 ms avg | Fires when any poison wait type exceeds the average-ms-per-wait threshold |
 | **Long-running queries** | 5 minutes | Fires when any query exceeds the elapsed-time threshold |
-| **TempDB space** | 80% | Fires when TempDB usage exceeds the percentage threshold |
+| **TempDB space** | 80% | Fires when TempDB usage exceeds the percentage threshold. Measured against tempdb's **growth ceiling** (`SUM(max_size)` over the ROWS files) where there is one, and against the current allocation where the files grow without limit — so the percentage means "distance to the point where tempdb cannot grow further" on every engine |
 | **Long-running agent jobs** | 3× average | Fires when a job's current duration exceeds a multiple of its historical average |
 | **High CPU** | 80% | Fires when total CPU (SQL + other) exceeds the threshold |
 | **Volume free space** | 10% or 5 GB free | Fires when a monitored volume's free space drops below the percentage or absolute threshold (either check can be disabled). Never fires on Azure SQL Database. |

@@ -137,6 +137,7 @@ public static class PgMigrations
         new Migration(78, "compose-statement-timeout", V78Sql),
         new Migration(79, "file-growth-alert", V79Sql),
         new Migration(80, "collection-log-fanout-rollup", V80Sql),
+        new Migration(81, "tempdb-max-size", V81Sql),
     };
 
     /// <summary>
@@ -1694,6 +1695,39 @@ CREATE TABLE IF NOT EXISTS collect.pg_statement_text (
 );
 CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen
     ON collect.pg_statement_text(last_seen);";
+
+    /// <summary>
+    /// V81 — tempdb's growth CEILING on <c>tempdb_stats</c> (#2515). <c>dm_db_file_space_usage</c>, which is
+    /// where every other column in this table comes from, describes the data files AS CURRENTLY ALLOCATED. So
+    /// <c>total_reserved</c> ÷ (<c>total_reserved</c> + <c>unallocated</c>) — the <c>tempdb Space</c> alert's
+    /// percentage — is distance to the next AUTOGROW, and it only looks like real headroom on a pre-sized
+    /// on-prem box because such a tempdb has already grown to its cap.
+    ///
+    /// <para><b>What made this a bug rather than a tuning question.</b> Measured on <c>GP_S_Gen5_2</c>: four
+    /// tempdb data files of 16 MB each, 62.44 MB allocated, and <c>max_size</c> of 2,097,152 pages on every one
+    /// of them — a 65,536 MB ceiling. One ~57 MB <c>#temp</c> table reads 95.7% full against the allocation and
+    /// 0.09% against the cap, so enabling Azure collection (#2512) would have armed an alert that fires on the
+    /// first busy minute of every Azure target at the shipped 80% default.</para>
+    ///
+    /// <para><b>Why a column and not a derivation.</b> The obvious alternative is to read the cap out of
+    /// <c>database_size_stats</c>, which already carries <c>max_size_mb</c> per file — and on Azure SQL
+    /// Database that collector reads only the CONNECTED database's <c>sys.database_files</c>, so tempdb never
+    /// appears in it. The one platform this exists for is the one where the derivation has nothing to read.</para>
+    ///
+    /// <para>Nullable with no DEFAULT and no backfill, like V80 and for the same reasons: it is a catalog-only
+    /// change in PostgreSQL and stays instant on a compressed hypertable, and a row collected before this rung
+    /// genuinely does not know the ceiling. NULL reads as 0 in the adapter, which is the "no ceiling measured"
+    /// state — history keeps reporting the percentage it always did rather than dividing by a zero cap.</para>
+    /// </summary>
+    private const string V81Sql = @"
+ALTER TABLE collect.tempdb_stats
+    ADD COLUMN IF NOT EXISTS max_size_mb numeric(18,2);
+
+/* Postgres FREEZES a view's SELECT * column list at CREATE, so the V4 passthrough the analysis fact
+   collector reads would keep serving the twelve columns it had forever — the V14 lesson, restated by V80.
+   Appending is the one alteration CREATE OR REPLACE VIEW permits, which is exactly what an ADD COLUMN
+   produces. */
+CREATE OR REPLACE VIEW collect.v_tempdb_stats AS SELECT * FROM collect.tempdb_stats;";
 
     /// <summary>
     /// V80 — the fan-out rollup on <c>collection_log</c> (#2472). A collector that runs once per DATABASE

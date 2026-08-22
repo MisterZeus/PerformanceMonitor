@@ -227,7 +227,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 55;
+    internal const int CurrentSchemaVersion = 56;
 
     private readonly string _archivePath;
 
@@ -1402,6 +1402,34 @@ public class DuckDbInitializer
             catch (Exception ex)
             {
                 _logger?.LogWarning("Migration to v55 encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
+
+        if (fromVersion < 56)
+        {
+            /* v56 (#2515): tempdb's growth CEILING on tempdb_stats, twinning Darling's V81. Every other
+               column here comes from dm_db_file_space_usage, which reports the data files AS CURRENTLY
+               ALLOCATED — so the tempdb Space alert's percentage measured distance to the next AUTOGROW
+               rather than distance to the point where tempdb cannot grow at all. SUM(max_size) over the
+               ROWS files is the denominator that means the same thing on every engine.
+
+               Fresh installs get the column from GetAllTableStatements(); this is for an existing database
+               and is idempotent. Nothing to backfill: a row collected before the upgrade genuinely does not
+               know the ceiling, and NULL says so — the read maps it to 0, which is the "no ceiling measured"
+               state where the denominator stays the allocation and the reported percentage does not move.
+
+               The v_tempdb_stats view needs no work here: Lite rebuilds every v_ passthrough on start
+               (CreateArchiveViewsAsync, called after this), which is the difference from Darling, where the
+               view's SELECT * column list is frozen at CREATE and the rung has to refresh it. */
+            _logger?.LogInformation("Running migration to v56: adding max_size_mb to tempdb_stats");
+            try
+            {
+                await ExecuteNonQueryAsync(connection,
+                    "ALTER TABLE tempdb_stats ADD COLUMN IF NOT EXISTS max_size_mb DECIMAL(18,2)");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v56 encountered an error (non-fatal): {Error}", ex.Message);
             }
         }
     }
