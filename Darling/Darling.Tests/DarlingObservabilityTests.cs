@@ -601,7 +601,7 @@ public sealed class DarlingObservabilityTests
 
         DateTime firstModified;
         using (var read = new NpgsqlCommand(
-            "SELECT server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, created_date, modified_date FROM servers WHERE server_id = $1", connection))
+            "SELECT server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, created_date, modified_date, engine_kind FROM servers WHERE server_id = $1", connection))
         {
             read.Parameters.AddWithValue(TestServerId);
             using var reader = await read.ExecuteReaderAsync(TestContext.Current.CancellationToken);
@@ -613,6 +613,49 @@ public sealed class DarlingObservabilityTests
             Assert.Equal(16, reader.GetInt32(4));
             Assert.False(reader.IsDBNull(5));
             firstModified = reader.GetDateTime(6);
+            /* V82 (#2530): the engine KIND the connector probed, derived from the target rather than from
+               the configured engine string. A SQL Server target stamps the SQL Server token. */
+            Assert.Equal(MonitoredEngineKind.SqlServer, reader.GetString(7));
+        }
+
+        /* The ON CONFLICT arm CORRECTS the engine kind, unlike is_enabled which it deliberately leaves
+           alone (#2530). Same identity, re-pointed at an Aurora target — which is what a registration
+           edited to a PostgreSQL host looks like on its next connect. A reconnect arm that skipped this
+           column would leave the row asserting SQL Server forever, and every engine-aware surface would
+           read it. */
+        var repointed = new ServerRuntime
+        {
+            Config = new MonitoredServer { Name = "obs-e2e", Host = "obs-e2e-host" },
+            ConnectionString = "Host=obs-e2e-host",
+            Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql, IsAurora = true, PostgresMajorVersion = 17 },
+            StorageName = "obs-e2e-host",
+            ServerId = TestServerId,
+            EngineEdition = 0,
+        };
+
+        /* try/finally around the repoint, so a failed assertion inside it cannot leave this shared-store
+           row asserting Aurora for whatever runs next. The restore is the FINALLY, not a trailing
+           statement: a trailing one is skipped by exactly the failure that makes it matter. */
+        try
+        {
+            await DarlingObservability.UpsertServerAsync(postgres, repointed, null, TestContext.Current.CancellationToken);
+
+            using var read = new NpgsqlCommand("SELECT engine_kind, sql_engine_edition FROM servers WHERE server_id = $1", connection);
+            read.Parameters.AddWithValue(TestServerId);
+            using var reader = await read.ExecuteReaderAsync(TestContext.Current.CancellationToken);
+            Assert.True(await reader.ReadAsync(TestContext.Current.CancellationToken), "servers row missing after re-upsert");
+            Assert.Equal(MonitoredEngineKind.AuroraPostgres, reader.GetString(0));
+            /* And the edition it carries is 0 — the value that used to be indistinguishable from "never
+               connected", which is the whole reason the kind column exists. */
+            Assert.Equal(0, reader.GetInt32(1));
+        }
+        finally
+        {
+            /* Put it back, so the rest of this test — and the next run of it — reads the SQL Server row it
+               was written against. Its own connection is not needed here the way LiveStoreCleanup gives
+               one: this restore goes through the pooled NpgsqlDataSource the upserts above use, not
+               through the possibly-broken body connection. */
+            await DarlingObservability.UpsertServerAsync(postgres, server, null, TestContext.Current.CancellationToken);
         }
 
         /* The second upsert must not throw and must refresh modified_date. */

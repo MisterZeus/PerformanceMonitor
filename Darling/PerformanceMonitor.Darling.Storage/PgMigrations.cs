@@ -138,6 +138,7 @@ public static class PgMigrations
         new Migration(79, "file-growth-alert", V79Sql),
         new Migration(80, "collection-log-fanout-rollup", V80Sql),
         new Migration(81, "tempdb-max-size", V81Sql),
+        new Migration(82, "server-engine-kind", V82Sql),
     };
 
     /// <summary>
@@ -1695,6 +1696,36 @@ CREATE TABLE IF NOT EXISTS collect.pg_statement_text (
 );
 CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen
     ON collect.pg_statement_text(last_seen);";
+
+    /// <summary>
+    /// V82 — the target-engine discriminator on the <c>collect.servers</c> registry (#2530). The registry
+    /// recorded <c>sql_engine_edition</c> and <c>sql_major_version</c> and nothing that says a target is
+    /// PostgreSQL, so a PostgreSQL server landed with edition <c>0</c> — byte-identical to a SQL Server that
+    /// has never completed a connect. That is not a fact that can be inferred, and everything the
+    /// PostgreSQL-parity work needs sits on top of being able to state it: the fleet card, both UIs' tab
+    /// choice, and the engine-KIND half of the #2511 capability answer.
+    ///
+    /// <para><b>A token, not a boolean.</b> <c>is_postgres</c> loses the Aurora distinction, which the
+    /// collectors already gate on (<c>aurora_stat_system_waits()</c> and the rest of the proprietary surface
+    /// core PostgreSQL has in no version), and a boolean cannot grow a third value without a second column
+    /// that means something only in combination with the first. The vocabulary lives in C#
+    /// (<c>MonitoredEngineKind</c>) rather than in a CHECK constraint on purpose: a constraint would make
+    /// every new token its own migration rung, and a store written by a NEWER service would then fail to
+    /// insert rather than merely being described conservatively by an older reader.</para>
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b> — like V80 and V81, and here the reason is semantic as
+    /// well as operational. Defaulting to <c>'sqlserver'</c> would have every PostgreSQL target assert it is
+    /// SQL Server for the window between the migration and its next connect, which is precisely the wrong
+    /// claim to make by default; NULL says "no connect has stamped this yet", and the readers treat it as no
+    /// claim. The registry upsert runs on every successful connect, so the column populates itself within one
+    /// collection cycle for every live server without a backfill statement.</para>
+    ///
+    /// <para>No view refresh: <c>collect.servers</c> is a registry, not a hypertable, and has no
+    /// <c>v_</c> passthrough for a <c>SELECT *</c> column list to be frozen in.</para>
+    /// </summary>
+    private const string V82Sql = @"
+ALTER TABLE collect.servers
+    ADD COLUMN IF NOT EXISTS engine_kind text;";
 
     /// <summary>
     /// V81 — tempdb's growth CEILING on <c>tempdb_stats</c> (#2515). <c>dm_db_file_space_usage</c>, which is

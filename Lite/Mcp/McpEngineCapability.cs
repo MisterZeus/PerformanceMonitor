@@ -56,7 +56,15 @@ internal static class McpEngineCapability
             return null;
         }
 
-        var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, collectorName);
+        /* engineKind: null — "make no claim on the engine-KIND axis" (#2530). Lite has no PostgreSQL target
+           seam at all: nothing in this SKU ever sets CollectorTargetEngine.PostgreSql, its DuckDB schema
+           generator emits SQL Server definitions only, and its servers table has no engine_kind column to
+           read. Passing the constant MonitoredEngineKind.SqlServer would be true today and would be a lie
+           the compiler could not find on the day that changes; null is behaviour-identical here (a SQL
+           Server collector on a SQL Server target makes no kind claim either way) and cannot become wrong.
+           The parameter is REQUIRED rather than defaulted so that decision is visible at the call site
+           instead of being made by omission. */
+        var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind: null, collectorName);
         return message is null ? null : McpHelpers.Status("not_collected", message);
     }
 }

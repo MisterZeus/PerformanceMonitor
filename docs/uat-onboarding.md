@@ -514,12 +514,22 @@ than reading a second, wider list that could offer a query the table does not.
 
 **The eight `get_pg_*` PostgreSQL reads are NOT a web gap, and this section used to say they were.** Neither
 surface shows them: the WPF viewer has no PostgreSQL screens either, so a PostgreSQL target is readable only
-through MCP, on both SKUs. The web has an additional obstacle on top of that — `/api/fleet`'s card carries the
-SQL Server `engine_edition` and no target-engine discriminator, so a browser cannot tell a PostgreSQL target
-from a SQL Server one and a PostgreSQL panel would render empty on every SQL Server — but fixing only that
-would not give you a screen, because there is no PostgreSQL screen on either side to reach. If you are
-evaluating this for PostgreSQL monitoring, know that up front: the collection and the reads are real and the
-graphical surfaces are not.
+through MCP, on both SKUs. If you are evaluating this for PostgreSQL monitoring, know that up front: the
+collection and the reads are real and the graphical surfaces are not, and closing that is tracked as
+[#2530](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2530).
+
+The web used to carry an additional obstacle on top of that, and **it is now gone**: `/api/fleet`'s card
+carried the SQL Server `engine_edition` and no target-engine discriminator, so a browser could not tell a
+PostgreSQL target from a SQL Server one — a PostgreSQL target lands at `engine_edition` 0, which is also what
+a SQL Server that has never connected lands at. The store now records the target engine explicitly
+(`collect.servers.engine_kind`, schema v82) and the card carries `engine_kind` plus the derived
+`is_postgres` / `is_aurora` booleans. What is still missing is the half that spends it: neither the web tab
+registry nor the viewer branches on the engine yet, so a PostgreSQL target still renders SQL Server tabs.
+
+One consequence you may notice before the screens arrive: a SQL Server read aimed at a PostgreSQL target now
+answers `not_collected` naming the engine ("...runs Aurora PostgreSQL. The system_health_events collector is
+written against SQL Server...") instead of `unavailable` telling you to check that collection is running.
+That applies to the reads wired to the capability helper, not yet to every read.
 
 **Data with no read endpoint at all** — **this list is now empty.** It used to hold ten viewer surfaces
 (Query Store regressions, the query heatmap, three of the four Performance Trends charts, the

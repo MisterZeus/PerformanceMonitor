@@ -44,12 +44,26 @@ namespace PerformanceMonitor.Collectors;
 /// and every shared sentence that lives twice has eventually been reworded once
 /// (<c>McpMissMessageParityPinTests</c> exists because of it). One function called from both surfaces makes
 /// parity structural rather than pinned.</para>
+///
+/// <para><b>Two axes, asked in order (#2530).</b> Engine KIND is asked first and engine EDITION second,
+/// because a PostgreSQL target has no edition at all — <c>SERVERPROPERTY</c> does not exist there, the
+/// connector stamps 0, and the edition axis therefore (correctly) declines to claim anything about it. Kind
+/// is the coarser and more permanent fact of the two: an edition can change under an operator (a migration
+/// to Azure SQL Database, an upgrade), while a target's DIALECT is what decides whether a collector's query
+/// text could ever be sent at it. The kind axis is answered by the engine half of the collectors' own
+/// dispatch gate (<see cref="CollectorCatalog.EngineMatches(ICollectorSchemaInfo, CollectorTargetInfo)"/>)
+/// for exactly the reason the edition axis asks <see cref="CollectorCatalog.AppliesTo(ICollectorSchemaInfo,
+/// CollectorTargetInfo)"/>: a hand-kept list of "what PostgreSQL does not have" would go stale in the
+/// direction that keeps passing.</para>
 /// </summary>
 public static class CollectorEngineCapability
 {
     /// <summary>The probe returned no edition — a server that has never connected, or a PostgreSQL target
     /// (<c>SERVERPROPERTY</c> does not exist there and the connector stamps 0). No capability claim is made
-    /// for it: "we do not know" must never render as "this will never work".</summary>
+    /// for it on the EDITION axis: "we do not know" must never render as "this will never work". Since
+    /// #2530 the store records engine KIND separately, so a PostgreSQL target IS distinguishable from an
+    /// unconnected one — but that distinction is made there, not here, and this constant keeps meaning
+    /// exactly what it meant.</summary>
     public const int UnknownEngineEdition = 0;
 
     /// <summary><c>SERVERPROPERTY('EngineEdition')</c> for Azure SQL Database — the one edition that produces
@@ -157,6 +171,16 @@ public static class CollectorEngineCapability
     /// <summary>A bare SQL Server target, for the engine half of the dispatch gate alone.</summary>
     private static readonly CollectorTargetInfo SqlServerProbe = new() { Engine = CollectorTargetEngine.SqlServer };
 
+    /// <summary>The same, one engine over — for the engine-KIND axis (#2530).</summary>
+    private static readonly CollectorTargetInfo PostgresProbe = new() { Engine = CollectorTargetEngine.PostgreSql };
+
+    /// <summary>The closing sentence both axes end on. One copy, because the two messages have to agree
+    /// about what a permanent gap is; a second wording would eventually say something subtly different about
+    /// whether it is worth chasing.</summary>
+    private const string PermanentGapEpilogue =
+        "This is a permanent engine capability gap, not a collection outage: checking collection health, " +
+        "enabling a collector or starting a capture cannot change it.";
+
     /// <summary>
     /// True when SOME server of this engine edition runs <paramref name="collectorName"/> — i.e. the
     /// collector is not excluded by the engine alone.
@@ -217,23 +241,105 @@ public static class CollectorEngineCapability
     }
 
     /// <summary>
+    /// True when <paramref name="collectorName"/>'s query dialect can be sent at a server of this engine
+    /// KIND — the second axis (#2530), and the one that separates a PostgreSQL target from a SQL Server that
+    /// has never connected.
+    /// <para>An absent, unrecognised, or unclassifiable kind answers TRUE, as does an unknown collector name
+    /// — the same true-on-miss default the edition axis carries, for the same reason: nothing to ask means
+    /// nothing to claim.</para>
+    /// </summary>
+    public static bool IsCollectedOnEngineKind(string collectorName, string? engineKind)
+    {
+        var definition = CollectorCatalog.Find(collectorName);
+
+        return definition is null || IsCollectedOnEngineKind(definition, engineKind);
+    }
+
+    /// <summary>
+    /// The engine-KIND question asked of a DEFINITION rather than a catalog name — the pair exists for the
+    /// reason the edition axis's does: by name this can only ever be handed a gate that ships, so nothing
+    /// asserted through it could distinguish a derivation from a list that happens to match.
+    ///
+    /// <para><b>Why only the ENGINE half of the dispatch gate, and not a sweep.</b> The edition axis sweeps
+    /// every target shape an edition permits and claims a gap only when NO shape runs, because the facts it
+    /// sweeps — msdb access, RDS, version — are fixable and a permanence claim over them would be the
+    /// over-claim #2511 removed. On this axis there is nothing to sweep: a target's dialect is not a fact an
+    /// operator can move, so <see cref="CollectorCatalog.EngineMatches(ICollectorSchemaInfo,
+    /// CollectorTargetInfo)"/> — the collectors' own engine gate, which is what actually stops the dispatch
+    /// — is the whole answer. It is still DERIVED: flip a definition's
+    /// <see cref="ICollectorSchemaInfo.TargetEngine"/> and this answer flips with it, which is what
+    /// <c>CollectorEngineCapabilityMovingGateTests</c> demonstrates rather than assumes.</para>
+    ///
+    /// <para><b>What this deliberately does NOT claim.</b> The PostgreSQL collectors' own
+    /// <see cref="ICollectorDefinition{TRow}.AppliesTo"/> gates — Aurora-only surfaces, the PG16 floor on
+    /// <c>pg_stat_io</c>, the writer-only autovacuum read — are the fixable/variable half on this side of the
+    /// fence, and are left to the <c>unavailable</c> vocabulary exactly as msdb access is on the SQL Server
+    /// side. Making <c>pg_wait_stats</c> a permanent gap on STOCK PostgreSQL is a real and available claim
+    /// (Aurora-ness is fixed by the kind the way the Azure flags are fixed by the edition), and it wants the
+    /// PostgreSQL twin of the #2518 sweep-dimension guard before it ships — filed rather than smuggled in
+    /// here, because a sweep without that guard over-claims silently, which is the failure this whole
+    /// mechanism exists to avoid.</para>
+    /// </summary>
+    public static bool IsCollectedOnEngineKind(ICollectorSchemaInfo definition, string? engineKind)
+    {
+        var probe = MonitoredEngineKind.EngineOf(engineKind) switch
+        {
+            CollectorTargetEngine.PostgreSql => PostgresProbe,
+            CollectorTargetEngine.SqlServer => SqlServerProbe,
+            /* Not known to be anything — the pre-#2530 state of every row, and of every store an older
+               service wrote. No claim, which is the same silence UnknownEngineEdition keeps. */
+            _ => null,
+        };
+
+        return probe is null || CollectorCatalog.EngineMatches(definition, probe);
+    }
+
+    /// <summary>
     /// The <c>not_collected</c> explanation for a read whose collector cannot run on this server's engine, or
     /// <c>null</c> when the engine DOES support it (in which case the read keeps its own miss vocabulary —
     /// <c>empty</c> for a genuine all-clear, <c>unavailable</c> for a gap worth chasing).
+    ///
     /// <para>Returning the decision and the words as ONE value is deliberate: a caller that asked "is it
     /// gated?" and then separately built a message could answer one question and print the other.</para>
+    ///
+    /// <para><b>KIND before EDITION (#2530).</b> A PostgreSQL target's <paramref name="engineEdition"/> is 0,
+    /// which the edition axis reads as "no claim" — correctly, since it genuinely knows nothing. Asking the
+    /// kind axis first is what turns that silence into the true answer, and it must stay first: reversing the
+    /// order would return null for every PostgreSQL target and the read would fall back to
+    /// <c>unavailable</c>, which is exactly the wrong-cause message this closes.</para>
+    ///
+    /// <para><paramref name="engineKind"/> is <c>null</c> for a target whose kind the store does not record —
+    /// a pre-#2530 row, a server that has not connected since the rung landed, or a SKU with no engine-kind
+    /// column at all (Lite, which has no PostgreSQL target seam). Null makes NO claim on this axis; the
+    /// edition axis then answers exactly as it did before.</para>
     /// </summary>
-    public static string? NotCollectedMessage(string serverName, int engineEdition, string collectorName)
+    public static string? NotCollectedMessage(string serverName, int engineEdition, string? engineKind, string collectorName)
     {
-        if (IsCollectedOnEngineEdition(collectorName, engineEdition))
+        var definition = CollectorCatalog.Find(collectorName);
+
+        /* True-on-miss on the name, once, so neither axis below has to re-decide it. */
+        if (definition is null)
         {
             return null;
         }
 
-        /* No entry is a vaguer sentence, never a wrong one — the gate above already decided. */
-        var capturePath = CapturePathByCollector.TryGetValue(collectorName, out var described)
-            ? described
-            : "the data this read is served from";
+        if (!IsCollectedOnEngineKind(definition, engineKind))
+        {
+            /* "runs X" rather than "is an X target", because the descriptions are noun phrases and one of them
+               starts with a vowel — an indefinite article in the template would read "a Aurora PostgreSQL".
+               Article agreement belongs in the template or nowhere, never in a per-entry special case that
+               the next entry gets wrong; the same reasoning the capture-path phrasing already follows. */
+            return $"{serverName} runs {MonitoredEngineKind.DescribeEngineKind(engineKind)}. The " +
+                   $"{collectorName} collector is written against " +
+                   $"{DescribeTargetEngine(definition.TargetEngine)} and the dispatch gate's engine half never " +
+                   $"sends it at another engine, so this server does not collect " +
+                   $"{CapturePathOf(collectorName)}, and never will. {PermanentGapEpilogue}";
+        }
+
+        if (IsCollectedOnEngineEdition(definition, engineEdition))
+        {
+            return null;
+        }
 
         /* "this server does not collect X" rather than "X is not collected", so the sentence reads correctly
            whether the capture path is singular ("the system_health extended-events ring buffer") or plural
@@ -241,8 +347,23 @@ public static class CollectorEngineCapability
            per-entry special case that the next entry would get wrong. */
         return $"{serverName} runs on {DescribeEngineEdition(engineEdition)} (EngineEdition {engineEdition}). " +
                $"The {collectorName} collector does not run on that engine — its own AppliesTo gate excludes it — " +
-               $"so this server does not collect {capturePath}, and never will. This is a permanent engine " +
-               "capability gap, not a collection outage: checking collection health, enabling a collector or " +
-               "starting a capture cannot change it.";
+               $"so this server does not collect {CapturePathOf(collectorName)}, and never will. " +
+               PermanentGapEpilogue;
     }
+
+    /// <summary>What a gated-off collector would have captured. No entry is a vaguer sentence, never a wrong
+    /// one — whichever axis called this has already decided that a gap exists.</summary>
+    private static string CapturePathOf(string collectorName) =>
+        CapturePathByCollector.TryGetValue(collectorName, out var described)
+            ? described
+            : "the data this read is served from";
+
+    /// <summary>The engine a definition's query DIALECT targets, in words. Deliberately separate from
+    /// <see cref="MonitoredEngineKind.DescribeEngineKind"/>: that describes a SERVER, which may be Aurora,
+    /// and no collector is written against Aurora as opposed to PostgreSQL.</summary>
+    private static string DescribeTargetEngine(CollectorTargetEngine engine) => engine switch
+    {
+        CollectorTargetEngine.PostgreSql => "PostgreSQL",
+        _ => "SQL Server",
+    };
 }

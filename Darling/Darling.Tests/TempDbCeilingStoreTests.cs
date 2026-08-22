@@ -21,7 +21,9 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// The V81 rung (#2515) — tempdb's growth CEILING on <c>tempdb_stats</c>, and the top of the ladder.
+/// The V81 rung (#2515) — tempdb's growth CEILING on <c>tempdb_stats</c>. It was the top of the ladder when
+/// it landed; V82 (#2530) has since been appended, and the assertions that belonged to being TOP moved with
+/// it rather than being re-pinned here.
 ///
 /// <para><b>What it fixes.</b> <c>TempDbSpaceInfo.UsedPercent</c> divided by
 /// <c>total_reserved + unallocated</c>, and both halves come from <c>dm_db_file_space_usage</c>, which
@@ -55,9 +57,12 @@ public sealed class TempDbCeilingStoreTests
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal("tempdb-max-size", PgMigrations.Scripts.Single(s => s.Version == 81).Name);
-        Assert.Equal(81, versions.Max());
-        Assert.Equal(81, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(81, StorageVersion.SchemaVersion);
+
+        /* Demoted at V82 (#2530). This used to pin 81 as the ladder TOP; that claim belongs to whichever
+           rung is newest, and leaving it here would have made every future rung edit this file. What
+           stays is the claim this rung actually owns — it is registered, at its own number, and the
+           ladder it sits in is still strictly ordered and dense above the sanctioned V45 hole. */
+        Assert.True(versions.Max() >= 81);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
 
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
@@ -130,18 +135,17 @@ public sealed class TempDbCeilingStoreTests
 
         var viewerSource = ReadViewerSource();
 
-        /* Ordinals are positional: the sentinel was APPENDED, so the reader must ask for exactly one more
-           than it did and no more than that. This form belongs to whichever rung is NEWEST — the older
-           rungs' twins pin their own fixed ordinal instead, because `mapParameters - 1` slides one place
-           right per new rung and keeps passing while testing somebody else's wiring. */
-        Assert.Contains($"reader.GetBoolean({mapParameters - 1})", viewerSource, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({mapParameters})", viewerSource, StringComparison.Ordinal);
+        /* Demoted at V82 (#2530): this read `mapParameters - 1`, which is the NEWEST sentinel's ordinal, so
+           the moment a rung was appended it silently started testing that rung's wiring instead of this
+           one's. Pinned at 56 — this rung's own ordinal — which cannot slide. The "and no more than that"
+           half is the top rung's to assert, and it moved to MonitoredEngineKindStoreTests with it. */
+        Assert.True(mapParameters > 56);
+        Assert.Contains("reader.GetBoolean(56)", viewerSource, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreTo81()
+    public void TheProbeMapsAStoreAtExactly81To81()
     {
-        Assert.Equal(81, StorageVersion.SchemaVersion);
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService)
