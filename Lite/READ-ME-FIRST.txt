@@ -1,0 +1,56 @@
+Performance Monitor Lite - .NET runtime prerequisites
+=====================================================
+
+If PerformanceMonitorLite.exe will not start, and what you got was a message
+like:
+
+    You must install .NET to run this application.
+    Framework: 'Microsoft.WindowsDesktop.App', version '10.0.0'
+
+...then this file is the answer. Nothing of ours is running at that point: the
+.NET host resolves the frameworks the application needs before a single line of
+Lite's code executes, which is why that error carries no product branding and no
+instructions.
+
+
+WHICH BUILD IS THIS?
+--------------------
+
+  * Installed with PerformanceMonitorLite-win-Setup.exe?
+
+    You need nothing. That build is self-contained and carries its own runtime.
+    This file ships with every build, which is the only reason it is here.
+
+  * Unzipped PerformanceMonitorLite-<version>.zip?
+
+    This build is framework-dependent. Install BOTH of the runtimes below, x64,
+    from https://dotnet.microsoft.com/download/dotnet/10.0
+
+      1. .NET Desktop Runtime 10   - the application window itself (WPF).
+
+      2. ASP.NET Core Runtime 10   - required UNCONDITIONALLY, not only when
+                                     the MCP server is enabled. See below.
+
+    A stock Windows Server image has neither.
+
+
+WHY ASP.NET CORE, WHEN I AM NOT USING MCP?
+------------------------------------------
+
+Lite references the ModelContextProtocol.AspNetCore package, and that package
+brings the Microsoft.AspNetCore.App framework reference in transitively. It is
+therefore named in PerformanceMonitorLite.runtimeconfig.json at BUILD time, and
+the host demands it at startup no matter what the settings say. Turning the MCP
+server off does not remove the requirement.
+
+
+INSTALL BOTH BEFORE THE FIRST LAUNCH
+------------------------------------
+
+The host reports only the FIRST framework it cannot find. Install just the
+Desktop Runtime and the next launch fails again, identically, this time naming
+Microsoft.AspNetCore.App. Installing both up front avoids the second round trip.
+
+
+Full detail: Lite/README.md in the source repository,
+https://github.com/erikdarlingdata/PerformanceMonitor

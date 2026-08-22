@@ -1581,6 +1581,134 @@ internal static class DarlingDataReader
         return rows;
     }
 
+    /// <summary>
+    /// Blocking-duration aggregate per minute, the viewer's Blocking Stats read verbatim.
+    /// <para>XE blocked-process reports are the primary source and the DMV snapshot is the fallback, and
+    /// the fallback contributes ONLY when the XE source has no rows in the window at all. Mixing them
+    /// would double-count the same incident from two captures, so it is a fallback and never a union.
+    /// $1 server_id, $2 start, $3 end (naive UTC).</para>
+    /// </summary>
+    public const string BlockingDurationStatsSql = """
+        WITH bpr AS (
+            SELECT
+                DATE_TRUNC('minute', event_time) AS bucket,
+                COUNT(*) AS event_count,
+                CAST(SUM(wait_time_ms) AS bigint) AS total_duration_ms,
+                MAX(wait_time_ms) AS max_duration_ms,
+                CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms
+            FROM v_blocked_process_reports
+            WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            GROUP BY DATE_TRUNC('minute', event_time)
+        ),
+        dmv AS (
+            SELECT
+                DATE_TRUNC('minute', event_time) AS bucket,
+                COUNT(*) AS event_count,
+                CAST(SUM(wait_time_ms) AS bigint) AS total_duration_ms,
+                MAX(wait_time_ms) AS max_duration_ms,
+                CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms
+            FROM v_dmv_blocking_snapshots
+            WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            GROUP BY DATE_TRUNC('minute', event_time)
+        )
+        SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms FROM bpr
+        UNION ALL
+        SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms FROM dmv WHERE NOT EXISTS (SELECT 1 FROM bpr)
+        ORDER BY bucket
+        """;
+
+    public sealed record BlockingDurationStatsRow(
+        DateTime Time, long EventCount, long TotalDurationMs, long MaxDurationMs, double AvgDurationMs);
+
+    /// <summary>
+    /// Whether ANY of the three capture paths behind the blocking-severity read has ever produced a row.
+    /// <para>Each can be off independently: the XE blocked-process report needs its session running, the
+    /// DMV snapshot needs its collector enabled, and deadlock capture is separate from both. Probing one
+    /// would report "never captured" for a server capturing fine through another; probing neither would
+    /// let a silent capture gap read as a clean bill of health.</para>
+    /// <para>Deadlocks are in here because the verdict gates on the blocking series AND the deadlock
+    /// series both being empty. Probing only the two blocking sources would call a server 'genuinely
+    /// clear' on the strength of blocking capture alone, while deadlock capture had never run -- the
+    /// reassuring-wrong answer this probe exists to prevent, missed for the deadlock half.</para>
+    /// </summary>
+    public const string HasAnyBlockingCaptureSql = """
+        SELECT 1
+        WHERE EXISTS (SELECT 1 FROM v_blocked_process_reports WHERE server_id = $1)
+        OR    EXISTS (SELECT 1 FROM v_dmv_blocking_snapshots WHERE server_id = $1)
+        OR    EXISTS (SELECT 1 FROM v_deadlocks WHERE server_id = $1)
+        """;
+
+    /// <summary>Runs <see cref="HasAnyBlockingCaptureSql"/>.</summary>
+    public static async Task<bool> HasAnyBlockingCaptureAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(HasAnyBlockingCaptureSql);
+        AddInt(command, serverId);
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
+    }
+
+    /// <summary>Runs <see cref="BlockingDurationStatsSql"/>.</summary>
+    public static async Task<List<BlockingDurationStatsRow>> GetBlockingDurationStatsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default)
+    {
+        var rows = new List<BlockingDurationStatsRow>();
+        await using var command = postgres.CreateCommand(BlockingDurationStatsSql);
+        AddInt(command, serverId);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new BlockingDurationStatsRow(
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
+                reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
+                reader.IsDBNull(3) ? 0 : Convert.ToInt64(reader.GetValue(3)),
+                reader.IsDBNull(4) ? 0 : Convert.ToDouble(reader.GetValue(4))));
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// The raw deadlock graphs in the window, for severity aggregation.
+    /// <para>Windowed on collection_time but ORDERED and bucketed by deadlock_time -- the graph carries
+    /// when the deadlock happened, while collection_time is only when we picked it up, and the two differ
+    /// by up to a collection interval. $1 server_id, $2 start, $3 end (naive UTC).</para>
+    /// </summary>
+    public const string DeadlockSeverityGraphsSql = """
+        SELECT
+            deadlock_time,
+            deadlock_graph_xml
+        FROM v_deadlocks
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        ORDER BY deadlock_time
+        """;
+
+    /// <summary>Runs <see cref="DeadlockSeverityGraphsSql"/>, returning graphs for the shared aggregator.</summary>
+    public static async Task<List<(DateTime? DeadlockTime, string? Xml)>> GetDeadlockGraphsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default)
+    {
+        var rows = new List<(DateTime? DeadlockTime, string? Xml)>();
+        await using var command = postgres.CreateCommand(DeadlockSeverityGraphsSql);
+        AddInt(command, serverId);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add((
+                reader.IsDBNull(0) ? null : reader.GetDateTime(0),
+                reader.IsDBNull(1) ? null : reader.GetString(1)));
+        }
+
+        return rows;
+    }
+
     private static void AddInt(NpgsqlCommand command, int value) =>
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = value });
 
