@@ -90,9 +90,13 @@ public partial class ViewerServerTab
         DatabaseFilterButton.Visibility = Visibility.Collapsed;
 
         PgEngineBanner.Text = $"{_server.DisplayName} runs {engineOrUnknown()}.";
-        PgOverviewNote.Text = ViewerPostgresTabs.All[0].Note ?? string.Empty;
-        PgActivityNote.Text = ViewerPostgresTabs.All[1].Note ?? string.Empty;
-        PgVacuumNote.Text = ViewerPostgresTabs.All[2].Note ?? string.Empty;
+
+        /* Looked up by ID, never by position: the registry's order is the STRIP order and is free to change,
+           while these three assignments are about which tab gets which framing. Indexing All[0..2] would
+           have silently put the Vacuum note above the Activity grids the first time someone reordered. */
+        PgOverviewNote.Text = ViewerPostgresTabs.NoteFor("overview");
+        PgActivityNote.Text = ViewerPostgresTabs.NoteFor("activity");
+        PgVacuumNote.Text = ViewerPostgresTabs.NoteFor("vacuum");
 
         string engineOrUnknown() =>
             _server.EngineDescription ?? "an engine the store has not recorded";

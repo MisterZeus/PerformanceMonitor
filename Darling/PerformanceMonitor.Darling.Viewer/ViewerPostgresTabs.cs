@@ -139,6 +139,14 @@ internal static class ViewerPostgresTabs
     public static bool Owns(int innerTabIndex) => All.Any(t => t.InnerTabIndex == innerTabIndex);
 
     /// <summary>
+    /// A tab's framing note by ID — empty for a tab that has none, and empty rather than throwing for an id
+    /// this registry does not carry, because a missing note must never take a tab down with it. Looked up by
+    /// id rather than by position so the strip order stays free to change.
+    /// </summary>
+    public static string NoteFor(string tabId) =>
+        All.FirstOrDefault(t => string.Equals(t.Id, tabId, StringComparison.Ordinal))?.Note ?? string.Empty;
+
+    /// <summary>
     /// The store table a declared collector writes, from the collector's own definition. Null for a name
     /// the catalog does not know, which <c>ViewerPostgresTabsTests</c> refuses — the registry may not name
     /// a collector that does not exist.
