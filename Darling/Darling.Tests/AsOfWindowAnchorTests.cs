@@ -250,14 +250,6 @@ public sealed class AsOfWindowAnchorTests
     }
 
     /// <summary>
-    /// Whether the <c>[McpServerTool]</c> method behind a read name takes the anchor.
-    ///
-    /// <para>Both pins above are of the form "no read is in set A but not set B", so a lookup that quietly
-    /// returned false for a read it could not FIND would empty the failing set and make them pass for the
-    /// wrong reason. The method is therefore asserted to exist rather than defaulted, and a partially
-    /// loadable assembly is reported rather than silently enumerated as the types that happened to load.</para>
-    /// </summary>
-    /// <summary>
     /// Every tool that ADVERTISES <c>as_of</c> actually USES the instant it resolved.
     ///
     /// <para><b>Why this exists.</b> The convention's failure mode is not a compile error and not a wrong
@@ -422,6 +414,14 @@ public sealed class AsOfWindowAnchorTests
         throw new DirectoryNotFoundException($"Could not locate {relativeDirectory} walking up from {thisFile}");
     }
 
+    /// <summary>
+    /// Whether the <c>[McpServerTool]</c> method behind a read name takes the anchor.
+    ///
+    /// <para>Both pins above are of the form "no read is in set A but not set B", so a lookup that quietly
+    /// returned false for a read it could not FIND would empty the failing set and make them pass for the
+    /// wrong reason. The method is therefore asserted to exist rather than defaulted, and a partially
+    /// loadable assembly is reported rather than silently enumerated as the types that happened to load.</para>
+    /// </summary>
     private static bool ToolTakesAnAnchor(string readName)
     {
         Type[] types;
