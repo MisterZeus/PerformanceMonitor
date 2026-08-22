@@ -105,6 +105,18 @@ jobs:
             lite:
               - 'Lite/**/!(*.md)'
               - 'Lite.Tests/**/!(*.md)'
+              # #2489: LiteRuntimePrerequisiteDocsTests derives Lite's .NET runtime prerequisites
+              # from the BUILT runtimeconfig and from the publish shapes in this very file, then
+              # asserts these two READMEs say so - which artifact is self-contained, which needs two
+              # runtimes. Naming them here is not optional. Every area filter carves markdown out
+              # (dir/**/!(*.md)), and a docs-only PR additionally engages the fast path above, which
+              # skips .NET setup and restore outright - so without these two entries the guard could
+              # not run on a README-only change, i.e. on exactly the edit that would undo the fix.
+              # The cost is that a root-README edit now runs the Lite suite; that is the same trade
+              # the Darling entries below already take, and the alternative is a guard that quietly
+              # stops guarding.
+              - 'README.md'
+              - 'Lite/README.md'
               # Same silently-stops-guarding reason as the darling filter's Lite entries below:
               # Lite.Tests/ThemeParityLiteDarlingTests.cs READS the Darling viewer's theme
               # dictionaries to assert the two apps' shared brush keys still resolve to the same
