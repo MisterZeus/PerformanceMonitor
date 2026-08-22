@@ -25,7 +25,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// Pins the core data-read MCP slice — the seventeen resource-metric / query-performance /
+/// Pins the core data-read MCP slice — the eighteen resource-metric / query-performance /
 /// discovery-health tools over the Postgres store, the same names the Dashboard and Lite expose.
 /// Ungated: the tool surface is EXACTLY the pinned names (all static, on a [McpServerToolType]
 /// class, returning the string envelope); each tool's MCP parameter contract matches Lite's (server_name
@@ -40,10 +40,11 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
 {
     /* ---------------- ungated: tool-surface pin ---------------- */
 
-    /// <summary>The seventeen data-read tool names, ordinal-sorted — the same names Lite and the Dashboard
+    /// <summary>The eighteen data-read tool names, ordinal-sorted — the same names Lite and the Dashboard
     /// expose, so MCP clients see one consistent product.</summary>
     private static readonly string[] DataToolSurface =
     {
+        "get_blocking_stats",
         "get_collection_health",
         "get_collection_log",
         "get_cpu_utilization",
@@ -69,7 +70,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         .ToArray();
 
     [Fact]
-    public void ToolSurface_ExactlyTheSeventeenDataTools()
+    public void ToolSurface_ExactlyTheEighteenDataTools()
     {
         var toolMethods = ToolMethods();
 
@@ -528,7 +529,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     }
 
     [Fact]
-    public void AdvertisedSchema_IsGeminiClean_ForAllSeventeenDataTools()
+    public void AdvertisedSchema_IsGeminiClean_ForAllEighteenDataTools()
     {
         var tools = BuildDataToolSchemas();
         /* Derived from the pinned name list rather than restated. This literal was 15 while the list

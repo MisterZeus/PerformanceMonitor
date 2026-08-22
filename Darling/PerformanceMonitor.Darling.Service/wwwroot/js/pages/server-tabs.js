@@ -572,6 +572,30 @@ export const SERVER_TABS = [
           emptyText: "No blocked sessions in this window.",
         },
       ]),
+      /* #2484: severity, the companion to the two count trends at the top of this tab. One read, two
+         charts, via fanout for the same reason as above. */
+      ...fanout("get_blocking_stats", { server, hours: ctx.hours }, [
+        {
+          title: "Blocking Severity",
+          subtitle: ctx.label,
+          viz: "line",
+          rowsKey: "blocking_duration",
+          xKey: "time",
+          series: BLOCKING_SEVERITY_SERIES,
+          emptyText:
+            "No blocking in this window. If neither capture path has ever produced a row the read says " +
+            "so explicitly rather than reporting a clean bill of health.",
+        },
+        {
+          title: "Deadlock Severity",
+          subtitle: ctx.label,
+          viz: "line",
+          rowsKey: "deadlock_severity",
+          xKey: "time",
+          series: DEADLOCK_SEVERITY_SERIES,
+          emptyText: "No deadlocks in this window.",
+        },
+      ]),
       table(
         "Deadlock Graphs",
         "get_deadlock_detail",
@@ -1137,6 +1161,18 @@ const COUNT_SERIES = [{ key: "count", label: "Events" }];
    the grouping the read already applied, not extra axes. */
 const WAITING_TASK_SERIES = [{ key: "total_wait_ms", label: "Total Wait (ms)" }];
 const BLOCKED_SESSION_SERIES = [{ key: "blocked_count", label: "Blocked Sessions" }];
+
+/* #2484 severity series. Total and max share one millisecond axis honestly; the event/victim COUNTS are
+   deliberately not charted beside them, because a count and a duration on one y-domain is the two-units
+   mistake the CPU chart's dropped idle series exists to avoid. Counts live in the count trends above. */
+const BLOCKING_SEVERITY_SERIES = [
+  { key: "total_duration_ms", label: "Total Wait (ms)" },
+  { key: "max_duration_ms", label: "Max Wait (ms)" },
+];
+const DEADLOCK_SEVERITY_SERIES = [
+  { key: "total_wait_ms", label: "Total Wait (ms)" },
+  { key: "max_wait_ms", label: "Max Wait (ms)" },
+];
 
 /* get_query_duration_trend returns {time, value, execution_count}. Only `value` (milliseconds) is charted —
    an execution count on the same axis would be a second unit sharing one y-domain, which is the mistake the
