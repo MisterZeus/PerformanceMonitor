@@ -51,13 +51,14 @@ public sealed class DarlingMcpHealthParserTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
-        [Description("Maximum number of entries. Default 50.")] int limit = 50)
+        [Description("Maximum number of entries. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         try
         {
             /* The corruption + contention counter series is UNGATED (no warnings-only filter) — the viewer's
                GetSystemHealthAsync keeps every SYSTEM snapshot that has a timestamp. */
-            var c = await CollectAsync(postgres, server_name, hours_back, limit,
+            var c = await CollectAsync(postgres, server_name, hours_back, limit, as_of,
                 SystemHealthParser.SpServerDiagnosticsEvent,
                 xml => One(SystemHealthParser.ParseSystemHealth(xml)),
                 r => r.EventTime.HasValue);
@@ -99,17 +100,18 @@ public sealed class DarlingMcpHealthParserTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
-        [Description("Maximum number of entries. Default 50.")] int limit = 50)
+        [Description("Maximum number of entries. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             /* database_id → name resolution needs the collected size-stats mapping (the shred left it null). */
             var mapTask = DarlingSystemHealthReader.GetDatabaseNameMapAsync(postgres, resolved.ServerId);
             var xmls = await DarlingSystemHealthReader.ReadEventXmlAsync(
@@ -149,12 +151,13 @@ public sealed class DarlingMcpHealthParserTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
-        [Description("Maximum number of entries. Default 50.")] int limit = 50)
+        [Description("Maximum number of entries. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         try
         {
             /* IO_SUBSYSTEM fans one event out to one row per pending-request file — a many-per-event shred. */
-            var c = await CollectAsync(postgres, server_name, hours_back, limit,
+            var c = await CollectAsync(postgres, server_name, hours_back, limit, as_of,
                 SystemHealthParser.SpServerDiagnosticsEvent,
                 SystemHealthParser.ParseIoIssues,
                 SystemHealthSignificance.IsSignificant);
@@ -187,11 +190,12 @@ public sealed class DarlingMcpHealthParserTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
-        [Description("Maximum number of entries. Default 50.")] int limit = 50)
+        [Description("Maximum number of entries. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         try
         {
-            var c = await CollectAsync(postgres, server_name, hours_back, limit,
+            var c = await CollectAsync(postgres, server_name, hours_back, limit, as_of,
                 SystemHealthParser.SchedulerMonitorEvent,
                 xml => One(SystemHealthParser.ParseSchedulerIssue(xml)),
                 SystemHealthSignificance.IsSignificant);
@@ -226,11 +230,12 @@ public sealed class DarlingMcpHealthParserTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
-        [Description("Maximum number of entries. Default 50.")] int limit = 50)
+        [Description("Maximum number of entries. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         try
         {
-            var c = await CollectAsync(postgres, server_name, hours_back, limit,
+            var c = await CollectAsync(postgres, server_name, hours_back, limit, as_of,
                 SystemHealthParser.SpServerDiagnosticsEvent,
                 xml => One(SystemHealthParser.ParseMemoryConditions(xml)),
                 SystemHealthSignificance.IsSignificant);
@@ -288,11 +293,12 @@ public sealed class DarlingMcpHealthParserTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
-        [Description("Maximum number of entries. Default 50.")] int limit = 50)
+        [Description("Maximum number of entries. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         try
         {
-            var c = await CollectAsync(postgres, server_name, hours_back, limit,
+            var c = await CollectAsync(postgres, server_name, hours_back, limit, as_of,
                 SystemHealthParser.SpServerDiagnosticsEvent,
                 xml => One(SystemHealthParser.ParseCpuTasks(xml)),
                 SystemHealthSignificance.IsSignificant);
@@ -329,11 +335,12 @@ public sealed class DarlingMcpHealthParserTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
-        [Description("Maximum number of entries. Default 50.")] int limit = 50)
+        [Description("Maximum number of entries. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         try
         {
-            var c = await CollectAsync(postgres, server_name, hours_back, limit,
+            var c = await CollectAsync(postgres, server_name, hours_back, limit, as_of,
                 SystemHealthParser.MemoryBrokerEvent,
                 xml => One(SystemHealthParser.ParseMemoryBroker(xml)),
                 SystemHealthSignificance.IsSignificant);
@@ -372,13 +379,14 @@ public sealed class DarlingMcpHealthParserTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
-        [Description("Maximum number of entries. Default 50.")] int limit = 50)
+        [Description("Maximum number of entries. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         try
         {
             /* Memory-node OOM is never gated — every recorded OOM is significant (sp_HealthParser applies
                no WHERE filter to this category). */
-            var c = await CollectAsync(postgres, server_name, hours_back, limit,
+            var c = await CollectAsync(postgres, server_name, hours_back, limit, as_of,
                 SystemHealthParser.MemoryNodeOomEvent,
                 xml => One(SystemHealthParser.ParseMemoryNodeOom(xml)),
                 SystemHealthSignificance.IsSignificant);
@@ -432,12 +440,13 @@ public sealed class DarlingMcpHealthParserTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
-        [Description("Maximum number of entries. Default 50.")] int limit = 50)
+        [Description("Maximum number of entries. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
 
         try
@@ -448,7 +457,7 @@ public sealed class DarlingMcpHealthParserTools
                 server, and zero out of zero is a blind one. CollectAsync returns only the surviving rows,
                 so the two would arrive indistinguishable.
             */
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var xmls = await DarlingSystemHealthReader.ReadEventXmlAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, SystemHealthParser.WaitInfoEvent);
 
@@ -516,7 +525,7 @@ public sealed class DarlingMcpHealthParserTools
     private readonly record struct Collected<T>(string? EarlyReturn, string ServerName, List<T> Rows);
 
     /// <summary>
-    /// Resolves the server, validates hours_back + limit, reads the raw event_xml for
+    /// Resolves the server, validates hours_back + as_of + limit, reads the raw event_xml for
     /// <paramref name="eventType"/> over the window, shreds each blob with <paramref name="shred"/> (the
     /// reused <see cref="SystemHealthParser"/> — 0..n records per event), and keeps only the rows
     /// <paramref name="significant"/> accepts. The seven gated categories pass their
@@ -524,16 +533,16 @@ public sealed class DarlingMcpHealthParserTools
     /// predicate (ungated, matching the viewer's chart read).
     /// </summary>
     private static async Task<Collected<T>> CollectAsync<T>(
-        NpgsqlDataSource postgres, string? serverName, int hoursBack, int limit, string eventType,
+        NpgsqlDataSource postgres, string? serverName, int hoursBack, int limit, string? asOf, string eventType,
         Func<string, IEnumerable<T>> shred, Func<T, bool> significant) where T : class
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverName);
         if (error != null) return new Collected<T>(error, "", new List<T>());
 
-        var validation = McpHelpers.ValidateHoursBack(hoursBack) ?? McpHelpers.ValidateTop(limit);
+        var validation = McpHelpers.ValidateWindow(hoursBack, asOf, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
         if (validation != null) return new Collected<T>(validation, "", new List<T>());
 
-        var now = DateTime.UtcNow;
+        var now = windowEnd;
         var xmls = await DarlingSystemHealthReader.ReadEventXmlAsync(
             postgres, resolved.ServerId, now.AddHours(-hoursBack), now, eventType);
 

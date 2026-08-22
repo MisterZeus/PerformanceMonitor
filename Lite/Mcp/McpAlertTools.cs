@@ -31,17 +31,18 @@ public sealed class McpAlertTools
     public static async Task<string> GetAlertHistory(
         LocalDataService dataService,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows. Default 50.")] int limit = 50)
+        [Description("Maximum rows. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         try
         {
-            var hoursError = McpHelpers.ValidateHoursBack(hours_back);
+            var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
-            var rows = await dataService.GetAlertHistoryAsync(hours_back, limit);
+            var rows = await dataService.GetAlertHistoryAsync(hours_back, limit, asOfUtc: windowEnd);
 
             if (rows.Count == 0)
             {

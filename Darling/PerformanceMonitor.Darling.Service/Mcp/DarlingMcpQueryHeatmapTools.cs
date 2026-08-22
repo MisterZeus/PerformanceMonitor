@@ -47,12 +47,13 @@ public sealed class DarlingMcpQueryHeatmapTools
         [Description("Which per-execution metric to bucket by: duration, cpu, logical_reads, logical_writes or execution_count. Default duration.")] string? metric = null,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         [Description("Width of each time bin, in minutes. Default 5 - the desktop viewer's own bin width, so the two surfaces agree. Raise it to cover a longer window in fewer cells.")] int bucket_minutes = DarlingQueryHeatmapReader.ViewerBucketMinutes,
-        [Description("Maximum CELLS to return, most recent bins first. Default 500. A full day of 5-minute bins can reach 2,016 cells on a busy server; raise bucket_minutes rather than the cap to see the whole window.")] int limit = DefaultCellLimit)
+        [Description("Maximum CELLS to return, most recent bins first. Default 500. A full day of 5-minute bins can reach 2,016 cells on a busy server; raise bucket_minutes rather than the cap to see the whole window.")] int limit = DefaultCellLimit,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back)
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd)
             ?? McpHelpers.ValidateTop(limit)
             ?? ValidateBucketMinutes(bucket_minutes);
         if (validation != null) return validation;
@@ -64,7 +65,14 @@ public sealed class DarlingMcpQueryHeatmapTools
 
         try
         {
-            var end = DateTime.UtcNow;
+            /*
+                #2495: the anchor, and it earns its place here more than on most reads. A heatmap IS a time
+                axis, so "the 4 hours ending Tuesday 03:00" is the shape of every question anyone brings to
+                it — and widening hours_back until an old incident falls inside is not the same question,
+                because the extra hours land as extra COLUMNS that push the incident's own columns past the
+                cell cap.
+            */
+            var end = windowEnd;
             var start = end.AddHours(-hours_back);
 
             /*
@@ -114,6 +122,7 @@ public sealed class DarlingMcpQueryHeatmapTools
                 metric = DarlingQueryHeatmapReader.MetricName(parsedMetric),
                 metric_unit = DarlingQueryHeatmapReader.MetricUnit(parsedMetric),
                 database_name,
+                /* The window that was QUERIED, anchored or not — the caller reads the bins against it. */
                 window_start = start.ToString("o"),
                 window_end = end.ToString("o"),
                 bucket_minutes,

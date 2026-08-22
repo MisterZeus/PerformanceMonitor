@@ -18,7 +18,7 @@ public partial class LocalDataService
     /// <summary>
     /// Gets recent waiting task snapshots for a server.
     /// </summary>
-    public async Task<List<WaitingTaskRow>> GetWaitingTasksAsync(int serverId, int hoursBack = 1, IReadOnlyList<string>? databaseNames = null)
+    public async Task<List<WaitingTaskRow>> GetWaitingTasksAsync(int serverId, int hoursBack = 1, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -27,7 +27,11 @@ public partial class LocalDataService
            tasks already in the DuckDB (collected before a type was ignored) don't surface here — the same
            BuildExclusionClause the wait-stats reads use. */
         var exclude = IgnoredWaitTypes.BuildExclusionClause(_ignoredWaitTypes.Value);
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 3, out var dbValues);
+
+        /* The window's upper edge is $3, so the optional database list starts at $4. Bounding both edges
+           (rather than only the lower one) is what lets an as_of anchor mean anything here. */
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         command.CommandText = $@"
 SELECT
     collection_time,
@@ -39,12 +43,14 @@ SELECT
     database_name
 FROM v_waiting_tasks
 WHERE server_id = $1
-AND   collection_time >= $2{dbClause}
+AND   collection_time >= $2
+AND   collection_time <= $3{dbClause}
 {exclude}
 ORDER BY collection_time DESC, wait_duration_ms DESC";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-hoursBack) });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
 
@@ -94,12 +100,12 @@ LIMIT 1";
     /// <summary>
     /// Gets waiting task duration trend grouped by wait type for charting.
     /// </summary>
-    public async Task<List<WaitingTaskTrendPoint>> GetWaitingTaskTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<WaitingTaskTrendPoint>> GetWaitingTaskTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         /* #1240 parity: exclude the user's ignored (benign) wait types at DISPLAY time (mirrors the
            wait-stats reads) so the Current Waits duration chart matches the Wait Stats tab. */
@@ -143,12 +149,12 @@ ORDER BY
     /// <summary>
     /// Gets blocked session count trend grouped by database for charting.
     /// </summary>
-    public async Task<List<BlockedSessionTrendPoint>> GetBlockedSessionTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
+    public async Task<List<BlockedSessionTrendPoint>> GetBlockedSessionTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"

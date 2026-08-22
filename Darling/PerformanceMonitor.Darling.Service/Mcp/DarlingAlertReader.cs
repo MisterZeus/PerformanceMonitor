@@ -52,26 +52,32 @@ internal static class DarlingAlertReader
     muted,
     detail_text";
 
-    /// <summary>Per-server alert history — the viewer's <c>AlertHistorySql</c>. $1 window start, $2 server_id,
-    /// $3 limit (naive UTC / int / int).</summary>
+    /// <summary>Per-server alert history — the viewer's <c>AlertHistorySql</c>. $1 window start, $2 window
+    /// end, $3 server_id, $4 limit (naive UTC / naive UTC / int / int).
+    ///
+    /// <para>The upper edge is bounded rather than open (#2495): the row cap is applied by the database, so
+    /// trimming after the read would spend the whole LIMIT on rows newer than the anchor and hand back an
+    /// empty window that looks like a quiet one.</para></summary>
     public const string AlertHistorySql = @"
 SELECT" + AlertHistorySelectColumns + @"
 FROM config_alert_log
 WHERE alert_time >= $1
-AND   server_id = $2
+AND   alert_time <= $2
+AND   server_id = $3
 AND   dismissed = FALSE
 ORDER BY alert_time DESC
-LIMIT $3";
+LIMIT $4";
 
     /// <summary>All-servers alert history (the fleet default) — the viewer's <c>AlertHistoryAllServersSql</c>.
-    /// $1 window start, $2 limit (naive UTC / int).</summary>
+    /// $1 window start, $2 window end, $3 limit (naive UTC / naive UTC / int).</summary>
     public const string AlertHistoryAllServersSql = @"
 SELECT" + AlertHistorySelectColumns + @"
 FROM config_alert_log
 WHERE alert_time >= $1
+AND   alert_time <= $2
 AND   dismissed = FALSE
 ORDER BY alert_time DESC
-LIMIT $2";
+LIMIT $3";
 
     /// <summary>
     /// Recent alerts newest first, excluding dismissed rows — the Alert History read. With no
@@ -79,12 +85,13 @@ LIMIT $2";
     /// server. Mirrors the viewer's optional-serverId <c>GetAlertHistoryAsync</c>.
     /// </summary>
     public static async Task<List<AlertHistoryReadRow>> GetAlertHistoryAsync(
-        NpgsqlDataSource postgres, DateTime sinceUtc, int? serverId, int limit, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, DateTime sinceUtc, DateTime untilUtc, int? serverId, int limit, CancellationToken cancellationToken = default)
     {
         var rows = new List<AlertHistoryReadRow>();
 
         await using var command = postgres.CreateCommand(serverId.HasValue ? AlertHistorySql : AlertHistoryAllServersSql);
         DarlingMcpReadParameters.AddTimestamp(command, sinceUtc);
+        DarlingMcpReadParameters.AddTimestamp(command, untilUtc);
         if (serverId.HasValue)
         {
             DarlingMcpReadParameters.AddInt(command, serverId.Value);

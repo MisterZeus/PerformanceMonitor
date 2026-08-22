@@ -84,7 +84,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     }
 
     [Theory]
-    [InlineData("get_alert_history", "server_name,hours_back,limit")]
+    [InlineData("get_alert_history", "server_name,hours_back,limit,as_of")]
     [InlineData("get_mute_rules", "enabled_only")]
     [InlineData("update_alert_settings", "settings_json")]
     [InlineData("create_mute_rule", "server_name,metric_name,database_pattern,query_text_pattern,wait_type_pattern,job_name_pattern,reason,expires_at")]
@@ -128,9 +128,12 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         var sql = Reader.AlertHistorySql;
         Assert.Contains("FROM config_alert_log", sql, StringComparison.Ordinal);
         Assert.Contains("dismissed = FALSE", sql, StringComparison.Ordinal);
-        Assert.Contains("server_id = $2", sql, StringComparison.Ordinal);
+        /* #2495: BOTH window edges are bound, so server_id and the cap moved up one ordinal each. */
+        Assert.Contains("alert_time >= $1", sql, StringComparison.Ordinal);
+        Assert.Contains("alert_time <= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("server_id = $3", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY alert_time DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT $3", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -140,7 +143,8 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         Assert.Contains("FROM config_alert_log", sql, StringComparison.Ordinal);
         Assert.Contains("dismissed = FALSE", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("server_id =", sql, StringComparison.Ordinal);   /* fleet-wide */
-        Assert.Contains("LIMIT $2", sql, StringComparison.Ordinal);
+        Assert.Contains("alert_time <= $2", sql, StringComparison.Ordinal);       /* #2495 upper edge */
+        Assert.Contains("LIMIT $3", sql, StringComparison.Ordinal);
     }
 
     /// <summary>

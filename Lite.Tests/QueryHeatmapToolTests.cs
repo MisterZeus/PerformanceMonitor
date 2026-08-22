@@ -227,6 +227,46 @@ public sealed class QueryHeatmapToolTests : IClassFixture<SharedDuckDbFixture>, 
         Assert.Equal(3, whole.GetProperty("cell_count").GetInt32());
     }
 
+    /// <summary>
+    /// The anchor moves the window, and the resolved instant reaches the QUERY.
+    /// <para>#2495's own failure mode is a tool that takes <c>as_of</c>, validates it, refuses a bad one
+    /// correctly, and then queries NOW — the validation succeeding is what makes the caller believe the
+    /// window moved, and nothing in the result says otherwise. So this proves it by CONTENT: an incident 30
+    /// hours old is outside every default window on the surface, and only the anchored call can see it.</para>
+    /// </summary>
+    [Fact]
+    public async Task TheAnchor_MovesTheWindow_AndTheDefaultAnchorCannotSeeAPastIncident()
+    {
+        var service = new LocalDataService(_duckDb);
+        var incident = FloorToHour(Truncate(DateTime.UtcNow).AddHours(-30));
+        await SeedAsync(incident, "0xINCIDENT", deltaExec: 5, deltaElapsed: 250_000);
+
+        var anchor = DateTime.SpecifyKind(incident.AddMinutes(30), DateTimeKind.Utc).ToString("o");
+        var anchored = Root(await McpQueryTools.GetQueryHeatmap(
+            service, _serverManager, ServerName, 1, null, null, 5, 500, anchor));
+
+        Assert.Equal(1, anchored.GetProperty("cell_count").GetInt32());
+        Assert.Equal("0xINCIDENT", anchored.GetProperty("cells")[0].GetProperty("top_query_hash").GetString());
+
+        /* The reported window is the ANCHORED one. Taken from a fresh clock it would say "now" over bins
+           that are 30 hours old. */
+        Assert.Equal(anchor, anchored.GetProperty("window_end").GetString());
+        Assert.Equal(
+            ParseUtc(anchored.GetProperty("cells")[0].GetProperty("time_bucket").GetString()!),
+            incident);
+
+        /* The same LENGTH of window at the default anchor cannot reach it — so it is the anchor doing the
+           work, not hours_back. */
+        var unanchored = Root(await McpQueryTools.GetQueryHeatmap(service, _serverManager, ServerName, 1));
+        Assert.Equal("empty", unanchored.GetProperty("status").GetString());
+        Assert.Contains("Widen hours_back", unanchored.GetProperty("message").GetString()!, StringComparison.Ordinal);
+
+        /* An anchor we cannot use is refused, never silently treated as now. */
+        var badAnchor = await McpQueryTools.GetQueryHeatmap(
+            service, _serverManager, ServerName, 1, null, null, 5, 500, "last tuesday");
+        Assert.Contains("Invalid as_of", badAnchor, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task OutOfRangeKnobs_AreRefused_NotSilentlyClamped()
     {

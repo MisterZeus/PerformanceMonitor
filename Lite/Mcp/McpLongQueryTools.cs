@@ -22,20 +22,21 @@ public sealed class McpLongQueryTools
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows. Default 30.")] int limit = 30)
+        [Description("Maximum rows. Default 30.")] int limit = 30,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var hoursError = McpHelpers.ValidateHoursBack(hours_back);
+            var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
-            var rows = await dataService.GetRecentLongQueryCompletionsAsync(resolved.ServerId, hours_back);
+            var rows = await dataService.GetRecentLongQueryCompletionsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("empty", "No long-running query completions found in the specified time range. The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data.");

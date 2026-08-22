@@ -60,17 +60,18 @@ public sealed class McpIoTools
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24)
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var hoursError = McpHelpers.ValidateHoursBack(hours_back);
+            var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var points = await dataService.GetFileIoLatencyTrendAsync(resolved.ServerId, hours_back);
+            var points = await dataService.GetFileIoLatencyTrendAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
             if (points.Count == 0)
             {

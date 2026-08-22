@@ -73,12 +73,12 @@ OR    EXISTS (SELECT 1 FROM v_deadlocks WHERE server_id = $3)";
     /// count trend.
     /// </summary>
     public async Task<List<BlockingDurationStatsPoint>> GetBlockingDurationStatsAsync(
-        int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
+        int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         /* BPR per-minute severity buckets, falling back to the always-on DMV snapshot only when BPR has none
@@ -145,14 +145,14 @@ ORDER BY bucket";
     /// <see cref="GetRecentDeadlocksAsync"/>.
     /// </summary>
     public async Task<List<DeadlockSeverityStatsPoint>> GetDeadlockSeverityStatsAsync(
-        int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+        int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         var rows = new List<DeadlockRow>();
 
         using (var connection = await OpenConnectionAsync())
         using (var command = connection.CreateCommand())
         {
-            var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+            var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
             command.CommandText = @"
 SELECT

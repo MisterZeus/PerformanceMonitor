@@ -50,19 +50,20 @@ public sealed class DarlingMcpBlockingTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum rows. Default 30.")] int limit = 30,
-        [Description("Optional #1140 alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects.")] string? dedup_key = null)
+        [Description("Optional #1140 alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects.")] string? dedup_key = null,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var rows = await DarlingBlockingReader.GetRecentBlockedProcessReportsAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
@@ -152,19 +153,20 @@ public sealed class DarlingMcpBlockingTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum rows. Default 20.")] int limit = 20,
-        [Description("Optional #1140 alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects.")] string? dedup_key = null)
+        [Description("Optional #1140 alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects.")] string? dedup_key = null,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var rows = await DarlingBlockingReader.GetRecentDeadlocksAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
@@ -219,19 +221,20 @@ public sealed class DarlingMcpBlockingTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum deadlocks to return. Default 5.")] int limit = 5,
-        [Description("Optional #1140 alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects.")] string? dedup_key = null)
+        [Description("Optional #1140 alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects.")] string? dedup_key = null,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var rows = await DarlingBlockingReader.GetRecentDeadlocksAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
 
@@ -288,19 +291,20 @@ public sealed class DarlingMcpBlockingTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum reports to return. Default 5.")] int limit = 5)
+        [Description("Maximum reports to return. Default 5.")] int limit = 5,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var rows = await DarlingBlockingReader.GetRecentBlockedProcessReportsAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             var withXml = rows.Where(r => r.HasReportXml).Take(limit).ToList();
@@ -334,17 +338,18 @@ public sealed class DarlingMcpBlockingTools
     public static async Task<string> GetBlockingTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24)
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var start = now.AddHours(-hours_back);
             var points = await DarlingBlockingTrendReader.GetBlockingTrendAsync(
                 postgres, resolved.ServerId, start, now);
@@ -383,17 +388,18 @@ public sealed class DarlingMcpBlockingTools
     public static async Task<string> GetDeadlockTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24)
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var start = now.AddHours(-hours_back);
             var points = await DarlingBlockingTrendReader.GetDeadlockTrendAsync(
                 postgres, resolved.ServerId, start, now);

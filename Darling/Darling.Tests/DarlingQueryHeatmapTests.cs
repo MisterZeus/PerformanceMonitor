@@ -465,6 +465,32 @@ public sealed class DarlingQueryHeatmapLiveTests
             Assert.Equal("0-1", execCount.GetProperty("magnitude_buckets")[0].GetProperty("label").GetString());
             Assert.Contains("a total, not a per-execution average", execCount.GetProperty("metric_unit").GetString()!, StringComparison.Ordinal);
 
+            /*
+                ── the anchor moves the window, and the resolved instant reaches the QUERY ──
+                #2495's own failure mode is a tool that takes as_of, validates it, refuses a bad one
+                correctly, and then queries NOW — the validation succeeding is what makes the caller believe
+                the window moved. So this proves it by CONTENT: one hour ending half an hour after the
+                seeded rows returns them, and the same one-hour window at the default anchor cannot.
+            */
+            var anchor = DateTime.SpecifyKind(t1.AddMinutes(30), DateTimeKind.Utc).ToString("o");
+            var anchored = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(
+                postgres, ServerName, 1, null, null, 5, 500, anchor));
+
+            Assert.Equal(1, anchored.GetProperty("time_bin_count").GetInt32());
+            Assert.Equal(2, anchored.GetProperty("cell_count").GetInt32());
+            Assert.Equal(anchor, anchored.GetProperty("window_end").GetString());
+
+            /* The same LENGTH of window at the default anchor sees nothing but the idle row — so it is the
+               anchor doing the work, not hours_back. Widening hours_back instead would be a different
+               question anyway: on a heatmap the extra hours arrive as extra COLUMNS. */
+            var unanchored = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 1));
+            Assert.Equal("empty", unanchored.GetProperty("status").GetString());
+
+            /* An anchor we cannot use is refused, never silently treated as now. */
+            var badAnchor = await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(
+                postgres, ServerName, 1, null, null, 5, 500, "last tuesday");
+            Assert.Contains("Invalid as_of", badAnchor, StringComparison.Ordinal);
+
             /* ── the caps and the bounds REFUSE out of range rather than quietly rewriting them ── */
             var refusedRows = await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 24, null, null, 5, 5000);
             Assert.Contains("exceeds maximum of 1000", refusedRows, StringComparison.Ordinal);

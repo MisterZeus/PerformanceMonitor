@@ -22,18 +22,19 @@ public sealed class McpPlanCacheSchedulerTools
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history to search for the latest snapshot. Default 24.")] int hours_back = 24)
+        [Description("Hours of history to search for the latest snapshot. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var hoursError = McpHelpers.ValidateHoursBack(hours_back);
+            var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var summary = await dataService.GetPlanCacheSummaryAsync(resolved.ServerId, hours_back);
-            var cacheTypes = await dataService.GetPlanCacheSnapshotAsync(resolved.ServerId, hours_back);
+            var summary = await dataService.GetPlanCacheSummaryAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
+            var cacheTypes = await dataService.GetPlanCacheSnapshotAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (summary.TotalPlans == 0 && cacheTypes.Count == 0)
                 return McpHelpers.Status("unavailable", "No plan cache statistics available in the requested time range.");
 
@@ -80,17 +81,18 @@ public sealed class McpPlanCacheSchedulerTools
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history to search for the latest snapshot. Default 24.")] int hours_back = 24)
+        [Description("Hours of history to search for the latest snapshot. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var hoursError = McpHelpers.ValidateHoursBack(hours_back);
+            var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var item = await dataService.GetCpuSchedulerSnapshotAsync(resolved.ServerId, hours_back);
+            var item = await dataService.GetCpuSchedulerSnapshotAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (item == null)
                 return McpHelpers.Status("unavailable", "No CPU scheduler data available. The scheduler collector may not have run yet.");
 

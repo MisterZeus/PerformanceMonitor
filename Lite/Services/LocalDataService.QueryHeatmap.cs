@@ -61,12 +61,12 @@ public partial class LocalDataService
     public async Task<List<QueryHeatmapCellRow>> GetQueryHeatmapCellsAsync(
         int serverId, HeatmapMetric metric, int hoursBack = 24,
         int bucketMinutes = ViewerHeatmapBucketMinutes, int maxRows = 500,
-        IReadOnlyList<string>? databaseNames = null)
+        IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
         var metricExpr = GetMetricColumn(metric);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         var bucketIndex = 4 + dbValues.Count;
@@ -150,12 +150,12 @@ LIMIT ${limitIndex}";
     /// twin: <c>DarlingQueryHeatmapReader.HeatmapCoverageSql</c>.</para>
     /// </summary>
     public async Task<(bool HasAny, bool HasInWindow)> GetQueryHeatmapCoverageAsync(
-        int serverId, int hoursBack = 24)
+        int serverId, int hoursBack = 24, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         command.CommandText = @"
 SELECT

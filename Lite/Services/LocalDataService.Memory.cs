@@ -67,12 +67,12 @@ LIMIT 1";
     /// <summary>
     /// Gets memory stats trend for charting.
     /// </summary>
-    public async Task<List<MemoryTrendPoint>> GetMemoryTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<MemoryTrendPoint>> GetMemoryTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 SELECT
@@ -222,12 +222,12 @@ ORDER BY clerk_type, collection_time";
     /// <summary>
     /// Gets memory pressure events (from RING_BUFFER_RESOURCE_MONITOR) for charting.
     /// </summary>
-    public async Task<List<MemoryPressureEventRow>> GetMemoryPressureEventsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<MemoryPressureEventRow>> GetMemoryPressureEventsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 SELECT

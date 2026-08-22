@@ -164,7 +164,7 @@ internal static class DarlingDataReader
     /// naive UTC by subtracting the per-batch UTC offset (#1262). Windows on <c>collection_time</c> (the
     /// reliable naive-UTC clock, not the server-local sample_time). Reads the base
     /// <c>cpu_utilization_stats</c> table (the de-skew window function needs collection_time alongside
-    /// sample_time). $1 server_id, $2 window start (naive UTC).
+    /// sample_time). $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
     public const string CpuUtilizationSql = """
         SELECT
@@ -178,16 +178,18 @@ internal static class DarlingDataReader
         FROM cpu_utilization_stats
         WHERE server_id = $1
         AND   collection_time >= $2
+        AND   collection_time <= $3
         ORDER BY sample_time
         """;
 
     public static async Task<List<CpuSample>> GetCpuUtilizationAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
         var samples = new List<CpuSample>();
         await using var command = postgres.CreateCommand(CpuUtilizationSql);
         AddInt(command, serverId);
         AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -521,7 +523,7 @@ internal static class DarlingDataReader
     /// <summary>
     /// tempdb space-usage samples over the window — the viewer's <c>TempDbTrendSql</c>. MB columns are
     /// <c>numeric(18,2)</c> → double precision; total_sessions_using_tempdb is bigint, top_session_id is
-    /// integer. $1 server_id, $2 window start (naive UTC).
+    /// integer. $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
     public const string TempDbTrendSql = """
         SELECT
@@ -537,16 +539,18 @@ internal static class DarlingDataReader
         FROM v_tempdb_stats
         WHERE server_id = $1
         AND   collection_time >= $2
+        AND   collection_time <= $3
         ORDER BY collection_time
         """;
 
     public static async Task<List<TempDbSample>> GetTempDbTrendAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
         var samples = new List<TempDbSample>();
         await using var command = postgres.CreateCommand(TempDbTrendSql);
         AddInt(command, serverId);
         AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

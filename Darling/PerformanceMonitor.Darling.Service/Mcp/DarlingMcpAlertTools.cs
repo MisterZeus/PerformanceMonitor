@@ -68,9 +68,10 @@ public sealed class DarlingMcpAlertTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name. Omit to return alerts across all servers (the fleet default).")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows. Default 50.")] int limit = 50)
+        [Description("Maximum rows. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
-        var hoursError = McpHelpers.ValidateHoursBack(hours_back);
+        var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (hoursError != null) return hoursError;
         var limitError = McpHelpers.ValidateTop(limit);
         if (limitError != null) return limitError;
@@ -89,8 +90,8 @@ public sealed class DarlingMcpAlertTools
 
         try
         {
-            var since = DateTime.UtcNow.AddHours(-hours_back);
-            var rows = await DarlingAlertReader.GetAlertHistoryAsync(postgres, since, serverId, limit);
+            var since = windowEnd.AddHours(-hours_back);
+            var rows = await DarlingAlertReader.GetAlertHistoryAsync(postgres, since, windowEnd, serverId, limit);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No alerts found in the specified time range.");
 

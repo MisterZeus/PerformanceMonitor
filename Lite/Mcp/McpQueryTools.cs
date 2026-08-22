@@ -18,14 +18,15 @@ public sealed class McpQueryTools
         [Description("Number of top queries. Default 20.")] int top = 20,
         [Description("Filter to a specific database.")] string? database_name = null,
         [Description("If true, only return queries whose cached plan has EVER run at DOP > 1. Note: max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled. Confirm current parallelism with analyze_query_plan, which reads the actual plan.")] bool parallel_only = false,
-        [Description("Minimum DOP to filter on. Implies parallel filtering. Filters the same lifetime-max value as parallel_only, not current parallelism.")] int min_dop = 0)
+        [Description("Minimum DOP to filter on. Implies parallel filtering. Filters the same lifetime-max value as parallel_only, not current parallelism.")] int min_dop = 0,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var hoursError = McpHelpers.ValidateHoursBack(hours_back);
+            var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
             var topError = McpHelpers.ValidateTop(top, "top");
@@ -36,8 +37,8 @@ public sealed class McpQueryTools
                call-entry overhead (review catch; threading one instant INTO the shared ranking read's
                signature is the only way to zero it, and sub-microsecond against an hours window does
                not buy that churn). */
-            var nowUtc = DateTime.UtcNow;
-            var rows = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name });
+            var nowUtc = windowEnd;
+            var rows = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
@@ -131,22 +132,23 @@ public sealed class McpQueryTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Number of top procedures. Default 20.")] int top = 20,
-        [Description("Filter to a specific database.")] string? database_name = null)
+        [Description("Filter to a specific database.")] string? database_name = null,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var hoursError = McpHelpers.ValidateHoursBack(hours_back);
+            var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
             var topError = McpHelpers.ValidateTop(top, "top");
             if (topError != null) return topError;
 
             /* Same pre-read capture as the queries tool — the skew shrinks to call-entry overhead. */
-            var nowUtc = DateTime.UtcNow;
-            var rows = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name });
+            var nowUtc = windowEnd;
+            var rows = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status(
@@ -220,20 +222,21 @@ public sealed class McpQueryTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Number of top queries. Default 20.")] int top = 20,
-        [Description("Filter to a specific database.")] string? database_name = null)
+        [Description("Filter to a specific database.")] string? database_name = null,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var hoursError = McpHelpers.ValidateHoursBack(hours_back);
+            var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
             var topError = McpHelpers.ValidateTop(top, "top");
             if (topError != null) return topError;
 
-            var rows = await dataService.GetQueryStoreTopQueriesAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name });
+            var rows = await dataService.GetQueryStoreTopQueriesAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No Query Store data available. Query Store may not be enabled on target databases.");
@@ -277,14 +280,15 @@ public sealed class McpQueryTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Size of the RECENT window, in hours back from now. Everything collected before it is the baseline. Default 24.")] int hours_back = 24,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
-        [Description("Maximum rows to return, worst first. Default 50 (the number the desktop viewer shows).")] int limit = 50)
+        [Description("Maximum rows to return, worst first. Default 50 (the number the desktop viewer shows).")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
+            var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
             /*
@@ -294,10 +298,10 @@ public sealed class McpQueryTools
             */
             var databases = string.IsNullOrWhiteSpace(database_name) ? null : new[] { database_name };
             var rows = await dataService.GetQueryStoreRegressionsAsync(
-                resolved.ServerId, hours_back, limit + 1, databases);
+                resolved.ServerId, hours_back, limit + 1, databases, asOfUtc: windowEnd);
 
             if (rows.Count == 0)
-                return await EmptyRegressionsAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back);
+                return await EmptyRegressionsAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd);
 
             var truncated = rows.Count > limit;
 
@@ -356,9 +360,11 @@ public sealed class McpQueryTools
     /// regressions" there is a confident wrong answer rather than a missing one.</para>
     /// </summary>
     private static async Task<string> EmptyRegressionsAsync(
-        LocalDataService dataService, int serverId, string serverName, int hours_back)
+        LocalDataService dataService, int serverId, string serverName, int hours_back, DateTime windowEnd)
     {
-        var (hasBaseline, hasRecent) = await dataService.GetQueryStoreRegressionCoverageAsync(serverId, hours_back);
+        /* The anchor is threaded in rather than resolved again: the coverage probe answers "does a BEFORE
+           exist for this window", and a window it computed for itself would be a different one. */
+        var (hasBaseline, hasRecent) = await dataService.GetQueryStoreRegressionCoverageAsync(serverId, hours_back, asOfUtc: windowEnd);
 
         if (!hasBaseline && !hasRecent)
         {
@@ -395,14 +401,22 @@ public sealed class McpQueryTools
         [Description("Which per-execution metric to bucket by: duration, cpu, logical_reads, logical_writes or execution_count. Default duration.")] string? metric = null,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         [Description("Width of each time bin, in minutes. Default 5 - the desktop viewer's own bin width, so the two surfaces agree. Raise it to cover a longer window in fewer cells.")] int bucket_minutes = LocalDataService.ViewerHeatmapBucketMinutes,
-        [Description("Maximum CELLS to return, most recent bins first. Default 500. A full day of 5-minute bins can reach 2,016 cells on a busy server; raise bucket_minutes rather than the cap to see the whole window.")] int limit = DefaultHeatmapCellLimit)
+        [Description("Maximum CELLS to return, most recent bins first. Default 500. A full day of 5-minute bins can reach 2,016 cells on a busy server; raise bucket_minutes rather than the cap to see the whole window.")] int limit = DefaultHeatmapCellLimit,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var validation = McpHelpers.ValidateHoursBack(hours_back)
+            /*
+                #2495: the anchor, and it earns its place here more than on most reads. A heatmap IS a time
+                axis, so "the 4 hours ending Tuesday 03:00" is the shape of every question anyone brings to
+                it — and widening hours_back until an old incident falls inside is not the same question,
+                because the extra hours land as extra COLUMNS that push the incident's own columns past the
+                cell cap.
+            */
+            var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd)
                 ?? McpHelpers.ValidateTop(limit)
                 ?? ValidateBucketMinutes(bucket_minutes);
             if (validation != null) return validation;
@@ -417,20 +431,16 @@ public sealed class McpQueryTools
                 happens to have exactly `limit` cells and nothing more, which is a false positive in the one
                 field whose whole reason for existing is that the cap should not have to be inferred.
             */
+            /* The resolved anchor is threaded INTO the read rather than left to it. Before #2495 this
+               call let the service compute its own window from UtcNow and the reported window was taken
+               after the call returned, so the two disagreed by however long the read took — on the one
+               read whose entire output is a time axis (review catch). One instant now decides both. */
             var databases = string.IsNullOrWhiteSpace(database_name) ? null : new[] { database_name };
-
-            /* Captured BEFORE the read, whose window is its own internal UtcNow. Taken afterwards it would
-               report a window the query never used — off by however long the read took, and this read is
-               the one whose whole output is a time axis, so a window that disagrees with the bins under it
-               is worse here than almost anywhere. Hoisting shrinks the skew to call-entry overhead; the
-               same move GetTopQueriesByCpu makes above, for the same reason. Darling's twin has no skew at
-               all because it computes the window itself and passes it in. */
-            var windowEnd = DateTime.UtcNow;
             var rows = await dataService.GetQueryHeatmapCellsAsync(
-                resolved.ServerId, parsedMetric, hours_back, bucket_minutes, limit + 1, databases);
+                resolved.ServerId, parsedMetric, hours_back, bucket_minutes, limit + 1, databases, asOfUtc: windowEnd);
 
             if (rows.Count == 0)
-                return await EmptyHeatmapAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back);
+                return await EmptyHeatmapAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd);
 
             var truncated = rows.Count > limit;
             var cells = rows.Take(limit).ToList();
@@ -523,9 +533,11 @@ public sealed class McpQueryTools
     /// caller to widen the window there would be advice pointed at the wrong problem.</para>
     /// </summary>
     private static async Task<string> EmptyHeatmapAsync(
-        LocalDataService dataService, int serverId, string serverName, int hours_back)
+        LocalDataService dataService, int serverId, string serverName, int hours_back, DateTime windowEnd)
     {
-        var (hasAny, hasInWindow) = await dataService.GetQueryHeatmapCoverageAsync(serverId, hours_back);
+        /* The anchor is threaded in rather than resolved again: the probe answers "was anything collected
+           in THIS window", and a window it computed for itself would be a different one. */
+        var (hasAny, hasInWindow) = await dataService.GetQueryHeatmapCoverageAsync(serverId, hours_back, asOfUtc: windowEnd);
 
         if (!hasAny)
         {
@@ -561,17 +573,18 @@ public sealed class McpQueryTools
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24)
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var hoursError = McpHelpers.ValidateHoursBack(hours_back);
+            var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var points = await dataService.GetQueryDurationTrendAsync(resolved.ServerId, hours_back);
+            var points = await dataService.GetQueryDurationTrendAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
             if (points.Count == 0)
             {
@@ -602,17 +615,18 @@ public sealed class McpQueryTools
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24)
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var hoursError = McpHelpers.ValidateHoursBack(hours_back);
+            var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var points = await dataService.GetProcedureDurationTrendAsync(resolved.ServerId, hours_back);
+            var points = await dataService.GetProcedureDurationTrendAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (points.Count == 0)
             {
                 return await EmptyTrendAsync(
@@ -634,17 +648,18 @@ public sealed class McpQueryTools
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24)
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var hoursError = McpHelpers.ValidateHoursBack(hours_back);
+            var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var points = await dataService.GetQueryStoreDurationTrendAsync(resolved.ServerId, hours_back);
+            var points = await dataService.GetQueryStoreDurationTrendAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (points.Count == 0)
             {
                 /*
@@ -714,17 +729,18 @@ public sealed class McpQueryTools
         [Description("The query_hash value from get_top_queries_by_cpu or get_query_store_top.")] string query_hash,
         [Description("The database name the query belongs to.")] string database_name,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24)
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var hoursError = McpHelpers.ValidateHoursBack(hours_back);
+            var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var rows = await dataService.GetQueryStatsHistoryAsync(resolved.ServerId, database_name, query_hash, hours_back);
+            var rows = await dataService.GetQueryStatsHistoryAsync(resolved.ServerId, database_name, query_hash, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("empty", $"No history found for query_hash '{query_hash}' in database '{database_name}' within the last {hours_back} hours.");
