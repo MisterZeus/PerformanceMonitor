@@ -67,6 +67,20 @@ public class FindingStore
 {
     private readonly DuckDbInitializer _duckDb;
 
+    /// <summary>
+    /// What <see cref="GetRecentFindingsAsync"/>'s upper bound is when the caller did NOT anchor: an
+    /// instant no row can reach, i.e. no bound at all. Matches the Darling twin's PgFindingStore.
+    ///
+    /// <para><b>Why not "now".</b> Two reasons, and the second is the one that would have hurt. First,
+    /// #2495's promise is that a caller sending only <c>hours_back</c> gets byte-for-byte the window it
+    /// always got, and this read has been half-open for its whole life. Second, <c>analysis_time</c> is
+    /// stamped by the WRITER's clock and would be filtered by the READER's; those are the same process
+    /// today, and the day they are not, a bounded default read would intermittently drop the newest run
+    /// — a findings read that "sometimes misses the analysis that just finished", with nothing in it to
+    /// point at a clock. An anchored read has a caller-supplied end and neither problem.</para>
+    /// </summary>
+    private static readonly DateTime NoUpperBound = new(9999, 12, 31, 23, 59, 59);
+
     public FindingStore(DuckDbInitializer duckDb)
     {
         _duckDb = duckDb;
@@ -278,7 +292,8 @@ public class FindingStore
     {
         var findings = new List<AnalysisFinding>();
 
-        /* #2506: the window's END. Null is "now" — the pre-#2506 read exactly. */
+        /* #2506: the window's END, from which the START is measured. Null is "now" — the pre-#2506
+           read exactly. */
         var windowEnd = asOfUtc ?? DateTime.UtcNow;
 
         using var readLock = _duckDb.AcquireReadLock();
@@ -294,8 +309,8 @@ public class FindingStore
             and the answer unchanged. That is the exact defect this convention exists to prevent, so
             the bound is part of the read rather than something the caller filters afterwards.
 
-            It changes nothing for an unanchored caller: $3 is then "now", and no row's analysis_time
-            can be later than the moment the read computed it (writer and reader are the same process).
+            It binds ONLY when the caller anchored; unanchored, $3 is NoUpperBound and the read is the
+            half-open window it has always been. See that field for why "now" is the wrong default.
         */
         cmd.CommandText = @"
 SELECT finding_id, analysis_time, server_id, server_name, database_name,
@@ -312,7 +327,7 @@ LIMIT $4";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
         cmd.Parameters.Add(new DuckDBParameter { Value = windowEnd.AddHours(-hoursBack) });
-        cmd.Parameters.Add(new DuckDBParameter { Value = windowEnd });
+        cmd.Parameters.Add(new DuckDBParameter { Value = asOfUtc is null ? NoUpperBound : windowEnd });
         cmd.Parameters.Add(new DuckDBParameter { Value = limit });
 
         using var reader = await cmd.ExecuteReaderAsync();

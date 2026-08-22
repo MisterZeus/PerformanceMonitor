@@ -104,6 +104,7 @@ public sealed class AnalysisAsOfAnchorLivePostgresTests
     private const string ServerName = "darling-analysis-asof-e2e";
     private const string WaitType = "AN2506_TEST_WAIT";
     private const string HistoricStoryHash = "an2506-historic-hash";
+    private const string AheadStoryHash = "an2506-ahead-of-now-hash";
     private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
@@ -228,23 +229,45 @@ public sealed class AnalysisAsOfAnchorLivePostgresTests
                working anchor right up until someone counted. */
             Assert.Equal(1, JsonDocument.Parse(findingsAnchored).RootElement.GetProperty("finding_count").GetInt32());
 
-            /* ── 6. compare_analysis hangs BOTH windows off the anchor. Anchored at the incident with a
-                  baseline 169 hours back, the baseline lands on the history week's same hour — the
-                  peak-vs-a-week-ago comparison the tool exists for, which is unreachable without the
-                  anchor because both windows used to be pinned to now. Asserted on the rendered
-                  instants rather than on a field path, so the check holds for both the data-bearing
-                  shape and the "neither window had facts" status envelope. */
-            var compared = await DarlingMcpTools.CompareAnalysis(service, postgres, ServerName, 1, 169, anchor);
+            /* ── 6. compare_analysis hangs BOTH windows off the anchor — the peak-vs-a-week-ago
+                  comparison the tool exists for, which was unreachable while both windows were pinned
+                  to now. 168 and not 169: baseline_hours_back is a span like any other and
+                  ValidateHoursBack caps it at MaxHoursBack, so the baseline lands an hour past the
+                  history rows rather than on them. That does not weaken the claim — the claim is that
+                  both bounds MOVED WITH THE ANCHOR, and it is asserted on the rendered instants rather
+                  than on a field path, so it holds for the data-bearing shape and for the "neither
+                  window had facts" status envelope alike. */
+            var compared = await DarlingMcpTools.CompareAnalysis(service, postgres, ServerName, 1, 168, anchor);
             Assert.Contains(Utc(incidentEnd).ToString("o"), compared, StringComparison.Ordinal);
-            Assert.Contains(Utc(incidentEnd.AddHours(-169)).ToString("o"), compared, StringComparison.Ordinal);
+            Assert.Contains(Utc(incidentEnd.AddHours(-168)).ToString("o"), compared, StringComparison.Ordinal);
 
             /* The control: unanchored, the same two instants are nowhere in the payload, because both
                windows hang off now. Without this the assertions above would pass on a tool that echoed
                the anchor into the payload and windowed on the clock. */
-            var comparedNow = await DarlingMcpTools.CompareAnalysis(service, postgres, ServerName, 1, 169);
+            var comparedNow = await DarlingMcpTools.CompareAnalysis(service, postgres, ServerName, 1, 168);
             Assert.DoesNotContain(Utc(incidentEnd).ToString("o"), comparedNow, StringComparison.Ordinal);
 
-            /* ── 7. Refusals reach the caller as the tool's own message, on the persisting tool too — a
+            /* ── 7. The UNANCHORED findings read keeps its half-open window, which is not a detail:
+                  bounding it at "now" broke a live test on the first attempt, and the mechanism behind
+                  that is real. analysis_time is stamped by the WRITER and filtered by the READER, so a
+                  default read bounded at the reader's clock drops a run written a moment earlier the
+                  day those two clocks stop being the same one. A row stamped ahead of now is the cheap,
+                  deterministic stand-in for that skew. */
+            await PlantFindingAsync(connection, Naive(DateTime.UtcNow.AddMinutes(30)), ct, AheadStoryHash);
+            Assert.Contains(
+                AheadStoryHash,
+                await DarlingMcpTools.GetAnalysisFindings(service, postgres, ServerName),
+                StringComparison.Ordinal);
+
+            /* …and the ANCHORED read still excludes it, so the bound is present exactly where it is
+                  needed and absent exactly where it would do harm. */
+            Assert.DoesNotContain(
+                AheadStoryHash,
+                await DarlingMcpTools.GetAnalysisFindings(
+                    service, postgres, ServerName, 4, false, Utc(historicRun.AddMinutes(30)).ToString("o")),
+                StringComparison.Ordinal);
+
+            /* ── 8. Refusals reach the caller as the tool's own message, on the persisting tool too — a
                   bad anchor must never fall back to "now" and then run a real, persisting analysis. */
             Assert.StartsWith(
                 "Invalid as_of",
@@ -318,7 +341,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)", connection);
     /// because producing it would mean an analysis whose <c>analysis_time</c> is stamped NOW — the very
     /// thing the anchored run refuses to do.
     /// </summary>
-    private static async Task PlantFindingAsync(NpgsqlConnection connection, DateTime analysisTime, CancellationToken ct)
+    private static async Task PlantFindingAsync(
+        NpgsqlConnection connection, DateTime analysisTime, CancellationToken ct, string? storyPathHash = null)
     {
         using var command = new NpgsqlCommand(@"
 INSERT INTO analysis_findings
@@ -336,7 +360,7 @@ VALUES ($1, $2, $3, $4, NULL, $5, $6, 0.9, 0.8, 'waits',
         command.Parameters.AddWithValue(ServerName);
         command.Parameters.AddWithValue(analysisTime.AddHours(-4));
         command.Parameters.AddWithValue(analysisTime);
-        command.Parameters.AddWithValue(HistoricStoryHash);
+        command.Parameters.AddWithValue(storyPathHash ?? HistoricStoryHash);
         await command.ExecuteNonQueryAsync(ct);
     }
 

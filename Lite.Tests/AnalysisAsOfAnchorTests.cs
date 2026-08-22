@@ -99,6 +99,36 @@ public sealed class AnalysisAsOfAnchorTests : IClassFixture<SharedDuckDbFixture>
     }
 
     /// <summary>
+    /// The UNANCHORED findings read keeps its half-open window, and that is a decision rather than an
+    /// omission: bounding it at "now" broke a live test on this change's first attempt, and the
+    /// mechanism behind that is real. <c>analysis_time</c> is stamped by the WRITER and filtered by the
+    /// READER, so a default read bounded at the reader's clock drops a run written a moment earlier the
+    /// day those two clocks stop being the same one — a findings read that "sometimes misses the
+    /// analysis that just finished", with nothing in it to point at a clock. A row stamped ahead of now
+    /// is the cheap, deterministic stand-in for that skew.
+    /// </summary>
+    [Fact]
+    public async Task TheUnanchoredFindingsRead_StillHasNoUpperBound_AndTheAnchoredOneDoes()
+    {
+        await PlantFindingAsync(DateTime.UtcNow.AddMinutes(30), RecentHash);
+        await PlantFindingAsync(DateTime.UtcNow.AddHours(-30), HistoricHash);
+
+        var service = CreateTestService();
+
+        Assert.Contains(
+            RecentHash,
+            await McpAnalysisTools.GetAnalysisFindings(service, _serverManager),
+            StringComparison.Ordinal);
+
+        /* Present exactly where it is needed and absent exactly where it would do harm. */
+        Assert.DoesNotContain(
+            RecentHash,
+            await McpAnalysisTools.GetAnalysisFindings(
+                service, _serverManager, null, 4, false, DateTime.UtcNow.AddHours(-29.5).ToString("o")),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The tool-to-engine seam. <c>get_analysis_facts</c> hands the anchor to
     /// <see cref="AnalysisService.CollectAndScoreFactsAsync"/>, which is where the window is actually
     /// built — a tool that resolved the anchor and then called the engine without it would validate,
