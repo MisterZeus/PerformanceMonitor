@@ -66,8 +66,22 @@ public sealed class ConfigSeedStatementArityTests
             }
         }
 
-        /* A regex that stops matching passes for free, which is the failure this whole file is about. */
-        Assert.True(seen >= 4, $"only {seen} seed INSERTs were parsed — the scan broke, not the SQL");
+        /*
+            A regex that stops matching passes for free, which is the failure this whole file is about.
+            The floor is DERIVED from the file rather than a literal: `seen >= 4` was true of today's four
+            statements, and would have gone on being true the day a fifth was added and one stopped
+            parsing. Counting the INSERTs independently of the pattern that parses them means the two
+            have to agree, so a statement the pattern cannot read is a failure rather than an absence.
+
+            The specific way it could stop reading one: the column and value lists are captured with
+            [^)]*, so a future seed carrying a function call — COALESCE($1, 0) — closes the capture early
+            or fails the match outright. Loud is fine; silent is not, and this is what makes it loud.
+        */
+        var declared = Regex.Matches(source, @"INSERT\s+INTO\s+[a-z_.]+", RegexOptions.IgnoreCase).Count;
+        Assert.True(
+            seen == declared,
+            $"parsed {seen} seed INSERTs but the file declares {declared} — the pattern cannot read one of "
+          + "them (a parenthesis inside a column or value list will do it), so its arity is unchecked");
 
         Assert.True(problems.Count == 0,
             "a seed INSERT disagrees with itself, which fails at RUN time as 42601 and leaves a fresh "
