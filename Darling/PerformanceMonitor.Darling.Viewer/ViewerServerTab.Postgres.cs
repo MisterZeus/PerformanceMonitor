@@ -260,7 +260,7 @@ public partial class ViewerServerTab
 
         var rows = await _dataService.GetPgIoAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
 
-        PgIoStatsGrid.ItemsSource = rows.Select(PgDisplay.Io).ToList();
+        PgIoStatsGrid.ItemsSource = PgDisplay.IoRows(rows);
         PgIoNote.Text = PanelNote("pg_io_stats", rows.Count,
             "No backend / object / context combination did any I/O in this window. This view needs "
             + "PostgreSQL 16 or newer, where pg_stat_io exists; below that the collector does not run and "

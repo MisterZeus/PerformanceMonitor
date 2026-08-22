@@ -27,24 +27,11 @@ public sealed class DarlingMcpPgIoTools
     /// <summary>
     /// Explains what a <c>context</c> value means, because it is the dimension with no SQL Server
     /// counterpart and the one that changes what you do about a number.
+    /// <para>#2530 moved the prose to <see cref="DarlingPgIoReader.ContextMeaning"/>, beside the query that
+    /// produces the value it explains, so the MCP surface and the WPF viewer's I/O tab print one copy of it
+    /// rather than two that drift. Kept as a delegating member because this file's tests name it.</para>
     /// </summary>
-    internal static string ContextMeaning(string? context) => context switch
-    {
-        "normal" => "Ordinary buffer-pool traffic. Reads here are cache misses that shared_buffers could "
-                  + "have absorbed, so a high read share with a low hit share is the classic case for more "
-                  + "memory or a better index.",
-        "bulkread" => "A sequential scan deliberately using a small ring buffer so it cannot evict the "
-                    + "buffer pool. High volume here is a scan-heavy workload, NOT memory pressure — adding "
-                    + "shared_buffers will not reduce it, because these reads bypass the pool by design.",
-        "bulkwrite" => "A bulk write (COPY, CREATE TABLE AS, some ALTER TABLE) using its own ring buffer.",
-        "vacuum" => "Vacuum's ring buffer. Volume here is autovacuum doing its job; pair it with "
-                  + "get_pg_autovacuum_health to see whether it is keeping up.",
-        "index" => "Index-specific I/O, reported separately from the relation's own.",
-        "walreplay" => "A standby applying WAL. This is replica catch-up work, not query I/O, and it is the "
-                     + "first thing to check when a reader lags.",
-        _ => "Unrecognized context — treat the raw counters as authoritative and check the PostgreSQL "
-           + "documentation for this server's major version.",
-    };
+    internal static string ContextMeaning(string? context) => DarlingPgIoReader.ContextMeaning(context);
 
     [McpServerTool(Name = "get_pg_io_stats"), Description("Gets PostgreSQL I/O attributed to WHO did it, to WHAT, and WHY - the (backend_type, object, context) breakdown from pg_stat_io, differenced across the requested window. Richer than SQL Server's file-level dm_io_virtual_file_stats: instead of 'this file is busy' you get 'autovacuum workers are reading relations in the vacuum context', which names the cause. The context dimension is the one with no SQL Server equivalent and the one that changes the remedy - it separates ordinary buffer-pool misses (where more shared_buffers or a better index helps) from sequential scans that deliberately bypass the pool via a ring buffer (where it will not help at all), from vacuum's ring buffer, from a standby applying WAL. Reports whether write counters are TRACKED at all, because on Amazon Aurora they are always null - backends there do not write data files, the storage layer does - and a zero would otherwise read as 'no writes happened'. Requires PostgreSQL 16 or later; valid on a standby.")]
     public static async Task<string> GetPgIoStats(

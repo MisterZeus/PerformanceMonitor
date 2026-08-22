@@ -10,9 +10,11 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -448,7 +450,7 @@ public sealed class ViewerPostgresTabsTests
         var aurora = PgDisplay.Io(new PerformanceMonitor.Darling.Storage.DarlingPgIoReader.PgIoRow(
             "client backend", "relation", "normal", Reads: 10, ReadTimeMs: 1.0, Hits: 5, Extends: 0,
             ExtendTimeMs: 0, Evictions: 0, Reuses: 0, Writes: 0, WriteTimeMs: 0, OpBytes: 8192,
-            WriteCountersTracked: false, StatsReset: null));
+            WriteCountersTracked: false, StatsReset: null), totalReadTimeMs: 1.0);
 
         Assert.Equal("not tracked", aurora.Writes);
         Assert.Equal("not tracked", aurora.WriteTimeMs);
@@ -456,10 +458,161 @@ public sealed class ViewerPostgresTabsTests
         var selfManaged = PgDisplay.Io(new PerformanceMonitor.Darling.Storage.DarlingPgIoReader.PgIoRow(
             "client backend", "relation", "normal", Reads: 10, ReadTimeMs: 1.0, Hits: 5, Extends: 0,
             ExtendTimeMs: 0, Evictions: 0, Reuses: 0, Writes: 0, WriteTimeMs: 0, OpBytes: 8192,
-            WriteCountersTracked: true, StatsReset: null));
+            WriteCountersTracked: true, StatsReset: null), totalReadTimeMs: 1.0);
 
         Assert.Equal("0", selfManaged.Writes);
     }
+
+    // ── Nothing the reader returns is dropped on the floor ───────────────────────────────────────
+
+    /// <summary>
+    /// Every field the shared PostgreSQL readers return reaches a viewer grid column, is FOLDED into one
+    /// with a stated reason, or the pin fails naming it.
+    ///
+    /// <para><b>Why this exists as a category rather than as two fixes.</b> Review found two instances of
+    /// the same defect in one PR — the replication grid silently dropped <c>Conflicting</c> (a broken
+    /// logical slot, invisible on the desktop while the web showed it) and the I/O grid dropped
+    /// <c>ExtendTimeMs</c> plus three derived columns. Two instances, one category: a stored field the
+    /// reader goes to the trouble of returning and no screen shows. Fixing the instances would have left
+    /// the third one to be found by someone else, so the invariant is asserted instead — a projection is
+    /// only allowed to omit a field by SAYING SO here, and the saying-so has to name a real field.</para>
+    ///
+    /// <para>Derived from the shipped record types by reflection, both directions: a field added to a
+    /// reader turns this red until a column or an exemption appears, and an exemption for a field that no
+    /// longer exists is deleted the moment the reader stops returning it.</para>
+    /// </summary>
+    [Fact]
+    public void EveryFieldTheSharedReadersReturn_ReachesAColumn_OrIsFoldedWithAReason()
+    {
+        var missing = new List<string>();
+
+        foreach (var (readerRow, displayRow) in ProjectionPairs())
+        {
+            var shown = displayRow
+                .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                .Select(p => p.Name)
+                .ToHashSet(StringComparer.Ordinal);
+
+            foreach (var field in readerRow.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+            {
+                var key = $"{readerRow.Name}.{field.Name}";
+                if (shown.Contains(field.Name) || FoldedFields.ContainsKey(key))
+                {
+                    continue;
+                }
+
+                missing.Add(key);
+            }
+        }
+
+        Assert.True(missing.Count == 0,
+            "Stored PostgreSQL field(s) the shared reader returns reach no viewer column and are not " +
+            "recorded as folded. Add a column, or add an entry to FoldedFields saying which column carries " +
+            "the fact and why that is the better shape:\n  " +
+            string.Join("\n  ", missing.OrderBy(m => m, StringComparer.Ordinal)));
+    }
+
+    /// <summary>The ratchet's other half: an exemption may only name a field that still exists, so a
+    /// renamed or removed reader field cannot leave a stale excuse behind that quietly covers its
+    /// replacement.</summary>
+    [Fact]
+    public void EveryFoldedField_StillExists_AndSaysWhy()
+    {
+        var real = ProjectionPairs()
+            .SelectMany(pair => pair.Reader
+                .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                .Select(p => $"{pair.Reader.Name}.{p.Name}"))
+            .ToHashSet(StringComparer.Ordinal);
+
+        var stale = FoldedFields.Keys.Where(k => !real.Contains(k)).OrderBy(k => k, StringComparer.Ordinal).ToList();
+        Assert.True(stale.Count == 0,
+            "FoldedFields names field(s) no shared reader returns any more — delete them: " +
+            string.Join(", ", stale));
+
+        var unexplained = FoldedFields
+            .Where(kv => string.IsNullOrWhiteSpace(kv.Value))
+            .Select(kv => kv.Key)
+            .ToList();
+        Assert.True(unexplained.Count == 0,
+            "FoldedFields entr(y/ies) with no reason: " + string.Join(", ", unexplained));
+    }
+
+    /// <summary>
+    /// Reader row type -> the display class that renders it. Named explicitly rather than matched by
+    /// convention, because a naming rule would silently pass a projection that was never wired up.
+    /// </summary>
+    private static IReadOnlyList<(Type Reader, Type Display)> ProjectionPairs() => new[]
+    {
+        (typeof(DarlingPgXminReader.PgXminRow), typeof(PgDisplay.XminRow)),
+        (typeof(DarlingPgAutovacuumReader.PgAutovacuumRow), typeof(PgDisplay.AutovacuumRow)),
+        (typeof(DarlingPgWraparoundReader.PgWraparoundRow), typeof(PgDisplay.WraparoundRow)),
+        (typeof(DarlingPgWaitReader.PgWaitRow), typeof(PgDisplay.WaitRow)),
+        (typeof(DarlingPgIoReader.PgIoRow), typeof(PgDisplay.IoRow)),
+        (typeof(DarlingPgSlotReader.PgSlotRow), typeof(PgDisplay.SlotRow)),
+        (typeof(DarlingPgBlockingReader.PgBlockingChainRow), typeof(PgDisplay.ChainRow)),
+        (typeof(DarlingPgBlockingReader.PgBlockingCycleRow), typeof(PgDisplay.CycleRow)),
+        (typeof(DarlingPgStatementReader.PgStatementRow), typeof(PgDisplay.StatementRow)),
+        (typeof(DarlingPgDatabaseReader.PgDatabaseRow), typeof(PgDisplay.DatabaseRow)),
+    };
+
+    /// <summary>
+    /// Fields a projection deliberately does not give a column of their own, and the column that carries
+    /// the fact instead. Every entry is a fold, never a drop: the fact still reaches the operator, in a
+    /// shape that reads better than the raw field would.
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, string> FoldedFields =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["PgXminRow.IsWinner"] = "IsWinnerText — rendered as a word rather than True/False",
+            ["PgXminRow.SamplesAsWinner"] = "WinnerShare — '58 of 60 samples' says more than either half alone",
+            ["PgXminRow.Samples"] = "WinnerShare — it is that fraction's denominator",
+
+            ["PgAutovacuumRow.FirstDeadTuples"] = "DeadTupleTrend — the window's start, as a signed delta",
+            ["PgAutovacuumRow.FirstSeenAt"] = "DeadTupleTrend — the delta's other end; the window is the toolbar's",
+            ["PgAutovacuumRow.TotalBytes"] = "TotalSize — the same number, formatted",
+
+            ["PgWraparoundRow.AllowsConnections"] = "ConnectionsAllowed — as words, because NOT ALLOWED is the finding",
+            ["PgWraparoundRow.AutovacuumFreezeMaxAge"] = "FreezeMaxAge — the same setting, without the column's prefix",
+            ["PgWraparoundRow.AutovacuumMultixactFreezeMaxAge"] = "MultixactFreezeMaxAge — same",
+
+            ["PgIoRow.WriteCountersTracked"] = "Writes / WriteTimeMs — they read 'not tracked' rather than 0",
+            ["PgIoRow.OpBytes"] = "OpSize — the same number, formatted",
+
+            ["PgSlotRow.FirstRetainedWalBytes"] = "RetainedWalTrend — the window's start, as a signed delta",
+            ["PgSlotRow.FirstSeenAt"] = "RetainedWalTrend — the delta's other end; the window is the toolbar's",
+            ["PgSlotRow.IsActive"] = "ActiveText, and the inactive row highlight",
+            ["PgSlotRow.RetainedWalBytes"] = "RetainedWal — the same number, formatted",
+            ["PgSlotRow.SafeWalSizeBytes"] = "SafeWalSize — the same number, formatted",
+
+            ["PgBlockingChainRow.MaxDepth"] = "Depth — carries the '(capped)' marker with the number",
+            ["PgBlockingChainRow.ChainMayBeTruncated"] = "Depth's '(capped)' marker, and Caveats",
+            ["PgBlockingChainRow.QueryTextMayBeTruncated"] = "Caveats — one column for every qualifier on the row",
+            ["PgBlockingChainRow.RootIsIdleInTransaction"] = "RootState — 'idle in transaction' replaces the raw state",
+            ["PgBlockingChainRow.WorstVictimWaitMs"] = "WorstVictimWait — the -1 sentinel must not render as a number",
+            ["PgBlockingChainRow.RootXactDurationMs"] = "RootXactDuration — same sentinel handling",
+            ["PgBlockingChainRow.RootQueryDurationMs"] =
+                "RootXactDuration — the TRANSACTION's age is what holds the lock; a root idle in transaction "
+                + "has no query duration at all, so showing both invites reading the wrong one",
+
+            ["PgStatementRow.SharedBlocksHit"] = "CacheHitPct — one ratio over both cache tiers and both miss sources",
+            ["PgStatementRow.OrcacheBlocksHit"] = "CacheHitPct — Aurora's Optimized Read cache, same ratio",
+            ["PgStatementRow.SharedBlocksRead"] = "CacheHitPct — the miss side of that ratio",
+            ["PgStatementRow.StorageBlocksRead"] = "CacheHitPct — Aurora's storage-layer miss, same ratio",
+            ["PgStatementRow.TempBlocksRead"] = "TempRead — labelled in blocks, not converted to bytes",
+            ["PgStatementRow.TempBlocksWritten"] = "TempWritten — labelled in blocks, not converted to bytes",
+            ["PgStatementRow.WalBytes"] = "WalWritten — the same number, formatted",
+            ["PgStatementRow.MaxPeakMemBytes"] = "PeakMemory — the same number, formatted",
+            ["PgStatementRow.TotalExecTimeMs"] = "TotalExecTimeMs is shown; AvgExecTimeMs derives from it and Calls",
+
+            ["PgDatabaseRow.BlksHit"] = "CacheHitPct — the hit side of that ratio",
+            ["PgDatabaseRow.BlksRead"] = "CacheHitPct — the miss side of that ratio",
+            ["PgDatabaseRow.StatsResetCount"] = "Caveats — 'counters reset Nx in window', which is what it qualifies",
+            ["PgDatabaseRow.CounterRewindCount"] = "Caveats — the implicit-reset half of the same qualifier",
+            ["PgDatabaseRow.FirstSampleAt"] =
+                "SampleCount — the window's bounds are the toolbar's own and are shown there, so repeating "
+                + "them per row would be the same two timestamps on every line",
+            ["PgDatabaseRow.LastSampleAt"] = "SampleCount — the other end of that same window",
+        };
 
     // ── Helpers ──────────────────────────────────────────────────────────────────────────────────
 

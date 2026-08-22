@@ -80,6 +80,13 @@ internal static class PgDisplay
         return delta == 0 ? "flat" : (delta > 0 ? "+" : "-") + Bytes(Math.Abs(delta));
     }
 
+    /// <summary>A block count, LABELLED as blocks. PostgreSQL's block size is a compile-time setting of
+    /// the server, so converting to bytes here would put a fabricated figure next to measured ones.</summary>
+    internal static string Blocks(long value) =>
+        value <= NotApplicable
+            ? NotApplicableText
+            : string.Create(CultureInfo.CurrentCulture, $"{value:N0} blocks");
+
     internal static string Count(long value) =>
         value <= NotApplicable ? NotApplicableText : value.ToString("N0", CultureInfo.CurrentCulture);
 
@@ -158,9 +165,17 @@ internal static class PgDisplay
         public string DeadTupleTrend { get; init; } = "";
         public string InsertsSinceVacuum { get; init; } = "";
         public string InsertVacuumThreshold { get; init; } = "";
+        public string LastVacuum { get; init; } = "";
         public string LastAutovacuum { get; init; } = "";
+        public string LastAnalyze { get; init; } = "";
         public string LastAutoanalyze { get; init; } = "";
+        public string AutovacuumCount { get; init; } = "";
+        public string LiveTuples { get; init; } = "";
+        public string DeadTuplePct { get; init; } = "";
+        public string ModsSinceAnalyze { get; init; } = "";
+        public string AnalyzeThreshold { get; init; } = "";
         public string TotalSize { get; init; } = "";
+        public string MeasuredAt { get; init; } = "";
     }
 
     internal static AutovacuumRow Autovacuum(DarlingPgAutovacuumReader.PgAutovacuumRow row) => new()
@@ -187,9 +202,26 @@ internal static class PgDisplay
         InsertVacuumThreshold = row.InsertVacuumThreshold <= NotApplicable
             ? "n/a on this version"
             : Count(row.InsertVacuumThreshold),
+        /* Manual and automatic runs are separate columns because they answer different questions: a table
+           whose only vacuums are manual is one somebody is nursing, and that is a finding about the
+           configuration rather than about the workload. */
+        LastVacuum = Timestamp(row.LastVacuum),
         LastAutovacuum = Timestamp(row.LastAutovacuum),
+        LastAnalyze = Timestamp(row.LastAnalyze),
         LastAutoanalyze = Timestamp(row.LastAutoanalyze),
+        /* Zero is the finding, not a missing value: a table autovacuum has NEVER processed is the classic
+           wraparound route, because relfrozenxid never advances. */
+        AutovacuumCount = Count(row.AutovacuumCount),
+        LiveTuples = Count(row.LiveTuples),
+        /* The dead-tuple SHARE, which is what bloat actually is. The raw count beside a threshold says
+           whether vacuum is due; the share says how much of the table is already waste. */
+        DeadTuplePct = Percent(row.DeadTuples, row.LiveTuples + row.DeadTuples),
+        /* The ANALYZE half of the same story, and it is genuinely separate: a table can be vacuumed on
+           schedule and still have statistics old enough to give the planner the wrong row counts. */
+        ModsSinceAnalyze = Count(row.ModsSinceAnalyze),
+        AnalyzeThreshold = Count(row.AnalyzeThreshold),
         TotalSize = Bytes(row.TotalBytes),
+        MeasuredAt = Timestamp(row.MeasuredAt),
     };
 
     internal sealed class WraparoundRow
@@ -201,8 +233,12 @@ internal static class PgDisplay
         public string XidsRemaining { get; init; } = "";
         public string MinMultiXidAge { get; init; } = "";
         public double PctTowardMultixactEmergency { get; init; }
+        public double PctTowardMultixactWraparound { get; init; }
         public string MultiXidsRemaining { get; init; } = "";
+        public string FreezeMaxAge { get; init; } = "";
+        public string MultixactFreezeMaxAge { get; init; } = "";
         public string WindowPeakFrozenXidAge { get; init; } = "";
+        public string WindowPeakMinMultiXidAge { get; init; } = "";
         public string ConnectionsAllowed { get; init; } = "";
         public string MeasuredAt { get; init; } = "";
     }
@@ -216,8 +252,18 @@ internal static class PgDisplay
         XidsRemaining = Count(row.XidsRemaining),
         MinMultiXidAge = Count(row.MinMultiXidAge),
         PctTowardMultixactEmergency = Math.Round(row.PctTowardMultixactEmergency, 1),
+        /* The multixact side has its OWN shutdown ceiling, reached independently of the XID one - a
+           workload heavy on row-level share locks or subtransactions gets there first, and nothing on the
+           XID columns would say so. */
+        PctTowardMultixactWraparound = Math.Round(row.PctTowardMultixactWraparound, 1),
         MultiXidsRemaining = Count(row.MultiXidsRemaining),
+        /* The percentages beside these are graded against THIS cluster's settings, not a constant, so the
+           settings themselves are a column: two databases at "80% to emergency" are different distances from
+           trouble when their freeze_max_age differs, and nothing else on the row would say so. */
+        FreezeMaxAge = Count(row.AutovacuumFreezeMaxAge),
+        MultixactFreezeMaxAge = Count(row.AutovacuumMultixactFreezeMaxAge),
         WindowPeakFrozenXidAge = Count(row.WindowPeakFrozenXidAge),
+        WindowPeakMinMultiXidAge = Count(row.WindowPeakMinMultiXidAge),
         /* datallowconn=false is why a database can sit at 99% of wraparound and never be vacuumed by
            anything that connects to it. It is the finding, not a footnote. */
         ConnectionsAllowed = row.AllowsConnections ? "allowed" : "NOT ALLOWED",
@@ -249,10 +295,33 @@ internal static class PgDisplay
         public string BackendType { get; init; } = "";
         public string ObjectType { get; init; } = "";
         public string Context { get; init; } = "";
+
+        /// <summary>What this context MEANS, from the shared reader — the one copy the MCP surface also
+        /// prints. Shown as the Context cell's tooltip rather than a column: it is a paragraph, and it is
+        /// the dimension with no SQL Server counterpart, so an operator meeting `bulkread` for the first
+        /// time needs it and one who knows it does not want it eating the grid.</summary>
+        public string ContextMeaning { get; init; } = "";
+
         public string Reads { get; init; } = "";
         public double ReadTimeMs { get; init; }
+
+        /// <summary>Per-read latency — the figure that separates "a lot of I/O" from "slow I/O", which have
+        /// completely different remedies.</summary>
+        public string AvgReadMs { get; init; } = "";
+
         public string Hits { get; init; } = "";
+
+        /// <summary>A hit ratio scoped to THIS combination, the only scope where it means anything: a
+        /// server-wide ratio averages bulkread's deliberate misses together with normal-context ones and
+        /// understates both.</summary>
+        public string HitPct { get; init; } = "";
+
+        /// <summary>This combination's share of the window's total read TIME — how the grid's order was
+        /// decided, made legible. A row at 4% of the reads and 60% of the read time is the finding.</summary>
+        public string PctOfTotalReadTime { get; init; } = "";
+
         public string Extends { get; init; } = "";
+        public string ExtendTimeMs { get; init; } = "";
         public string Evictions { get; init; } = "";
         public string Reuses { get; init; } = "";
         public string Writes { get; init; } = "";
@@ -261,15 +330,37 @@ internal static class PgDisplay
         public string StatsReset { get; init; } = "";
     }
 
-    internal static IoRow Io(DarlingPgIoReader.PgIoRow row) => new()
+    /// <summary>
+    /// Projects the whole I/O result at once, because two of its columns are SHARES of the window and a
+    /// per-row projection cannot compute a denominator it never sees. Ordering the grid by read time and
+    /// then not saying what share that is leaves the reader to divide by hand.
+    /// </summary>
+    internal static List<IoRow> IoRows(IReadOnlyList<DarlingPgIoReader.PgIoRow> rows)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+
+        var totalReadTime = rows.Sum(r => r.ReadTimeMs);
+        return rows.Select(r => Io(r, totalReadTime)).ToList();
+    }
+
+    internal static IoRow Io(DarlingPgIoReader.PgIoRow row, double totalReadTimeMs = 0) => new()
     {
         BackendType = row.BackendType ?? "",
         ObjectType = row.ObjectType ?? "",
         Context = row.Context ?? "",
+        ContextMeaning = DarlingPgIoReader.ContextMeaning(row.Context),
         Reads = Count(row.Reads),
         ReadTimeMs = Math.Round(row.ReadTimeMs, 1),
+        AvgReadMs = row.Reads > 0
+            ? string.Create(CultureInfo.CurrentCulture, $"{row.ReadTimeMs / row.Reads:N3}")
+            : NotApplicableText,
         Hits = Count(row.Hits),
+        HitPct = Percent(row.Hits, row.Hits + row.Reads),
+        PctOfTotalReadTime = totalReadTimeMs > 0
+            ? string.Create(CultureInfo.CurrentCulture, $"{row.ReadTimeMs / totalReadTimeMs * 100:N1}%")
+            : NotApplicableText,
         Extends = Count(row.Extends),
+        ExtendTimeMs = string.Create(CultureInfo.CurrentCulture, $"{Math.Round(row.ExtendTimeMs, 1):N1}"),
         Evictions = Count(row.Evictions),
         Reuses = Count(row.Reuses),
         /* "not tracked", not 0. On Aurora the whole pg_stat_io write side is NULL because backends there
@@ -298,6 +389,15 @@ internal static class PgDisplay
         public string DatabaseName { get; init; } = "";
         public string Plugin { get; init; } = "";
         public string InvalidationReason { get; init; } = "";
+
+        /// <summary>The stored <c>conflicting</c> flag: a logical slot whose needed rows were vacuumed away
+        /// by a recovery conflict. It is a DIFFERENT failure from invalidation-by-WAL-size and needs a
+        /// different response (the subscriber must be re-created either way, but the cause is
+        /// <c>hot_standby_feedback</c> rather than <c>max_slot_wal_keep_size</c>), so it is its own column
+        /// rather than folded into the invalidation reason.</summary>
+        public string Conflicting { get; init; } = "";
+
+        public string MeasuredAt { get; init; } = "";
         public bool IsInvalidated { get; init; }
         public bool IsInactive { get; init; }
     }
@@ -317,9 +417,14 @@ internal static class PgDisplay
         DatabaseName = row.DatabaseName ?? "",
         Plugin = row.Plugin ?? "",
         InvalidationReason = row.InvalidationReason ?? "",
+        Conflicting = row.Conflicting ? "CONFLICTING" : "",
+        MeasuredAt = Timestamp(row.MeasuredAt),
         /* An invalidated slot has already lost its WAL: the replica behind it needs rebuilding, and that
-           is a different day from an inactive slot that is merely accumulating. */
+           is a different day from an inactive slot that is merely accumulating. A CONFLICTING slot is in
+           the same category — its subscriber cannot continue — so it shares the highlight even though the
+           cause and the fix are different. */
         IsInvalidated = !string.IsNullOrEmpty(row.InvalidationReason)
+                        || row.Conflicting
                         || string.Equals(row.WalStatus, "lost", StringComparison.OrdinalIgnoreCase),
         IsInactive = !row.IsActive,
     };
@@ -330,6 +435,12 @@ internal static class PgDisplay
     {
         public string CapturedAt { get; init; } = "";
         public int RootPid { get; init; }
+
+        /// <summary>The collector's synthetic backend id, which is what "seen as root" is counted on — pids
+        /// are reused, so two captures agreeing on a pid are not necessarily the same backend. <c>0</c> is
+        /// the vanished-blocker sentinel and shows as unknown rather than as an id.</summary>
+        public string RootBackendId { get; init; } = "";
+
         public string Databases { get; init; } = "";
         public int TotalVictims { get; init; }
         public int DirectVictims { get; init; }
@@ -361,6 +472,9 @@ internal static class PgDisplay
         {
             CapturedAt = Timestamp(row.CapturedAt),
             RootPid = row.RootPid,
+            RootBackendId = row.RootBackendId == 0
+                ? "unknown"
+                : row.RootBackendId.ToString("N0", CultureInfo.CurrentCulture),
             Databases = string.Join(", ", row.Databases.Where(d => !string.IsNullOrEmpty(d))),
             TotalVictims = row.TotalVictims,
             DirectVictims = row.DirectVictims,
@@ -411,11 +525,23 @@ internal static class PgDisplay
         /// exceeds 2^53, and rendering it through anything that rounds is the one field whose entire
         /// purpose is joining back to <c>pg_stat_statements</c> (#2548).</summary>
         public string QueryId { get; init; } = "";
+
+        /// <summary>The database OID, which is half the grain of this read — one queryid appears once per
+        /// database it ran in, and two rows with the same statement text are not a duplicate.</summary>
+        public string DatabaseId { get; init; } = "";
+
         public string Calls { get; init; } = "";
         public string TotalExecTimeMs { get; init; } = "";
         public string AvgExecTimeMs { get; init; } = "";
         public double MaxExecTimeMs { get; init; }
         public string RowsReturned { get; init; } = "";
+
+        /// <summary>Buffer-cache hit share for this statement, over BOTH cache tiers Aurora reports — the
+        /// shared buffers and the Optimized Read cache — against both miss sources. Reported as one ratio
+        /// rather than four block counters, which are the same fact in a form nobody reads correctly.</summary>
+        public string CacheHitPct { get; init; } = "";
+
+        public string TempRead { get; init; } = "";
         public string TempWritten { get; init; } = "";
         public string PeakMemory { get; init; } = "";
         public string WalWritten { get; init; } = "";
@@ -425,6 +551,7 @@ internal static class PgDisplay
     internal static StatementRow Statement(DarlingPgStatementReader.PgStatementRow row) => new()
     {
         QueryId = row.QueryId.ToString(CultureInfo.InvariantCulture),
+        DatabaseId = row.DatabaseId.ToString("N0", CultureInfo.CurrentCulture),
         Calls = Count(row.Calls),
         TotalExecTimeMs = Count(row.TotalExecTimeMs),
         AvgExecTimeMs = row.Calls <= 0
@@ -432,11 +559,15 @@ internal static class PgDisplay
             : string.Create(CultureInfo.CurrentCulture, $"{row.TotalExecTimeMs / (double)row.Calls:N1}"),
         MaxExecTimeMs = Math.Round(row.MaxExecTimeMs, 1),
         RowsReturned = Count(row.RowsReturned),
-        /* BLOCKS, and labelled as such. The block size is a compile-time setting of the server, so
-           multiplying by an assumed 8kB would put a fabricated byte count next to real ones. */
-        TempWritten = row.TempBlocksWritten <= 0
-            ? "0 blocks"
-            : string.Create(CultureInfo.CurrentCulture, $"{row.TempBlocksWritten:N0} blocks"),
+        CacheHitPct = Percent(
+            row.SharedBlocksHit + row.OrcacheBlocksHit,
+            row.SharedBlocksHit + row.OrcacheBlocksHit + row.SharedBlocksRead + row.StorageBlocksRead),
+        /* BLOCKS, and labelled as such — both of them. The block size is a compile-time setting of the
+           server, so multiplying by an assumed 8kB would put a fabricated byte count next to real ones.
+           Temp READ sits beside temp written because a spill that is written and never read back is a
+           different (and cheaper) event than one the query then re-reads. */
+        TempRead = Blocks(row.TempBlocksRead),
+        TempWritten = Blocks(row.TempBlocksWritten),
         PeakMemory = Bytes(row.MaxPeakMemBytes),
         WalWritten = Bytes(row.WalBytes),
         /* Null is "no text captured for this queryid yet" — text refreshes hourly, and a major-version
@@ -455,6 +586,11 @@ internal static class PgDisplay
         public string XactRollback { get; init; } = "";
         public string RollbackPct { get; init; } = "";
         public int SampleCount { get; init; }
+
+        /// <summary>The stored <c>stats_reset</c> timestamp. Shown beside the caveat that counts resets in
+        /// the window, because "reset once" and "reset at 14:02" send you to different places.</summary>
+        public string StatsReset { get; init; } = "";
+
         public string Caveats { get; init; } = "";
     }
 
@@ -483,6 +619,7 @@ internal static class PgDisplay
             XactRollback = Count(row.XactRollback),
             RollbackPct = Percent(row.XactRollback, row.XactCommit + row.XactRollback),
             SampleCount = row.SampleCount,
+            StatsReset = Timestamp(row.StatsReset),
             Caveats = string.Join("; ", caveats),
         };
     }

@@ -3686,6 +3686,7 @@
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="Captured" Binding="{Binding CapturedAt}" Width="140"/>
                                     <DataGridTextColumn Header="Root PID" Binding="{Binding RootPid}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                                    <DataGridTextColumn Header="Backend ID" Binding="{Binding RootBackendId}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                                     <DataGridTextColumn Header="Databases" Binding="{Binding Databases}" Width="150"/>
                                     <DataGridTextColumn Header="Victims" Binding="{Binding TotalVictims}" ElementStyle="{StaticResource NumericCell}" Width="80"/>
                                     <DataGridTextColumn Header="Direct" Binding="{Binding DirectVictims}" ElementStyle="{StaticResource NumericCell}" Width="70"/>
@@ -3745,11 +3746,14 @@
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" Width="170"/>
+                                    <DataGridTextColumn Header="DB OID" Binding="{Binding DatabaseId}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
                                     <DataGridTextColumn Header="Calls" Binding="{Binding Calls}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
                                     <DataGridTextColumn Header="Total (ms)" Binding="{Binding TotalExecTimeMs}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                                     <DataGridTextColumn Header="Avg (ms)" Binding="{Binding AvgExecTimeMs}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                                     <DataGridTextColumn Header="Max (ms)" Binding="{Binding MaxExecTimeMs}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                                     <DataGridTextColumn Header="Rows" Binding="{Binding RowsReturned}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                                    <DataGridTextColumn Header="Cache Hit %" Binding="{Binding CacheHitPct}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                                    <DataGridTextColumn Header="Temp Read" Binding="{Binding TempRead}" Width="120"/>
                                     <DataGridTextColumn Header="Temp Written" Binding="{Binding TempWritten}" Width="120"/>
                                     <DataGridTextColumn Header="Peak Memory" Binding="{Binding PeakMemory}" Width="120"/>
                                     <DataGridTextColumn Header="WAL" Binding="{Binding WalWritten}" Width="110"/>
@@ -3777,6 +3781,7 @@
                                     <DataGridTextColumn Header="Rollbacks" Binding="{Binding XactRollback}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                                     <DataGridTextColumn Header="Rollback %" Binding="{Binding RollbackPct}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                                     <DataGridTextColumn Header="Samples" Binding="{Binding SampleCount}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                                    <DataGridTextColumn Header="Stats Reset" Binding="{Binding StatsReset}" Width="140"/>
                                     <DataGridTextColumn Header="Caveats" Binding="{Binding Caveats}" Width="*"/>
                                 </DataGrid.Columns>
                             </DataGrid>
@@ -3846,14 +3851,22 @@
                         <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="200"/>
                         <DataGridTextColumn Header="Autovacuum" Binding="{Binding AutovacuumState}" Width="110"/>
                         <DataGridTextColumn Header="Dead Tuples" Binding="{Binding DeadTuples}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <DataGridTextColumn Header="Live Tuples" Binding="{Binding LiveTuples}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <DataGridTextColumn Header="Dead %" Binding="{Binding DeadTuplePct}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
                         <DataGridTextColumn Header="Vacuum Threshold" Binding="{Binding VacuumThreshold}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
                         <DataGridTextColumn Header="Past Threshold" Binding="{Binding ThresholdRatio}" Width="120"/>
                         <DataGridTextColumn Header="Dead Trend" Binding="{Binding DeadTupleTrend}" Width="130"/>
                         <DataGridTextColumn Header="Inserts Since Vacuum" Binding="{Binding InsertsSinceVacuum}" ElementStyle="{StaticResource NumericCell}" Width="150"/>
                         <DataGridTextColumn Header="Insert Threshold" Binding="{Binding InsertVacuumThreshold}" Width="130"/>
+                        <DataGridTextColumn Header="Mods Since Analyze" Binding="{Binding ModsSinceAnalyze}" ElementStyle="{StaticResource NumericCell}" Width="150"/>
+                        <DataGridTextColumn Header="Analyze Threshold" Binding="{Binding AnalyzeThreshold}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
+                        <DataGridTextColumn Header="Autovacuum Runs" Binding="{Binding AutovacuumCount}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
                         <DataGridTextColumn Header="Last Autovacuum" Binding="{Binding LastAutovacuum}" Width="140"/>
+                        <DataGridTextColumn Header="Last Vacuum" Binding="{Binding LastVacuum}" Width="140"/>
                         <DataGridTextColumn Header="Last Autoanalyze" Binding="{Binding LastAutoanalyze}" Width="140"/>
-                        <DataGridTextColumn Header="Size" Binding="{Binding TotalSize}" Width="*"/>
+                        <DataGridTextColumn Header="Last Analyze" Binding="{Binding LastAnalyze}" Width="140"/>
+                        <DataGridTextColumn Header="Size" Binding="{Binding TotalSize}" Width="110"/>
+                        <DataGridTextColumn Header="Measured" Binding="{Binding MeasuredAt}" Width="*"/>
                     </DataGrid.Columns>
                 </DataGrid>
 
@@ -3868,10 +3881,14 @@
                         <DataGridTextColumn Header="% To Emergency" Binding="{Binding PctTowardEmergencyVacuum}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
                         <DataGridTextColumn Header="% To Wraparound" Binding="{Binding PctTowardWraparound}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
                         <DataGridTextColumn Header="XIDs Left" Binding="{Binding XidsRemaining}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Freeze Max Age" Binding="{Binding FreezeMaxAge}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
                         <DataGridTextColumn Header="MultiXID Age" Binding="{Binding MinMultiXidAge}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
                         <DataGridTextColumn Header="% To MultiXID Emergency" Binding="{Binding PctTowardMultixactEmergency}" ElementStyle="{StaticResource NumericCell}" Width="170"/>
+                        <DataGridTextColumn Header="% To MultiXID Wraparound" Binding="{Binding PctTowardMultixactWraparound}" ElementStyle="{StaticResource NumericCell}" Width="180"/>
                         <DataGridTextColumn Header="MultiXIDs Left" Binding="{Binding MultiXidsRemaining}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
-                        <DataGridTextColumn Header="Peak In Window" Binding="{Binding WindowPeakFrozenXidAge}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="MultiXID Freeze Max Age" Binding="{Binding MultixactFreezeMaxAge}" ElementStyle="{StaticResource NumericCell}" Width="170"/>
+                        <DataGridTextColumn Header="Peak XID Age" Binding="{Binding WindowPeakFrozenXidAge}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Peak MultiXID Age" Binding="{Binding WindowPeakMinMultiXidAge}" ElementStyle="{StaticResource NumericCell}" Width="150"/>
                         <DataGridTextColumn Header="Connections" Binding="{Binding ConnectionsAllowed}" Width="120"/>
                         <DataGridTextColumn Header="Measured" Binding="{Binding MeasuredAt}" Width="*"/>
                     </DataGrid.Columns>
@@ -3913,11 +3930,24 @@
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Backend" Binding="{Binding BackendType}" Width="160"/>
                         <DataGridTextColumn Header="Object" Binding="{Binding ObjectType}" Width="140"/>
-                        <DataGridTextColumn Header="Context" Binding="{Binding Context}" Width="140"/>
+                        <!-- The context's MEANING rides as the cell tooltip. It is the dimension with no SQL
+                             Server counterpart and the one that changes the remedy, but it is a paragraph;
+                             one copy, from the shared reader that produces the value. -->
+                        <DataGridTemplateColumn Header="Context" Width="140">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding Context}" TextTrimming="CharacterEllipsis" ToolTip="{Binding ContextMeaning}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
                         <DataGridTextColumn Header="Reads" Binding="{Binding Reads}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                         <DataGridTextColumn Header="Read Time (ms)" Binding="{Binding ReadTimeMs}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Avg Read (ms)" Binding="{Binding AvgReadMs}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                        <DataGridTextColumn Header="% Read Time" Binding="{Binding PctOfTotalReadTime}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                         <DataGridTextColumn Header="Hits" Binding="{Binding Hits}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <DataGridTextColumn Header="Hit %" Binding="{Binding HitPct}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
                         <DataGridTextColumn Header="Extends" Binding="{Binding Extends}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                        <DataGridTextColumn Header="Extend Time (ms)" Binding="{Binding ExtendTimeMs}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
                         <DataGridTextColumn Header="Evictions" Binding="{Binding Evictions}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                         <DataGridTextColumn Header="Reuses" Binding="{Binding Reuses}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                         <DataGridTextColumn Header="Writes" Binding="{Binding Writes}" Width="120"/>
@@ -3956,6 +3986,7 @@
                         <DataGridTextColumn Header="Type" Binding="{Binding SlotType}" Width="110"/>
                         <DataGridTextColumn Header="Active" Binding="{Binding ActiveText}" Width="90"/>
                         <DataGridTextColumn Header="WAL Status" Binding="{Binding WalStatus}" Width="120"/>
+                        <DataGridTextColumn Header="Conflicting" Binding="{Binding Conflicting}" Width="110"/>
                         <DataGridTextColumn Header="Retained WAL" Binding="{Binding RetainedWal}" Width="130"/>
                         <DataGridTextColumn Header="Retained Trend" Binding="{Binding RetainedWalTrend}" Width="140"/>
                         <DataGridTextColumn Header="Safe WAL Left" Binding="{Binding SafeWalSize}" Width="130"/>
@@ -3964,7 +3995,8 @@
                         <DataGridTextColumn Header="Inactive Since" Binding="{Binding InactiveSince}" Width="140"/>
                         <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="140"/>
                         <DataGridTextColumn Header="Plugin" Binding="{Binding Plugin}" Width="140"/>
-                        <DataGridTextColumn Header="Invalidation" Binding="{Binding InvalidationReason}" Width="*"/>
+                        <DataGridTextColumn Header="Invalidation" Binding="{Binding InvalidationReason}" Width="220"/>
+                        <DataGridTextColumn Header="Measured" Binding="{Binding MeasuredAt}" Width="*"/>
                     </DataGrid.Columns>
                 </DataGrid>
             </Grid>
