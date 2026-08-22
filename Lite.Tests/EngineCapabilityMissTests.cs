@@ -100,7 +100,13 @@ public sealed class EngineCapabilityMissTests : IClassFixture<SharedDuckDbFixtur
         Assert.Equal("not_collected", StatusOf(azureFlags));
         Assert.Contains("trace_flags", azureFlags, StringComparison.Ordinal);
 
-        Assert.Equal("not_collected", StatusOf(await McpTempDbTools.GetTempDbTrend(service, _serverManager, AzureServerName)));
+        /* A third family, and deliberately NOT get_tempdb_trend: #2512 measured the tempdb DMVs returning
+           real data on Azure SQL Database, so #2516 opens that gate and tempdb_stats stops being a permanent
+           gap. Picking it as the example here would tie this test to a gate that is moving; the default
+           trace is absent from the engine itself, so its gate is a durable one to demonstrate with. */
+        var azureTrace = await McpDefaultTraceTools.GetDefaultTraceEvents(service, _serverManager, AzureServerName);
+        Assert.Equal("not_collected", StatusOf(azureTrace));
+        Assert.Contains("default_trace_events", azureTrace, StringComparison.Ordinal);
 
         /* ── The box, same empty store: every one of them keeps the answer it gave before. ── */
         Assert.Equal("empty", StatusOf(await McpHealthParserTools.GetSystemHealth(service, _serverManager, BoxServerName)));
@@ -110,7 +116,7 @@ public sealed class EngineCapabilityMissTests : IClassFixture<SharedDuckDbFixtur
         Assert.Contains("system_health session is started", boxWaits, StringComparison.Ordinal);
 
         Assert.Equal("empty", StatusOf(await McpConfigTools.GetTraceFlags(service, _serverManager, BoxServerName)));
-        Assert.Equal("unavailable", StatusOf(await McpTempDbTools.GetTempDbTrend(service, _serverManager, BoxServerName)));
+        Assert.Equal("empty", StatusOf(await McpDefaultTraceTools.GetDefaultTraceEvents(service, _serverManager, BoxServerName)));
 
         /* A read whose collector runs on every engine is untouched on BOTH servers — the helper must not
            have become a blanket "Azure gets not_collected" rule. */
@@ -131,7 +137,7 @@ public sealed class EngineCapabilityMissTests : IClassFixture<SharedDuckDbFixtur
         var service = new LocalDataService(_duckDb);
 
         Assert.Equal("empty", StatusOf(await McpHealthParserTools.GetSystemHealth(service, _serverManager, BoxServerName)));
-        Assert.Equal("unavailable", StatusOf(await McpTempDbTools.GetTempDbTrend(service, _serverManager, BoxServerName)));
+        Assert.Equal("empty", StatusOf(await McpDefaultTraceTools.GetDefaultTraceEvents(service, _serverManager, BoxServerName)));
         Assert.Equal("empty", StatusOf(await McpConfigTools.GetTraceFlags(service, _serverManager, BoxServerName)));
     }
 
