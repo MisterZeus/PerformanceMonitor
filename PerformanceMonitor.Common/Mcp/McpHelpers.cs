@@ -115,6 +115,28 @@ internal static class McpHelpers
     public static readonly TimeSpan AsOfFutureTolerance = TimeSpan.FromMinutes(5);
 
     /// <summary>
+    /// The ONLY spellings <c>as_of</c> accepts — an explicit allowlist rather than a general date parse.
+    ///
+    /// <para><see cref="DateTime.TryParse(string, IFormatProvider, DateTimeStyles, out DateTime)"/> would be
+    /// the obvious choice and is the wrong one: under the invariant culture it also accepts <c>08/18/2026</c>
+    /// as <c>M/d/yyyy</c>, so <c>01/02/2026</c> silently resolves to 2 January for a caller who meant 1
+    /// February. That is the failure this parameter exists to remove — an answer to a subtly different
+    /// question, with nothing to say so — one step removed from the silent fall back to "now" that IS refused.
+    /// An allowlist makes the parser agree with the documented contract instead of exceeding it.</para>
+    ///
+    /// <para><c>K</c> matches an empty offset, a <c>Z</c>, and a <c>±HH:mm</c>, which is what lets one format
+    /// cover all three documented shapes. A space in place of the <c>T</c> is deliberately NOT accepted: the
+    /// refusal names the forms that work, which is more useful than guessing at a fifth one.</para>
+    /// </summary>
+    private static readonly string[] AsOfFormats =
+    {
+        "yyyy-MM-dd",
+        "yyyy-MM-ddTHH:mmK",
+        "yyyy-MM-ddTHH:mm:ssK",
+        "yyyy-MM-ddTHH:mm:ss.FFFFFFFK",
+    };
+
+    /// <summary>
     /// Resolves the END of a windowed read from the optional <c>as_of</c> anchor: <paramref name="endUtc"/>
     /// receives <see cref="DateTime.UtcNow"/> when the caller sent nothing (the pre-#2495 behaviour, exactly),
     /// or the parsed instant when they did. Returns null when the anchor is usable, an error message when it
@@ -147,13 +169,15 @@ internal static class McpHelpers
            local time — the store is UTC throughout, the caller is an agent on some other machine, and a
            silent local-time reading would shift the window by the host's offset with nothing to show for it.
            AdjustToUniversal then normalises an explicit offset ("...+02:00") into the same UTC instant. */
-        if (!DateTime.TryParse(
-                asOf,
+        if (!DateTime.TryParseExact(
+                asOf.Trim(),
+                AsOfFormats,
                 CultureInfo.InvariantCulture,
                 DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
                 out var parsed))
         {
-            return $"Invalid as_of value '{asOf}'. Expected an ISO-8601 UTC instant, e.g. '2026-08-18T14:30:00Z' or '2026-08-18'.";
+            return $"Invalid as_of value '{asOf}'. Expected an ISO-8601 UTC instant: '2026-08-18T14:30:00Z', " +
+                   "'2026-08-18T14:30:00' (read as UTC), '2026-08-18T16:30:00+02:00', or '2026-08-18' for midnight UTC.";
         }
 
         if (parsed > now + AsOfFutureTolerance)

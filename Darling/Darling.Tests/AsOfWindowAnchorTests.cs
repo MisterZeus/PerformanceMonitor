@@ -65,6 +65,9 @@ public sealed class AsOfWindowAnchorTests
     [InlineData("2026-08-18T14:30:00")]
     [InlineData("2026-08-18T16:30:00+02:00")]
     [InlineData("2026-08-18T09:30:00-05:00")]
+    [InlineData("2026-08-18T14:30Z")]
+    [InlineData("2026-08-18T14:30:00.000Z")]
+    [InlineData("  2026-08-18T14:30:00Z  ")]
     public void EveryAcceptedSpelling_ResolvesToTheSameUtcInstant(string asOf)
     {
         Assert.Null(McpHelpers.ResolveAsOf(asOf, out var end));
@@ -83,11 +86,22 @@ public sealed class AsOfWindowAnchorTests
     /// An anchor we cannot use is REFUSED, following <see cref="McpHelpers.ValidateTop"/>. Silently falling
     /// back to now is the one outcome this parameter exists to prevent: a read answering "the last 4 hours"
     /// when it was asked for "the 4 hours ending Tuesday 03:00" is indistinguishable from a correct answer.
+    ///
+    /// <para>The slash forms are the interesting half, and the reason the parser is an ISO-8601 ALLOWLIST
+    /// rather than a general date parse (review catch): a plain <c>DateTime.TryParse</c> under the invariant
+    /// culture accepts <c>01/02/2026</c> as <c>M/d/yyyy</c>, so a caller who meant 1 February gets a window
+    /// around 2 January and nothing anywhere says so. That is the same defect one step removed — an answer to
+    /// a question nobody asked — so it is refused rather than guessed at.</para>
     /// </summary>
     [Theory]
     [InlineData("last tuesday")]
     [InlineData("2026-13-45")]
     [InlineData("4 hours ago")]
+    [InlineData("08/18/2026")]
+    [InlineData("01/02/2026")]
+    [InlineData("2026/08/18")]
+    [InlineData("18 Aug 2026")]
+    [InlineData("2026-08-18 14:30:00")]
     public void AnUnusableAnchor_IsRefused_NotSilentlyTreatedAsNow(string asOf)
     {
         var error = McpHelpers.ResolveAsOf(asOf, out _);

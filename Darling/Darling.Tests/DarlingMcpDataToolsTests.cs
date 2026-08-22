@@ -103,14 +103,21 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     }
 
     /// <summary>
-    /// Lite's parameter contract, pinned as a PREFIX rather than as the whole list (#2235).
+    /// Lite's parameter contract, pinned as an ORDERED SUBSEQUENCE of Darling's (#2235, widened by #2495).
     ///
     /// <para>This asserted the full list, which was the same thing until <c>get_top_queries_by_cpu</c> gained a
-    /// trailing optional <c>group_by</c> that Lite does not have. The guarantee that matters was never "the
-    /// lists are identical" — it is that a client written against LITE's contract still calls Darling
-    /// correctly, which a trailing optional parameter preserves both positionally and by name. Anything
-    /// appended must therefore stay optional AND stay last; a REORDERING that keeps the same names still
-    /// fails, because the prefix is compared element-wise rather than as a joined substring.</para>
+    /// trailing optional <c>group_by</c> that Lite does not have; it then asserted a PREFIX, which held only
+    /// while every parameter Lite gained after that landed before <c>group_by</c>. #2495 appended <c>as_of</c>
+    /// to BOTH SKUs — last on each, which is the convention <c>group_by</c> itself established — so Lite's
+    /// list is no longer a prefix of Darling's: Darling reads <c>…, min_dop, group_by, as_of</c> while Lite
+    /// reads <c>…, min_dop, as_of</c>.</para>
+    ///
+    /// <para>The guarantee that matters was never "the lists are identical", and it is not positional either:
+    /// MCP invokes by NAME, and the only C# call sites (the <c>/api/read</c> dispatch) do not pass Darling's
+    /// extra optionals at all. It is that <b>a client written against Lite's contract still calls Darling
+    /// correctly</b>, which needs exactly two things — every Lite name present in Lite's relative order, and
+    /// every Darling-only extra OPTIONAL so the client never has to supply one. Both are asserted here, so a
+    /// dropped parameter, a REORDERING, or a required Darling-only addition all still fail.</para>
     /// </summary>
     [Theory]
     [InlineData("get_cpu_utilization", "server_name,hours_back,as_of")]
@@ -130,29 +137,45 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     public void ParamContract_MatchesLite(string toolName, string expectedCsv)
     {
         var expected = expectedCsv.Split(',');
-        var actual = McpParams(toolName).Select(p => p.Name).ToArray();
+        var actual = McpParams(toolName);
+        var actualNames = actual.Select(p => p.Name).ToArray();
 
         Assert.True(actual.Length >= expected.Length,
-            $"{toolName} dropped a parameter Lite has: [{string.Join(",", actual)}]");
-        Assert.Equal(expected, actual.Take(expected.Length).ToArray());
+            $"{toolName} dropped a parameter Lite has: [{string.Join(",", actualNames)}]");
+
+        /* Every Lite name, in Lite's order, with Darling's own additions filtered out. */
+        Assert.Equal(expected, actualNames.Where(n => expected.Contains(n, StringComparer.Ordinal)).ToArray());
+
+        /* And nothing Darling adds on top may be required, or a Lite-shaped call could not be made at all. */
+        foreach (var extra in actual.Where(p => !expected.Contains(p.Name, StringComparer.Ordinal)))
+            Assert.True(extra.Optional, $"{toolName}.{extra.Name} is Darling-only and must be optional");
     }
 
     /// <summary>
-    /// #2235's <c>group_by</c>, pinned as a TRAILING OPTIONAL on <c>get_top_queries_by_cpu</c> and absent from
+    /// #2235's <c>group_by</c>, pinned as an APPENDED OPTIONAL on <c>get_top_queries_by_cpu</c> and absent from
     /// its siblings.
     ///
-    /// <para>Trailing and optional is what keeps <see cref="ParamContract_MatchesLite"/> true, so it is asserted
-    /// rather than left to review. Absent on <c>get_top_procedures_by_cpu</c> because procedure stats are
+    /// <para>It was pinned as the LAST parameter until #2495 appended <c>as_of</c> to both SKUs behind it.
+    /// Moving <c>group_by</c> to keep it last would have relocated an already-shipped parameter to preserve a
+    /// property (position) that no caller of an MCP tool can observe, so what is pinned now is what the
+    /// property was always standing in for: <c>group_by</c> is optional, and it sits AFTER every parameter Lite
+    /// has, so a Lite-shaped call never meets it. Absent on <c>get_top_procedures_by_cpu</c> because procedure stats are
     /// ALREADY keyed on the object — the rollup would be a no-op there — and absent on
     /// <c>get_query_store_top</c> because Query Store keys on <c>query_id</c>, which does not fragment the way a
     /// shape hash does, so the same option would imply a grouping that surface cannot perform.</para>
     /// </summary>
     [Fact]
-    public void ParamContract_GroupByIsATrailingOptionalOnTopQueriesOnly()
+    public void ParamContract_GroupByIsAnAppendedOptionalOnTopQueriesOnly()
     {
-        var ps = McpParams("get_top_queries_by_cpu");
-        Assert.Equal("group_by", ps[^1].Name);
-        Assert.True(ps[^1].Optional, "group_by must be optional so Lite-shaped calls still work");
+        var names = McpParams("get_top_queries_by_cpu").Select(p => p.Name).ToArray();
+
+        Assert.Contains("group_by", names);
+        Assert.True(
+            McpParams("get_top_queries_by_cpu").Single(p => p.Name == "group_by").Optional,
+            "group_by must be optional so Lite-shaped calls still work");
+        Assert.True(
+            Array.IndexOf(names, "group_by") > Array.IndexOf(names, "min_dop"),
+            "group_by must sit after every parameter Lite has, so a Lite-shaped call never meets it");
 
         foreach (var tool in new[] { "get_top_procedures_by_cpu", "get_query_store_top" })
             Assert.DoesNotContain("group_by", McpParams(tool).Select(p => p.Name));
