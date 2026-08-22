@@ -26,9 +26,9 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Pins the blocking / deadlock diagnostic-depth MCP slice — get_blocking, get_deadlocks,
-/// get_deadlock_detail, get_blocked_process_xml, and the per-minute get_blocking_trend / get_deadlock_trend
-/// over the Postgres store. Ungated: the tool surface is
-/// EXACTLY the six names (all static, on a [McpServerToolType] class, returning Task&lt;string&gt;); each
+/// get_deadlock_detail, get_blocked_process_xml, the per-minute get_blocking_trend / get_deadlock_trend and
+/// the aggregate get_lock_wait_trend (#2484) over the Postgres store. Ungated: the tool surface is
+/// EXACTLY the seven names (all static, on a [McpServerToolType] class, returning Task&lt;string&gt;); each
 /// param contract matches Lite's; every read SQL is Postgres-dialect, positional-param, reads the collector
 /// columns the schema generator emits, and windows on the naive-UTC collection_time; and the advertised
 /// tools/list schema is Gemini-clean.
@@ -43,6 +43,7 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         "get_deadlock_detail",
         "get_deadlock_trend",
         "get_deadlocks",
+        "get_lock_wait_trend",
     };
 
     private static MethodInfo[] ToolMethods() => typeof(DarlingMcpBlockingTools)
@@ -51,7 +52,7 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         .ToArray();
 
     [Fact]
-    public void ToolSurface_ExactlyTheSixBlockingTools()
+    public void ToolSurface_ExactlyTheSevenBlockingTools()
     {
         var toolMethods = ToolMethods();
         var names = toolMethods
@@ -98,6 +99,7 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
     [InlineData("get_blocked_process_xml", "server_name,hours_back,limit,as_of")]
     [InlineData("get_blocking_trend", "server_name,hours_back,as_of")]
     [InlineData("get_deadlock_trend", "server_name,hours_back,as_of")]
+    [InlineData("get_lock_wait_trend", "server_name,hours_back,as_of")]
     public void ParamContract_MatchesLite(string toolName, string expectedCsv)
     {
         var expected = expectedCsv.Split(',');
@@ -144,7 +146,7 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
                 $"{tool}.dedup_key must sit after every parameter Lite has, so a Lite-shaped call never meets it");
         }
 
-        foreach (var tool in new[] { "get_blocking_trend", "get_deadlock_trend", "get_blocked_process_xml" })
+        foreach (var tool in new[] { "get_blocking_trend", "get_deadlock_trend", "get_lock_wait_trend", "get_blocked_process_xml" })
             Assert.DoesNotContain("dedup_key", McpParams(tool).Select(p => p.Name));
     }
 
@@ -233,6 +235,49 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         }
     }
 
+    /// <summary>
+    /// The lock-wait lane (#2484), pinned as the VIEWER'S query rather than as a query that happens to work.
+    ///
+    /// <para>Three properties, each of which is a real defect if it drifts. The LCK filter, or the read stops
+    /// being about locks. The LAG partitioned BY WAIT TYPE, without which one wait type's cadence is used to
+    /// divide another's delta. And the CAST to double precision before the division — integer division would
+    /// report a 3 ms delta over a 60-second interval as ZERO, which is #2507's defect (a quiet server reading
+    /// as an idle one) one read over.</para>
+    /// </summary>
+    [Fact]
+    public void LockWaitTrendSql_FiltersLockWaits_LagsPerWaitType_AndDividesAsDouble()
+    {
+        var sql = DarlingBlockingTrendReader.LockWaitTrendSql;
+
+        Assert.Contains("FROM v_wait_stats", sql, StringComparison.Ordinal);
+        Assert.Contains("wait_type LIKE 'LCK%'", sql, StringComparison.Ordinal);
+        Assert.Contains("LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("CAST(delta_wait_time_ms AS double precision) / interval_seconds", sql, StringComparison.Ordinal);
+
+        /* A negative delta is the counter reset across a restart, not a negative wait. */
+        Assert.Contains("WHERE delta_wait_time_ms >= 0", sql, StringComparison.Ordinal);
+
+        var lower = sql.ToLowerInvariant();
+        Assert.DoesNotContain("getdate", lower);
+        Assert.DoesNotContain("top (", lower);
+        Assert.DoesNotContain("isnull(", lower);
+        Assert.DoesNotContain("@", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The anchor pinned by IDENTITY, not merely by name: <c>get_lock_wait_trend</c>'s <c>as_of</c> must carry
+    /// the SHARED description constant. That constant exists because the same parameter described two
+    /// different ways on two SKUs is a divergence no other test would see.
+    /// </summary>
+    [Fact]
+    public void LockWaitTrend_AnchorCarriesTheSharedDescription()
+    {
+        var method = ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == "get_lock_wait_trend");
+        var asOf = method.GetParameters().Single(p => p.Name == "as_of");
+
+        Assert.Equal(McpHelpers.AsOfDescription, asOf.GetCustomAttribute<DescriptionAttribute>()!.Description);
+    }
+
     [Theory]
     [InlineData(nameof(DarlingBlockingReader.BlockedProcessReportsSql))]
     [InlineData(nameof(DarlingBlockingReader.DmvBlockingSnapshotsSql))]
@@ -285,10 +330,10 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
     }
 
     [Fact]
-    public void AdvertisedSchema_IsGeminiClean_ForAllSixTools()
+    public void AdvertisedSchema_IsGeminiClean_ForAllSevenTools()
     {
         var tools = BuildToolSchemas();
-        Assert.Equal(6, tools.Count);
+        Assert.Equal(7, tools.Count);
         var violations = tools.SelectMany(t => DarlingMcpSchemaAssert.Violations(t.Name, t.InputSchema)).ToList();
         Assert.True(violations.Count == 0, "Gemini-incompatible schema keywords leaked:\n" + string.Join("\n", violations));
     }

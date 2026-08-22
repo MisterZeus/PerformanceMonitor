@@ -99,6 +99,109 @@ public sealed class McpHealthTools
         }
     }
 
+    /// <summary>
+    /// #2484: the daily rollup across a SPAN of days — the Performance Calendar's month grid, which had no
+    /// read on either SKU.
+    ///
+    /// <para>A SIBLING of get_daily_summary rather than a wider version of it, and Darling's twin says the
+    /// same in more detail: the single-day tool returns a flat object of scalars, a range returns rows, and
+    /// one tool that returned either depending on whether a span argument arrived would make every consumer
+    /// branch on a parameter it may not have sent. They share the ONE aggregate underneath, which is what
+    /// stops them ever disagreeing about a day.</para>
+    /// </summary>
+    [McpServerTool(Name = "get_daily_summary_range"), Description("Gets the daily health summary for a SPAN of days rather than one: one row per collected day, each with its composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count, deadlocks, blocking events with the peak block wait, high-CPU samples, memory pressure, collection errors and actionable alert count. This is what the desktop viewer's Performance Calendar month grid draws, and it is the read to use when the question is WHICH day rather than how one day went — scan the bands, then call get_daily_summary for the day that stands out. A day on which anything at all was collected appears here even if every signal was quiet (that day is Healthy, not missing), so a gap in the returned days is a gap in COLLECTION.")]
+    public static async Task<string> GetDailySummaryRange(
+        LocalDataService dataService,
+        ServerManager serverManager,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Days of history, ending on the anchor day (inclusive). Default 30; max 366 (a year).")] int days_back = 30,
+        [Description(McpHelpers.AsOfDaysDescription)] string? as_of = null)
+    {
+        var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
+        if (error != null) return error;
+
+        /* The ceiling is SHARED with Darling so the two SKUs cannot accept different spans. */
+        if (days_back <= 0 || days_back > McpHelpers.MaxDailySummaryDaysBack)
+            return $"Invalid days_back value '{days_back}'. Must be a positive integer (1-{McpHelpers.MaxDailySummaryDaysBack}).";
+
+        /* The anchor is the ONLY source of "now" in this body — see AsOfWindowAnchorTests, which fails a
+           tool that advertises as_of and then reads the process clock anyway. (That check is a source scan
+           and the rule is absolute, so this comment cannot name the property either.) */
+        var anchorError = McpHelpers.ResolveAsOf(as_of, out var windowEnd);
+        if (anchorError != null) return anchorError;
+
+        try
+        {
+            /* Days, not hours: the anchor names a DAY here and only its UTC date is used, because the
+               aggregate buckets on whole days. The range is half-open [from, to), so `days_back` days
+               ending ON the anchor day means the anchor day is the last one included. */
+            var lastDay = windowEnd.Date;
+            var fromDate = lastDay.AddDays(-(days_back - 1));
+            var toDate = lastDay.AddDays(1);
+
+            var rows = await dataService.GetDailySummaryRangeAsync(resolved.ServerId, fromDate, toDate);
+
+            if (rows.Count == 0)
+            {
+                /*
+                    Zero DAYS is two facts. The aggregate's day spine is a UNION over nine sources and one of
+                    them is the collection log, where ANY run marks the day collected — that is why a quiet
+                    but monitored day comes back Healthy rather than absent. So a range with no rows at all
+                    cannot be "the server was quiet".
+
+                    The denominator is therefore the DATA, probed on the collection log — the spine member
+                    that guarantees a collected day appears. It is PERIODIC: every collector run writes a row
+                    whatever it found, so its presence is proof somebody looked, and unlike an edge table it
+                    cannot report a healthy server as uncollected. Darling's twin uses the same words.
+                */
+                var everCollected = await dataService.HasAnyCollectionLogAsync(resolved.ServerId);
+                return everCollected
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"No collected days for {resolved.ServerName} between {fromDate:yyyy-MM-dd} and {lastDay:yyyy-MM-dd}. A day with ANY collection appears here even when every signal was quiet, so this range is outside what the store holds for this server rather than a stretch of quiet days — widen days_back, or move as_of.",
+                        new { from_date = fromDate.ToString("yyyy-MM-dd"), to_date = lastDay.ToString("yyyy-MM-dd") })
+                    : McpHelpers.Status(
+                        "unavailable",
+                        $"No collector runs have EVER been recorded for {resolved.ServerName}, so the calendar is empty because nothing has been collected — not because those days were quiet. Check that the service is running and that the server is enabled for collection.",
+                        new { from_date = fromDate.ToString("yyyy-MM-dd"), to_date = lastDay.ToString("yyyy-MM-dd") });
+            }
+
+            return JsonSerializer.Serialize(new
+            {
+                server = resolved.ServerName,
+                days_back,
+                /* The bounds the read actually used, echoed back: with an anchor in play, a caller cannot
+                   otherwise tell which days they were given from the days they got. */
+                from_date = fromDate.ToString("yyyy-MM-dd"),
+                to_date = lastDay.ToString("yyyy-MM-dd"),
+                /* Days WITH data, not days in the span. The two differ exactly where collection has a hole,
+                   and that difference is the most useful thing on this payload. */
+                day_count = rows.Count,
+                days = rows.Select(row => new
+                {
+                    summary_date = row.SummaryDate.ToString("yyyy-MM-dd"),
+                    overall_health = row.OverallHealth,
+                    health_band = row.HealthBand.ToString(),
+                    total_wait_time_sec = row.TotalWaitTimeSec,
+                    top_wait_type = row.TopWaitType,
+                    unique_queries = row.UniqueQueries,
+                    deadlock_count = row.DeadlockCount,
+                    blocking_events = row.BlockingEvents,
+                    high_cpu_events = row.HighCpuEvents,
+                    memory_pressure_events = row.MemoryPressureEvents,
+                    memory_critical_events = row.MemoryCriticalEvents,
+                    collection_errors = row.CollectionErrors,
+                    alert_count = row.AlertCount,
+                    max_block_duration_ms = row.MaxBlockDurationMs,
+                }),
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("get_daily_summary_range", ex);
+        }
+    }
+
     [McpServerTool(Name = "get_collection_health"), Description("Shows the health status of all data collectors for a server — whether they're running successfully, failing, or stale. Check this before investigating data to ensure collectors are working properly. Each row also carries last_note/note_count: what a NON-failing run reported, e.g. an enumeration that came back with 0 items. note_count equal to total_runs means the collector has been collecting nothing all window — not a fault (the target may be legitimately empty), but the reason a HEALTHY collector can still have no data. target_has_user_databases tells those two apart: true means the target DID have user databases in the same window, so an all-window empty enumeration is worth investigating (a login that cannot enter them, an exclusion filter that matched everything); false means either no user databases or no inventory to go on. The sweep_pressure block is the server-level roll-up: it compares the collectors' combined execution demand (average duration amortized by cadence) against the minute the fastest cadence holds. SATURATED means the collection body cannot fit inside its cadence, so relaunches are skipped and the server collects at a multiple of its configured interval while every collector still reads healthy — heaviest_collectors names where that budget goes. That verdict is the SUSTAINED answer only. peak_cycle_risk is the separate single-sweep answer: peak_cycle_ms is what the body costs on the cycle where every scheduled cadence comes due together, and BODY_OVERRUN means that one body cannot fit the budget even when the verdict reads OK — the signature of one infrequent heavy collector, which amortization hides and heaviest_collectors therefore ranks out of sight. peak_collector names it, and peak_cycle_note explains it. Read both fields: a server can be OK/BODY_OVERRUN (a schedule-shape problem, fix by moving or splitting that collector) or SATURATED/BODY_OVERRUN (a capacity problem). Every collector row carries avg_duration_ms, p95_duration_ms and max_duration_ms, because a collector's runs are not always one population: query_store on one dogfood server averaged 13,834 ms over 1,155 runs of which 958 yielded nothing and cost about 36 ms, which puts the other 197 at roughly 80,900 ms EACH - each one, on its own, larger than the whole sweep budget. Read the three together: avg close to p95 close to max is one population, avg far below p95 is two, and p95 far below max is one pathological run. peak_cycle_ms is built from p95 (floored at the mean, so it can never read lower than a mean-based figure) for exactly that reason, and peak_collector carries peak_run_ms beside avg_duration_ms so the gap is visible. Those three still describe RUNS, and a collector that runs once per DATABASE writes one blended row, so no run-level statistic can say which database cost what. Five fan out from an enumeration on any SQL Server target (query_store, plan_correction, query_store_health, index_object_stats, database_scoped_config); separately, eight more fan out over a per-database connection loop when the target is Azure SQL DB, and pg_autovacuum_stats always does on PostgreSQL. The per-collector `fanout` block is that answer, null for a collector that does not fan out: `items` is how wide the fan-out was, `slowest`/`slowest_ms` name the dearest database and its cost on the window's worst run, `run_ms` is that whole run, and `dominance` is slowest_ms * items / run_ms — 1.0 for a perfectly even fan-out, rising with concentration. It matters because the remedies diverge there: near 1.0 the cost is the fan-out's WIDTH and bounded parallelism is the lever, while around 2.0 or above one database dominates and a per-database schedule override or a stagger is what helps. Do not try to infer this from p95 versus avg — on a per-database collector that ratio is usually saturated by empty-versus-productive runs and says nothing about databases.")]
     public static async Task<string> GetCollectionHealth(
         LocalDataService dataService,

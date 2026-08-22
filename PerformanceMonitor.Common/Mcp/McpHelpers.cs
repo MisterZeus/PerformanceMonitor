@@ -23,6 +23,17 @@ internal static class McpHelpers
     public const int MaxHoursBack = 168;
 
     /// <summary>
+    /// Maximum days of history the daily-summary RANGE read allows (a year).
+    ///
+    /// <para>Separate from <see cref="MaxHoursBack"/> rather than derived from it: that ceiling is seven days,
+    /// which is a sensible bound on a per-collection window and useless on a calendar whose whole premise is
+    /// months. Bounded all the same, because the aggregate underneath scans the raw per-collection series for
+    /// every signal except the query count. Shared so the two SKUs cannot accept different spans and answer
+    /// the same question differently.</para>
+    /// </summary>
+    public const int MaxDailySummaryDaysBack = 366;
+
+    /// <summary>
     /// Maximum rows/items to return.
     /// </summary>
     public const int MaxTop = 1000;
@@ -103,6 +114,21 @@ internal static class McpHelpers
         "midnight UTC). Omit to anchor at now. The window is the hours_back hours ENDING here, so a past " +
         "incident is 'as_of the end of it, hours_back its length' — widening hours_back is NOT the same " +
         "question, because a wider window is a different aggregate, not the same one with more rows.";
+
+    /// <summary>
+    /// <see cref="AsOfDescription"/> for the reads whose span is measured in DAYS rather than hours.
+    ///
+    /// <para>A separate constant rather than a reuse, because the shared one names <c>hours_back</c> in its
+    /// own text. A parameter description that names a parameter the tool does not have is worse than a
+    /// slightly generic one: the caller reads it, sends <c>hours_back</c>, and the key is ignored rather than
+    /// rejected. Same contract, same anchor, same resolver — only the unit of the span differs.</para>
+    /// </summary>
+    public const string AsOfDaysDescription =
+        "Optional UTC anchor for the LAST day of the range, ISO-8601 (2026-08-18T14:30:00Z, or 2026-08-18 for " +
+        "midnight UTC; only the UTC date is used). Omit to anchor at today. The range is the days_back days " +
+        "ENDING on that day, so a past month is 'as_of its last day, days_back its length' — widening " +
+        "days_back is NOT the same question, because it asks about a different span of days rather than the " +
+        "same one in more detail.";
 
     /// <summary>
     /// How far past <c>now</c> an <c>as_of</c> anchor may sit and still be accepted.

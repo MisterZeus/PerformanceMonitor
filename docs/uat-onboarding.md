@@ -485,7 +485,7 @@ Invoke-RestMethod http://localhost:5153/api/ping
 
 Be clear about this before you file it as a bug. The web dashboard reads the store as the least-privilege
 `viewer` role. Its `/api/read/*` surface is machine-derived from the MCP tool catalog minus an explicit
-exclusion list — 90 read endpoints out of 109 tools — and these are the exclusions that matter to you:
+exclusion list — 92 read endpoints out of 111 tools — and these are the exclusions that matter to you:
 
 - **No plan analysis.** The whole `analyze_query_plan` / `analyze_procedure_plan` / `analyze_query_store_plan` /
   `analyze_plan_xml` family is excluded. **Use the WPF viewer for plans** — it has the graphical plan viewer,
@@ -497,7 +497,7 @@ exclusion list — 90 read endpoints out of 109 tools — and these are the excl
 
 The pages are Fleet Overview, per-server, Alert History, Availability Groups and Custom Views. The per-server
 page carries twelve sub-tabs — Overview, Wait Stats, CPU, Memory, Blocking, File I/O, Queries, Configuration,
-Config Changes, Activity, System Events and Collection Health — reaching 69 of the 90 read endpoints, against
+Config Changes, Activity, System Events and Collection Health — reaching 71 of the 92 read endpoints, against
 the viewer's nineteen top-level per-server tabs (65 counting their inner tabs). So most of what the viewer
 shows is now here, and what is not divides into three groups.
 

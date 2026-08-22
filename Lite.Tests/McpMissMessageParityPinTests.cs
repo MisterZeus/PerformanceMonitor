@@ -65,6 +65,19 @@ public sealed class McpMissMessageParityPinTests
         " hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.",
         " hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid. A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists.",
 
+        /* get_lock_wait_trend (#2484). The all-clear sentence is get_wait_types' own, reused deliberately:
+           both reads are looking at the same PERIODIC table and the advice is identical, so two spellings
+           of it would be a divergence for nothing. Only the never-collected half needs its own words,
+           because "no lock contention" is the wrong thing to hear about a server nothing was stored for. */
+        "No lock waits recorded for ",
+        ", so this is NOT a report of a server without lock contention — nothing has been stored for it at all. ",
+
+        /* get_daily_summary_range (#2484) — the two empty branches. The first is the one that is easy to
+           get wrong: a day with ANY collection appears even when quiet, so no days at all cannot mean a
+           quiet stretch. */
+        ". A day with ANY collection appears here even when every signal was quiet, so this range is outside what the store holds for this server rather than a stretch of quiet days — widen days_back, or move as_of.",
+        ", so the calendar is empty because nothing has been collected — not because those days were quiet. Check that the service is running and that the server is enabled for collection.",
+
         /* The instructions' miss-vocabulary paragraph (#2511). The engine-gap MESSAGE itself is built by
            CollectorEngineCapability and is byte-identical by construction rather than by pinning; what lives
            twice, and therefore belongs here, is the paragraph that teaches a caller how to read it. */
