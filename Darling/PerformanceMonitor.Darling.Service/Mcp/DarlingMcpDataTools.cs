@@ -1194,4 +1194,76 @@ public sealed class DarlingMcpDataTools
             return McpHelpers.FormatError("get_current_waits_trend", ex);
         }
     }
+
+    [McpServerTool(Name = "get_blocking_stats"), Description("Gets blocking SEVERITY over time for a server: per-minute blocking duration (event count, total, max and average wait) and per-minute deadlock severity (victim count plus total, max and average wait across every process in the graphs). get_blocking_trend and get_deadlock_trend count incidents; this is how BAD they were. Ten one-second blocks and one ten-minute block are the same count and are not the same problem, which is the distinction this read exists to make.")]
+    public static async Task<string> GetBlockingStats(
+        NpgsqlDataSource postgres,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Hours of history. Default 24.")] int hours_back = 24)
+    {
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        if (error != null) return error;
+
+        try
+        {
+            var end = DateTime.UtcNow;
+            var start = end.AddHours(-Math.Abs(hours_back));
+
+            var blocking = await DarlingDataReader.GetBlockingDurationStatsAsync(postgres, resolved.ServerId, start, end);
+
+            /* Parsed and bucketed by the shared aggregator rather than re-derived here: a second copy of
+               "what counts as a victim" is how two surfaces end up disagreeing about one deadlock. */
+            var graphs = await DarlingDataReader.GetDeadlockGraphsAsync(postgres, resolved.ServerId, start, end);
+            var deadlocks = DeadlockSeverityAggregator.Aggregate(graphs);
+
+            if (blocking.Count == 0 && deadlocks.Count == 0)
+            {
+                /*
+                    Same trap as the waits trend, and the reassuring answer is again the wrong one: an
+                    operator told "no blocking" stops looking. Both capture paths are checked, because
+                    either alone can be off on a given server -- reporting calm while the only source that
+                    would have shown it was never collected is the failure this avoids.
+                */
+                var everCaptured = await DarlingDataReader.HasAnyBlockingCaptureAsync(postgres, resolved.ServerId);
+                return everCaptured
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {Math.Abs(hours_back)} hour(s). This server HAS captured blocking before, so the window is genuinely clear.")
+                    : McpHelpers.Status(
+                        "unavailable",
+                        $"No blocking has EVER been captured for {resolved.ServerName}, so this is NOT a clean bill of health — there is nothing to read. Blocked-process reports need the XE session running, or the DMV blocking snapshot collector enabled; check those before concluding this server does not block.");
+            }
+
+            return JsonSerializer.Serialize(new
+            {
+                server = resolved.ServerName,
+                hours_back = Math.Abs(hours_back),
+                /*
+                    Severity, not counts. get_blocking_trend already answers how OFTEN; ten one-second
+                    blocks and one ten-minute block share a count and are different problems.
+                */
+                blocking_duration = blocking.Select(b => new
+                {
+                    time = b.Time.ToString("o"),
+                    event_count = b.EventCount,
+                    total_duration_ms = b.TotalDurationMs,
+                    max_duration_ms = b.MaxDurationMs,
+                    avg_duration_ms = Math.Round(b.AvgDurationMs, 0),
+                }),
+                deadlock_severity = deadlocks.Select(d => new
+                {
+                    time = d.Time.ToString("o"),
+                    victim_count = d.VictimCount,
+                    /* Every process's wait, not just the victims' -- the Dashboard analyzer's semantics. */
+                    total_wait_ms = d.TotalWaitMs,
+                    max_wait_ms = d.MaxWaitMs,
+                    avg_wait_ms = Math.Round(d.AvgWaitMs, 0),
+                }),
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("get_blocking_stats", ex);
+        }
+    }
 }
