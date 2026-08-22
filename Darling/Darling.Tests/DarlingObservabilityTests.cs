@@ -633,10 +633,14 @@ public sealed class DarlingObservabilityTests
             EngineEdition = 0,
         };
 
-        await DarlingObservability.UpsertServerAsync(postgres, repointed, null, TestContext.Current.CancellationToken);
-
-        using (var read = new NpgsqlCommand("SELECT engine_kind, sql_engine_edition FROM servers WHERE server_id = $1", connection))
+        /* try/finally around the repoint, so a failed assertion inside it cannot leave this shared-store
+           row asserting Aurora for whatever runs next. The restore is the FINALLY, not a trailing
+           statement: a trailing one is skipped by exactly the failure that makes it matter. */
+        try
         {
+            await DarlingObservability.UpsertServerAsync(postgres, repointed, null, TestContext.Current.CancellationToken);
+
+            using var read = new NpgsqlCommand("SELECT engine_kind, sql_engine_edition FROM servers WHERE server_id = $1", connection);
             read.Parameters.AddWithValue(TestServerId);
             using var reader = await read.ExecuteReaderAsync(TestContext.Current.CancellationToken);
             Assert.True(await reader.ReadAsync(TestContext.Current.CancellationToken), "servers row missing after re-upsert");
@@ -645,9 +649,14 @@ public sealed class DarlingObservabilityTests
                connected", which is the whole reason the kind column exists. */
             Assert.Equal(0, reader.GetInt32(1));
         }
-
-        /* Put it back, so the rest of this test reads the SQL Server row it was written against. */
-        await DarlingObservability.UpsertServerAsync(postgres, server, null, TestContext.Current.CancellationToken);
+        finally
+        {
+            /* Put it back, so the rest of this test — and the next run of it — reads the SQL Server row it
+               was written against. Its own connection is not needed here the way LiveStoreCleanup gives
+               one: this restore goes through the pooled NpgsqlDataSource the upserts above use, not
+               through the possibly-broken body connection. */
+            await DarlingObservability.UpsertServerAsync(postgres, server, null, TestContext.Current.CancellationToken);
+        }
 
         /* The second upsert must not throw and must refresh modified_date. */
         await Task.Delay(50, TestContext.Current.CancellationToken);
