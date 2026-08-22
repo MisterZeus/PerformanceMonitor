@@ -1137,6 +1137,7 @@ public static class DarlingWebEndpoints
             ["get_pg_io_stats"] = R(CatData, "PostgreSQL I/O by backend type, object and context, differenced across the window.", PServer(), PHours(24), PLimit(20), PAsOf()),
             ["get_pg_wait_stats"] = R(CatData, "Top PostgreSQL wait events in the window (Aurora targets).", PServer(), PHours(24), PLimit(20), PAsOf()),
             ["get_pg_blocking"] = R(CatData, "PostgreSQL blocking chains that were sampled, with the root blocker attributed. A sample, not an event log.", PServer(), PHours(24), PLimit(50), PAsOf()),
+            ["get_pg_database_stats"] = R(CatData, "PostgreSQL per-database temp-file spills, cache hit ratio, deadlocks and commit/rollback split, differenced across the window.", PServer(), PHours(24), PLimit(20), PAsOf()),
             ["get_wait_stats"] = R(CatData, "Top wait statistics in the window.", PServer(), PHours(24), PLimit(20), PAsOf()),
             ["get_wait_trend"] = R(CatData, "One wait type's totals over time (requires wait_type).", PReqText("wait_type"), PServer(), PHours(24), PAsOf()),
             ["get_wait_types"] = R(CatData, "The wait types observed in the window.", PServer(), PHours(24), PAsOf()),
@@ -1583,6 +1584,7 @@ public static class DarlingWebEndpoints
             ["get_pg_io_stats"] = (c, pg, an) => DarlingMcpPgIoTools.GetPgIoStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
             ["get_pg_wait_stats"] = (c, pg, an) => DarlingMcpPgWaitTools.GetPgWaitStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
             ["get_pg_blocking"] = (c, pg, an) => DarlingMcpPgBlockingTools.GetPgBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
+            ["get_pg_database_stats"] = (c, pg, an) => DarlingMcpPgDatabaseTools.GetPgDatabaseStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
             ["get_wait_stats"] = (c, pg, an) => DarlingMcpDataTools.GetWaitStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
             ["get_wait_trend"] = (c, pg, an) => RequireText(c, "wait_type", out var waitType)
                 ? DarlingMcpDataTools.GetWaitTrend(pg, waitType, Server(c), Hours(c, 24), as_of: AsOf(c))

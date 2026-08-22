@@ -174,5 +174,14 @@ public static class CollectorScheduleDefaults
            other per-minute series, and is the horizon that answers "is this the same chain every
            Monday at open" — the question that turns a one-off into a pattern. */
         ["pg_blocking"] = new(1, 30),
+
+        /* Per-minute, and cheap enough to be uncontroversial: pg_stat_database is cluster-wide, so this is
+           one query on the connection the collector already has, returning one row per database — single
+           digits to low tens on every target in the fleet. No fan-out, unlike pg_autovacuum_stats.
+           The cadence IS the value, not a cost to justify: a temp-file spill is what you correlate against
+           a deployment or a nightly job, and at an hourly grain "the reporting database started spilling"
+           loses the minute that would have named the cause. 30 days matches the other per-minute rate
+           collectors — the question this answers is "did this start on Tuesday", not a quarterly trend. */
+        ["pg_database_stats"] = new(1, 30),
     };
 }

@@ -139,7 +139,7 @@ PerformanceMonitor.Darling.Service.exe --test-connection
 **Proof:** a `[PASS]` line that reports PostgreSQL facts, ending in how many collectors will actually run.
 
 ```
-  [PASS] aurora-orders-writer: PostgreSQL 17 (server_version_num 170007), writer, Aurora — all 8 PostgreSQL collectors apply
+  [PASS] aurora-orders-writer: PostgreSQL 17 (server_version_num 170007), writer, Aurora — all 9 PostgreSQL collectors apply
 ```
 
 **Read the count.** It is computed by asking the same gate the collector runner asks, so it is the real
@@ -147,10 +147,10 @@ answer, and it is the difference between "this is configured" and "this will col
 
 | Target | Applies | Skipped, and why |
 |---|---|---|
-| Aurora writer | 7 of 7 | — |
-| Aurora reader | 6 of 7 | `pg_autovacuum_stats` — `pg_stat_user_tables` reports all zeros on a standby |
-| Self-managed 16+ writer | 5 of 7 | `pg_wait_stats`, `pg_statement_stats` — both read Aurora-only functions |
-| Self-managed 15 reader | 3 of 7 | the above, plus `pg_io_stats` (needs `pg_stat_io`, PostgreSQL 16+) |
+| Aurora writer | 9 of 9 | — |
+| Aurora reader | 8 of 9 | `pg_autovacuum_stats` — `pg_stat_user_tables` reports all zeros on a standby |
+| Self-managed 16+ writer | 7 of 9 | `pg_wait_stats`, `pg_statement_stats` — both read Aurora-only functions |
+| Self-managed 15 reader | 5 of 9 | the above, plus `pg_io_stats` (needs `pg_stat_io`, PostgreSQL 16+) |
 
 If the count is lower than the table says it should be, the probe disagrees with you about the target —
 check `writer`/`reader` and `Aurora`/`not Aurora` in the same line before touching anything else.
@@ -259,6 +259,8 @@ difference a cumulative counter, so the first read after startup legitimately sh
 | `pg_replication_slots` | 1 min | 1 min | 2 min (growth needs two) |
 | `pg_io_stats` | 1 min | 1 min | 2 min |
 | `pg_wraparound_stats` | 5 min | 5 min | 5 min (levels) |
+| `pg_blocking` | 1 min | 1 min | 1 min (a sample, not a counter) |
+| `pg_database_stats` | 1 min | 1 min | 2 min |
 | `pg_autovacuum_stats` | 60 min | **60 min** | 2 h (growing/flat needs two) |
 
 `pg_autovacuum_stats` is the one that surprises people: an hour before the first row, two before
@@ -278,6 +280,8 @@ Through MCP, one tool per collector:
 | `get_pg_replication_slots` | slot health, and whether retained WAL is still growing |
 | `get_pg_autovacuum_health` | tables ranked by how far past their **own** trigger threshold |
 | `get_pg_io_stats` | I/O by (backend type, object, context) — who, what, and why |
+| `get_pg_blocking` | blocking chains that were SAMPLED, with the root attributed |
+| `get_pg_database_stats` | temp-file spills, cache hit ratio, deadlocks, commit/rollback split |
 
 **Proof, and the trap:** on a healthy target most of these are *supposed* to be boring. Do not read
 "nothing alarming" as "not collecting" — check `collection_log` (step 6) for that. Distinguish:
@@ -294,10 +298,14 @@ Two results that look like bugs and are not:
   trackedness instead of letting a NULL read as a zero.
 - `get_pg_replication_slots` empty **on a reader** is per-instance, not a cluster all-clear. Slots live on
   the writer. Same for autovacuum state.
+- `get_pg_database_stats` reporting `stats_reset_count` above zero is the tool working, not a fault. The
+  counters it reads are cumulative since the last `pg_stat_reset()`, so a reset zeroes them; the window
+  totals become LOWER BOUNDS and the tool says so rather than letting the reset surface as a negative
+  rate or a spike. A crash restart shows the same way.
 
 ## 9. Alerting
 
-The three outage predictors alert; the other four collectors are read-only signals.
+The three outage predictors alert; the other six collectors are read-only signals.
 
 - Evaluated on the **30-second** alert sweep, after the shared SQL Server sweep, gated on the probed
   engine.
