@@ -245,15 +245,37 @@ public sealed class AsOfWindowAnchorTests
             string.Join(", ", unanchored));
     }
 
+    /// <summary>
+    /// Whether the <c>[McpServerTool]</c> method behind a read name takes the anchor.
+    ///
+    /// <para>Both pins above are of the form "no read is in set A but not set B", so a lookup that quietly
+    /// returned false for a read it could not FIND would empty the failing set and make them pass for the
+    /// wrong reason. The method is therefore asserted to exist rather than defaulted, and a partially
+    /// loadable assembly is reported rather than silently enumerated as the types that happened to load.</para>
+    /// </summary>
     private static bool ToolTakesAnAnchor(string readName)
     {
-        var method = typeof(DarlingMcpDataTools).Assembly.GetTypes()
+        Type[] types;
+        try
+        {
+            types = typeof(DarlingMcpDataTools).Assembly.GetTypes();
+        }
+        catch (System.Reflection.ReflectionTypeLoadException ex)
+        {
+            Assert.Fail(
+                "the service assembly did not fully load, so a missing tool would look like a passing pin: " +
+                string.Join("; ", ex.LoaderExceptions.Where(e => e is not null).Select(e => e!.Message).Distinct()));
+            return false;
+        }
+
+        var method = types
             .SelectMany(t => t.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static))
             .FirstOrDefault(m => m.GetCustomAttributes(typeof(ModelContextProtocol.Server.McpServerToolAttribute), false)
                 .Cast<ModelContextProtocol.Server.McpServerToolAttribute>()
                 .Any(a => a.Name == readName));
 
-        return method is not null && method.GetParameters().Any(p => p.Name == "as_of");
+        Assert.True(method is not null, $"no [McpServerTool] method is named '{readName}', which the read dispatch serves");
+        return method!.GetParameters().Any(p => p.Name == "as_of");
     }
 }
 
