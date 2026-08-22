@@ -63,7 +63,7 @@ public sealed class McpMemoryTools
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var points = await dataService.GetMemoryTrendAsync(resolved.ServerId, hours_back);
+            var points = await dataService.GetMemoryTrendAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
             if (points.Count == 0)
             {

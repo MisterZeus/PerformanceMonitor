@@ -7,8 +7,12 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -253,6 +257,171 @@ public sealed class AsOfWindowAnchorTests
     /// wrong reason. The method is therefore asserted to exist rather than defaulted, and a partially
     /// loadable assembly is reported rather than silently enumerated as the types that happened to load.</para>
     /// </summary>
+    /// <summary>
+    /// Every tool that ADVERTISES <c>as_of</c> actually USES the instant it resolved.
+    ///
+    /// <para><b>Why this exists.</b> The convention's failure mode is not a compile error and not a wrong
+    /// number — it is a tool that takes the parameter, validates it, refuses a bad one correctly, and then
+    /// computes its window from <see cref="DateTime.UtcNow"/> anyway. The caller gets "now" labelled as their
+    /// window, the validation succeeding is what makes them believe it, and nothing in the result says
+    /// otherwise. That is #2495's own defect, one level up.</para>
+    ///
+    /// <para>It is not hypothetical: rebasing this work onto a moving <c>dev</c> produced <b>eight</b> of
+    /// them at once, across both SKUs, every one of which compiled and passed every other test here. Review
+    /// caught them; this catches the next eight. Both SKUs are scanned from ONE test because the category is
+    /// not per-SKU — the two copies drifted together.</para>
+    ///
+    /// <para>A source scan rather than a behavioural assertion, for the reason
+    /// <see cref="ServerPageTabsTests"/> gives about the JS it pins: the alternative is ~110 live round-trips
+    /// to prove a property that is visible in the text, and a property nobody checks is the one that breaks.
+    /// It reads the SHIPPED files, so it cannot drift into agreeing with a stale copy of itself.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("Darling/PerformanceMonitor.Darling.Service/Mcp")]
+    [InlineData("Lite/Mcp")]
+    public void EveryToolThatTakesTheAnchor_ActuallyUsesIt(string mcpDirectory)
+    {
+        var offenders = new List<string>();
+        var examined = 0;
+        var anchorable = AnchorableServiceMethods();
+
+        foreach (var file in RepoFilesIn(mcpDirectory))
+        {
+            var source = File.ReadAllText(file).Replace("\r\n", "\n", StringComparison.Ordinal);
+            var marks = Regex.Matches(source, @"McpServerTool\(Name = ""([a-z_0-9]+)""");
+
+            for (var i = 0; i < marks.Count; i++)
+            {
+                var end = i + 1 < marks.Count ? marks[i + 1].Index : source.Length;
+                var declaration = source.IndexOf("public static", marks[i].Index, StringComparison.Ordinal);
+                if (declaration < 0 || declaration > end)
+                {
+                    continue;
+                }
+
+                var signatureEnd = CloseParenAfter(source, source.IndexOf('(', declaration));
+                if (signatureEnd < 0)
+                {
+                    continue;
+                }
+
+                if (!source[declaration..signatureEnd].Contains("as_of", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                examined++;
+                var body = source[signatureEnd..end];
+
+                /* The anchor reaches the window either as the resolved local, or by being forwarded whole
+                   to a shared collector (the system_health family resolves it one level down). */
+                var reaches = body.Contains("windowEnd", StringComparison.Ordinal)
+                    || body.Contains("anchorEnd", StringComparison.Ordinal)
+                    || Regex.IsMatch(body, @"\w+Async\([^;]*\bas_of\b");
+
+                /*
+                    An anchored tool's ONLY source of "now" is the anchor it resolved, so it must not name
+                    DateTime.UtcNow at all. Written as an absolute rather than as "does not ASSIGN UtcNow"
+                    on evidence: the assignment form passed while get_file_io_trend was demonstrably broken,
+                    because the body still contained the word windowEnd from its own `out var`. A check that
+                    green-lights the defect it was written for is worse than none.
+                */
+                var namesNow = body.Contains("DateTime.UtcNow", StringComparison.Ordinal);
+
+                /*
+                    The other half, and the one the reaches-check cannot see: Lite's tools resolve the anchor
+                    and then hand it to LocalDataService. A read that CAN take asOfUtc and is not given it is
+                    a tool that validated an anchor, believed itself anchored, and queried the present. Five
+                    of those shipped past a green suite before this line existed.
+                */
+                var dropped = Regex.Matches(body, @"dataService\.(\w+)\(")
+                    .Where(m => anchorable.Contains(m.Groups[1].Value) && !CallPasses(body, m.Index, "asOfUtc"))
+                    .Select(m => m.Groups[1].Value)
+                    .Distinct()
+                    .ToArray();
+
+                if (!reaches || namesNow || dropped.Length > 0)
+                {
+                    offenders.Add($"{Path.GetFileName(file)}:{marks[i].Groups[1].Value}" +
+                        (reaches ? "" : " (never uses the resolved anchor)") +
+                        (namesNow ? " (names DateTime.UtcNow)" : "") +
+                        (dropped.Length > 0 ? $" (anchor not passed to {string.Join(", ", dropped)})" : ""));
+                }
+            }
+        }
+
+        /* A scan that parsed nothing passes for free, which is the worst outcome a check like this can have:
+           it converts an open question into confidence. Both SKUs anchor dozens of reads, so a handful means
+           the signature extraction broke rather than that the surface shrank. */
+        Assert.True(
+            examined >= 40,
+            $"only {examined} anchored tools were found under {mcpDirectory} — the scan is broken, not the surface");
+
+        Assert.True(
+            offenders.Count == 0,
+            "these tools advertise as_of and then answer as of NOW, which is worse than not offering it — " +
+            "the validation succeeds, so the caller believes the window moved: " + string.Join("; ", offenders));
+    }
+
+    /// <summary>
+    /// The <c>LocalDataService</c> reads that ACCEPT the anchor, read off the shipped source rather than
+    /// listed here — a transcribed list would go stale in exactly the direction that makes the pin pass.
+    /// </summary>
+    private static HashSet<string> AnchorableServiceMethods()
+    {
+        var methods = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var file in RepoFilesIn("Lite/Services").Where(f => Path.GetFileName(f).StartsWith("LocalDataService", StringComparison.Ordinal)))
+        {
+            var source = File.ReadAllText(file).Replace("\r\n", "\n", StringComparison.Ordinal);
+            foreach (Match m in Regex.Matches(source, @"public (?:async )?[\w<>?,\[\]\(\) ]+ (\w+)\(([^{]*?)\)\s*(?:=>|\n\s*\{)"))
+            {
+                if (m.Groups[2].Value.Contains("asOfUtc", StringComparison.Ordinal))
+                {
+                    methods.Add(m.Groups[1].Value);
+                }
+            }
+        }
+
+        Assert.True(methods.Count >= 40, $"only {methods.Count} anchor-taking service methods found — the scan is broken");
+        return methods;
+    }
+
+    /// <summary>Whether one call expression passes an argument whose text contains <paramref name="argument"/>.</summary>
+    private static bool CallPasses(string body, int callStart, string argument)
+    {
+        var open = body.IndexOf('(', callStart);
+        var close = CloseParenAfter(body, open);
+        return close > open && body[open..close].Contains(argument, StringComparison.Ordinal);
+    }
+
+    private static int CloseParenAfter(string source, int open)
+    {
+        var depth = 0;
+        for (var i = open; i < source.Length; i++)
+        {
+            if (source[i] == '(') depth++;
+            else if (source[i] == ')' && --depth == 0) return i;
+        }
+
+        return -1;
+    }
+
+    private static string[] RepoFilesIn(string relativeDirectory, [CallerFilePath] string thisFile = "")
+    {
+        for (var dir = new DirectoryInfo(Path.GetDirectoryName(thisFile)!); dir is not null; dir = dir.Parent)
+        {
+            var candidate = Path.Combine(dir.FullName, relativeDirectory);
+            if (Directory.Exists(candidate))
+            {
+                var files = Directory.GetFiles(candidate, "*.cs");
+                Assert.NotEmpty(files);
+                return files;
+            }
+        }
+
+        throw new DirectoryNotFoundException($"Could not locate {relativeDirectory} walking up from {thisFile}");
+    }
+
     private static bool ToolTakesAnAnchor(string readName)
     {
         Type[] types;

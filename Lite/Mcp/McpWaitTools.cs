@@ -74,7 +74,7 @@ public sealed class McpWaitTools
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var types = await dataService.GetDistinctWaitTypesAsync(resolved.ServerId, hours_back);
+            var types = await dataService.GetDistinctWaitTypesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
             if (types.Count == 0)
             {

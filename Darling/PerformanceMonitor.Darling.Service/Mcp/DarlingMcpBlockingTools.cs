@@ -349,7 +349,7 @@ public sealed class DarlingMcpBlockingTools
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var start = now.AddHours(-hours_back);
             var points = await DarlingBlockingTrendReader.GetBlockingTrendAsync(
                 postgres, resolved.ServerId, start, now);
@@ -399,7 +399,7 @@ public sealed class DarlingMcpBlockingTools
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var start = now.AddHours(-hours_back);
             var points = await DarlingBlockingTrendReader.GetDeadlockTrendAsync(
                 postgres, resolved.ServerId, start, now);

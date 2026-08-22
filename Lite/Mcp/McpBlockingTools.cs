@@ -252,12 +252,14 @@ public sealed class McpBlockingTools
             /* One instant for BOTH reads. Resolving now separately in the trend and the capture count
                lets a row arrive between them, and the two answers exist to be compared -- Darling's
                twin pins a single now for exactly this reason. That instant is the as_of anchor when one
-               was sent, so both reads move together onto the past window rather than one of them. */
-            var windowEnd = anchorEnd;
-            var windowStart = windowEnd.AddHours(-Math.Abs(hours_back));
+               was sent, so both reads move together onto the past window rather than one of them.
 
+               Threaded as asOfUtc rather than as fromDate/toDate: those two are SERVER-LOCAL and are
+               converted back to UTC inside GetTimeRange, so handing them an instant that is already UTC
+               shifts the window by the monitored server's offset -- silently, and in the unanchored case
+               too (review catch). asOfUtc is the UTC-safe branch, and one value still means one instant. */
             var points = await dataService.GetBlockingTrendAsync(
-                resolved.ServerId, hours_back, windowStart, windowEnd);
+                resolved.ServerId, hours_back, asOfUtc: anchorEnd);
 
             if (points.Count == 0)
             {
@@ -270,7 +272,7 @@ public sealed class McpBlockingTools
                     nothing. Darling's twin makes the same distinction with the same words.
                 */
                 var captures = await dataService.GetBlockingCaptureCountsAsync(
-                    resolved.ServerId, hours_back, windowStart, windowEnd);
+                    resolved.ServerId, hours_back, asOfUtc: anchorEnd);
                 return await EmptyTrend(
                     "blocking", resolved.ServerName, hours_back, captures,
                     () => dataService.HasAnyBlockingCollectorRunAsync(resolved.ServerId));
@@ -307,18 +309,15 @@ public sealed class McpBlockingTools
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            /* Same single-instant discipline as the blocking trend above. */
-            var dlWindowEnd = DateTime.UtcNow;
-            var dlWindowStart = dlWindowEnd.AddHours(-Math.Abs(hours_back));
-
+            /* Same single-instant discipline as the blocking trend above, threaded the same UTC-safe way. */
             var points = await dataService.GetDeadlockTrendAsync(
-                resolved.ServerId, hours_back, dlWindowStart, dlWindowEnd);
+                resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
             if (points.Count == 0)
             {
                 /* Same two facts as the blocking trend above, same denominator, same reason. */
                 var captures = await dataService.GetDeadlockCaptureCountsAsync(
-                    resolved.ServerId, hours_back, dlWindowStart, dlWindowEnd);
+                    resolved.ServerId, hours_back, asOfUtc: windowEnd);
                 return await EmptyTrend(
                     /* SINGULAR: the subject lands in "No {subject} was recorded", and "no deadlocks
                        was recorded" is not a sentence. It also reads correctly in the other two,

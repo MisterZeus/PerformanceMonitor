@@ -774,8 +774,8 @@ ORDER BY bucket";
     /// same state.</para>
     /// </summary>
     public Task<List<CollectorCaptureCount>> GetBlockingCaptureCountsAsync(
-        int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null) =>
-        GetCaptureCountsAsync(serverId, hoursBack, "collector_name IN ('blocked_process_report', 'dmv_blocking_snapshot')", fromDate, toDate);
+        int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null) =>
+        GetCaptureCountsAsync(serverId, hoursBack, "collector_name IN ('blocked_process_report', 'dmv_blocking_snapshot')", fromDate, toDate, asOfUtc);
 
     /// <summary>
     /// Successful runs of the deadlock collector inside the window. One capture path here, not two —
@@ -783,8 +783,8 @@ ORDER BY bucket";
     /// fallback to count.
     /// </summary>
     public Task<List<CollectorCaptureCount>> GetDeadlockCaptureCountsAsync(
-        int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null) =>
-        GetCaptureCountsAsync(serverId, hoursBack, "collector_name = 'deadlocks'", fromDate, toDate);
+        int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null) =>
+        GetCaptureCountsAsync(serverId, hoursBack, "collector_name = 'deadlocks'", fromDate, toDate, asOfUtc);
 
     /// <summary>
     /// Whether either blocking collector has EVER run successfully for this server, ignoring any window.
@@ -818,12 +818,12 @@ ORDER BY bucket";
        point of asking both is that their answers are compared. Darling's twin takes explicit bounds
        for the same reason. */
     private async Task<List<CollectorCaptureCount>> GetCaptureCountsAsync(
-        int serverId, int hoursBack, string collectorPredicate, DateTime? fromDate = null, DateTime? toDate = null)
+        int serverId, int hoursBack, string collectorPredicate, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 SELECT
