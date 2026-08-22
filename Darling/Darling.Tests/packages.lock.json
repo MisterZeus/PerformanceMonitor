@@ -713,6 +713,7 @@
           "Hardcodet.NotifyIcon.Wpf": "[2.0.1, )",
           "PerformanceMonitor.Alerting": "[1.0.0, )",
           "PerformanceMonitor.Analysis": "[1.0.0, )",
+          "PerformanceMonitor.Collectors": "[1.0.0, )",
           "PerformanceMonitor.Common": "[1.0.0, )",
           "PerformanceMonitor.Darling.Analysis": "[1.0.0, )",
           "PerformanceMonitor.Darling.Storage": "[1.0.0, )",

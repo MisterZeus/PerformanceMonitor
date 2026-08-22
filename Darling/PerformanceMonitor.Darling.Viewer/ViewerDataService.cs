@@ -14,6 +14,7 @@ using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -32,13 +33,27 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public sealed class DarlingServer : INotifyPropertyChanged
 {
+    /// <param name="engineKind">
+    /// <c>servers.engine_kind</c> as the store holds it (#2530) - one of
+    /// <see cref="MonitoredEngineKind.All"/>, or null for a row no connect has stamped since the V82 rung
+    /// landed. Defaulted so the two reader call sites are the only places that have to know the column
+    /// exists, and so the test fakes that construct a SQL Server row keep compiling unchanged.
+    /// </param>
+    /// <param name="engineEdition">
+    /// <c>servers.sql_engine_edition</c>. Carried beside the kind because
+    /// <see cref="CollectorEngineCapability.NotCollectedMessage"/> takes BOTH axes and asks kind first: a
+    /// PostgreSQL target's edition is 0, which the edition axis correctly reads as "no claim". Passing 0
+    /// here for a server whose edition has not been read is exactly that same silence.
+    /// </param>
     public DarlingServer(
         int serverId,
         string serverName,
         string displayName,
         bool isEnabled,
         int? sqlMajorVersion,
-        decimal monthlyCostUsd = 0)
+        decimal monthlyCostUsd = 0,
+        string? engineKind = null,
+        int engineEdition = CollectorEngineCapability.UnknownEngineEdition)
     {
         ServerId = serverId;
         ServerName = serverName;
@@ -46,6 +61,8 @@ public sealed class DarlingServer : INotifyPropertyChanged
         IsEnabled = isEnabled;
         SqlMajorVersion = sqlMajorVersion;
         MonthlyCostUsd = monthlyCostUsd;
+        EngineKind = engineKind;
+        EngineEdition = engineEdition;
     }
 
     public int ServerId { get; }
@@ -54,6 +71,35 @@ public sealed class DarlingServer : INotifyPropertyChanged
     public bool IsEnabled { get; }
     public int? SqlMajorVersion { get; }
     public decimal MonthlyCostUsd { get; }
+
+    /// <summary>The raw <c>servers.engine_kind</c> token, or null when the store makes no claim. Kept raw
+    /// rather than decoded to an enum so an unrecognised token written by a NEWER service survives the trip
+    /// to <see cref="EngineDescription"/>, which shows the operator the literal string to search for.</summary>
+    public string? EngineKind { get; }
+
+    /// <summary><c>servers.sql_engine_edition</c>; <see cref="CollectorEngineCapability.UnknownEngineEdition"/>
+    /// when the probe has not run or the target has no such property (every PostgreSQL target).</summary>
+    public int EngineEdition { get; }
+
+    /// <summary>
+    /// True only when the store SAYS this target is PostgreSQL. Absence is not evidence for either engine,
+    /// so a null or unrecognised token is false and the server keeps the SQL Server surface - the
+    /// pre-#2530 behaviour, which is the only safe default for the servers that have not reconnected since
+    /// the engine-kind rung landed.
+    /// </summary>
+    public bool IsPostgres => MonitoredEngineKind.IsPostgres(EngineKind);
+
+    /// <summary>
+    /// How the engine reads in the per-server header, or null when the store makes no claim - in which case
+    /// the header shows NO engine label rather than "SQL Server", because the tabs such a server gets are a
+    /// default rather than a finding. An unrecognised token renders as the raw token: the describer's
+    /// "an unrecognised engine" is worded to sit mid-sentence in the capability messages and reads wrong as
+    /// a label, and the literal string is what an operator would grep their store for.
+    /// </summary>
+    public string? EngineDescription =>
+        !MonitoredEngineKind.IsKnown(EngineKind)
+            ? (string.IsNullOrWhiteSpace(EngineKind) ? null : EngineKind)
+            : MonitoredEngineKind.DescribeEngineKind(EngineKind);
 
     /// <summary>"SQL Server 2022"-style label for the server list; empty when the version is unknown.</summary>
     public string VersionLabel => ViewerDataService.SqlVersionLabel(SqlMajorVersion);
@@ -303,8 +349,16 @@ public sealed class DarlingServer : INotifyPropertyChanged
 /// </summary>
 public sealed partial class ViewerDataService : IAsyncDisposable
 {
+    /// <summary>
+    /// The observed server registry. <c>engine_kind</c> (#2530) and <c>sql_engine_edition</c> ride along
+    /// because the per-server tab set and every PostgreSQL panel's own explanation are derived from them -
+    /// see <see cref="ViewerPostgresTabs"/>. Both are read here AND in
+    /// <c>ViewerDataService.MonitoredServers.cs</c>'s <c>ManagedServersSql</c>: that one is what the sidebar
+    /// actually uses on a seeded store, so a discriminator added to only this query would have left every
+    /// real deployment on the SQL Server tab set.
+    /// </summary>
     public const string ServersSql =
-        "SELECT server_id, server_name, display_name, is_enabled, sql_major_version, COALESCE(monthly_cost_usd, 0) FROM servers ORDER BY display_name";
+        "SELECT server_id, server_name, display_name, is_enabled, sql_major_version, COALESCE(monthly_cost_usd, 0), engine_kind, COALESCE(sql_engine_edition, 0) FROM servers ORDER BY display_name";
 
     /// <summary>
     /// The authoritative read-only probe (V8 security hardening): does the connected role hold INSERT
@@ -1233,7 +1287,9 @@ SELECT
                 reader.IsDBNull(2) ? serverName : reader.GetString(2),
                 !reader.IsDBNull(3) && reader.GetBoolean(3),
                 reader.IsDBNull(4) ? null : reader.GetInt32(4),
-                reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5))));
+                reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(7) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(7)));
         }
 
         return servers;

@@ -60,6 +60,11 @@
     <ProjectReference Include="..\..\PerformanceMonitor.Analysis\PerformanceMonitor.Analysis.csproj" />
     <ProjectReference Include="..\..\PerformanceMonitor.Notifications\PerformanceMonitor.Notifications.csproj" />
     <ProjectReference Include="..\PerformanceMonitor.Darling.Analysis\PerformanceMonitor.Darling.Analysis.csproj" />
+    <!-- #2530: the engine-kind vocabulary (MonitoredEngineKind), the collector catalog the PostgreSQL tab
+         registry derives from, and CollectorEngineCapability.NotCollectedMessage — the ONE copy of the
+         sentence a panel prints when its collector can never run on this engine. Reachable transitively via
+         .Darling.Storage, referenced explicitly since it is now a direct dependency. -->
+    <ProjectReference Include="..\..\PerformanceMonitor.Collectors\PerformanceMonitor.Collectors.csproj" />
     <ProjectReference Include="..\PerformanceMonitor.Darling.Storage\PerformanceMonitor.Darling.Storage.csproj" />
   </ItemGroup>
 

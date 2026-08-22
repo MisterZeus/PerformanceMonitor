@@ -527,11 +527,20 @@ its avg CPU and avg duration over the window plus a grid of its per-collection s
 are exactly the queries the table shows** — the picker indexes into the rows rendered directly above it, rather
 than reading a second, wider list that could offer a query the table does not.
 
-**The nine `get_pg_*` PostgreSQL reads are on the web now, and are still absent from the WPF viewer.** That
-is the current state of [#2530](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2530): the web
-dashboard renders the six PostgreSQL tabs above at any target whose `engine_kind` says PostgreSQL, and the
-desktop viewer has no PostgreSQL screens at all — so on Windows a PostgreSQL target is still readable only
-through MCP. If you are evaluating this for PostgreSQL monitoring, know which surface you are evaluating.
+**The nine PostgreSQL capture paths are now on BOTH surfaces.**
+[#2530](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2530) landed the web tabs first and the
+WPF viewer second, and the desktop set is deliberately the same six with the same names and the same
+grouping — Overview, Activity, Vacuum, Waits, I/O, Replication — so the two front ends do not teach one engine
+two shapes. The desktop panels are grids rather than charts, and the desktop Overview is the per-collector
+collection report (which of the nine ran, when, with what result, and for one that cannot run here, why),
+which is the answer a PostgreSQL operator wants first and the one the web splits across tiles.
+
+Where the desktop set genuinely differs: the per-server **database filter is hidden** at a PostgreSQL target,
+because it drives the SQL Server database-scoped reads and nothing else — offering to filter views that never
+consult it is worse than not offering. And the Blocking panel prints its **sampling denominator** above the
+grid whether or not the grid has rows: `pg_blocking` is a periodic sample, not an event log, so "two chains"
+means something different in a window of 60 captures than in a window of 4, and an absent capture and a
+capture that found nothing are the same absence of rows in the stored edge list.
 
 **Two of the nine PostgreSQL capture paths are Amazon Aurora-only**, so on a stock PostgreSQL target two
 panels are permanently empty — and neither is a fault. `get_pg_wait_stats` reads `aurora_stat_system_waits()`
@@ -551,8 +560,10 @@ PostgreSQL target from a SQL Server one — a PostgreSQL target lands at `engine
 a SQL Server that has never connected lands at. The store now records the target engine explicitly
 (`collect.servers.engine_kind`, schema v82) and the card carries `engine_kind`, the derived
 `is_postgres` / `is_aurora` booleans, and `engine_description` — the engine's name in words, composed on the
-server so no viewer owns a second copy of the vocabulary. **The web tab registry now branches on it**; the
-WPF viewer does not, so a PostgreSQL target on the desktop still renders SQL Server tabs.
+server so no viewer owns a second copy of the vocabulary. **Both tab registries now branch on it** — the web's
+`serverTabsFor(card)` and the viewer's `ViewerPostgresTabs` — and the viewer's per-server header carries the
+same engine label. A server the store makes no claim about gets **no badge at all** rather than one reading
+"SQL Server": the tabs it gets are a default, not a finding.
 
 One consequence you may notice before the screens arrive: a SQL Server read aimed at a PostgreSQL target now
 answers `not_collected` naming the engine ("...runs Aurora PostgreSQL. The system_health_events collector is
@@ -873,9 +884,13 @@ These are known, current, and not bugs:
   its page set is a deliberate subset of the viewer's.
 - **`network` blocks need a service restart.** There is no hot reload for exposure. The service now says so
   at startup, naming the block it loaded, so a config edit that appears to do nothing is at least explained.
-- **PostgreSQL monitored targets** collect and are readable, but apart from the three Tier 0 outage predictors
-  they do not raise alerts or produce analysis findings yet, and there is no plan capture or blocking-chain
-  read for them. See [PostgreSQL Targets](../Darling/README.md#postgresql-targets).
+- **PostgreSQL monitored targets** collect and are readable on both UIs, but apart from the three Tier 0
+  outage predictors they do not raise alerts or produce analysis findings yet, and there is **no execution
+  plan capture at all** for them — which is the largest remaining gap, since plans are why people open a
+  database monitoring tool. See [PostgreSQL Targets](../Darling/README.md#postgresql-targets).
+- **The PostgreSQL tabs have no charts and no drill-downs.** Every panel on both surfaces is a table over the
+  window; there is no PostgreSQL equivalent of the SQL Server Overview's correlated timeline lanes, no
+  click-through from a blocking root to the sessions behind it, and no per-query history window.
 
 If you hit something that is *not* on this list and *not* in
 [Troubleshooting](../Darling/README.md#troubleshooting), that is the interesting kind — please report it with
