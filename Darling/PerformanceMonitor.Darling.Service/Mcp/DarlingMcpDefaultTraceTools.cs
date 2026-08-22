@@ -64,7 +64,8 @@ public sealed class DarlingMcpDefaultTraceTools
                 .ToList();
 
             if (significant.Count == 0)
-                return McpHelpers.Status("empty", "No significant default trace events found in the requested time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "default_trace_events")
+                    ?? McpHelpers.Status("empty", "No significant default trace events found in the requested time range.");
 
             var events = significant.Take(limit).Select(r =>
             {

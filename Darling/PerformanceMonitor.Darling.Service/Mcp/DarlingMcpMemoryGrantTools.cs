@@ -157,7 +157,8 @@ Not available on Azure SQL DB (ring buffer not exposed).")]
             var rows = await DarlingMemoryGrantReader.GetMemoryPressureEventsAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No memory pressure events found in the requested time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_pressure_events")
+                    ?? McpHelpers.Status("empty", "No memory pressure events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {

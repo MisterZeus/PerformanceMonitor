@@ -23,7 +23,8 @@ public sealed class McpJobTools
             var rows = await dataService.GetRunningJobsAsync(resolved.ServerId);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status("empty", "No running SQL Agent jobs found (or collector has not run yet).");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "running_jobs")
+                    ?? McpHelpers.Status("empty", "No running SQL Agent jobs found (or collector has not run yet).");
             }
 
             var result = rows.Select(r => new

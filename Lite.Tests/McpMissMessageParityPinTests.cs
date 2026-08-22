@@ -64,6 +64,11 @@ public sealed class McpMissMessageParityPinTests
         "so this is NOT a report of a quiet server — there is nothing to draw. query_stats is a PERIODIC table rather than an edge table: the collector writes rows every cycle for whatever is in the plan cache, so an empty history means nobody looked. Check get_collection_health for this server.",
         " hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.",
         " hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid. A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists.",
+
+        /* The instructions' miss-vocabulary paragraph (#2511). The engine-gap MESSAGE itself is built by
+           CollectorEngineCapability and is byte-identical by construction rather than by pinning; what lives
+           twice, and therefore belongs here, is the paragraph that teaches a caller how to read it. */
+        "`not_collected` means this server does not collect that at all — and when the reason is the ENGINE, the gap is PERMANENT",
     };
 
     [Theory]
@@ -86,7 +91,7 @@ public sealed class McpMissMessageParityPinTests
     [Fact]
     public void ThePinCoversTheSentencesThisChangeMadeShared()
     {
-        Assert.True(SharedMissFragments().Count() >= 8,
+        Assert.True(SharedMissFragments().Count() >= 9,
             "the shared-sentence pin lost entries; a sentence that stops being pinned can drift between the SKUs unnoticed");
     }
 

@@ -36,7 +36,8 @@ public sealed class McpDefaultTraceTools
 
             var rows = await dataService.GetDefaultTraceEventsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No significant default trace events found in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "default_trace_events")
+                    ?? McpHelpers.Status("empty", "No significant default trace events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {

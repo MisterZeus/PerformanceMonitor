@@ -481,20 +481,13 @@ SELECT
             $"{role}, {flavour} — {applies}";
     }
 
-    /// <summary>Human-readable SERVERPROPERTY('EngineEdition') description for the probe result.</summary>
-    public static string DescribeEngineEdition(int engineEdition) => engineEdition switch
-    {
-        1 => "Personal/Desktop",
-        2 => "Standard",
-        3 => "Enterprise",
-        4 => "Express",
-        5 => "Azure SQL Database",
-        6 => "Azure Synapse Analytics",
-        8 => "Azure SQL Managed Instance",
-        9 => "Azure SQL Edge",
-        11 => "Azure Synapse serverless SQL pool",
-        _ => $"Unknown ({engineEdition})",
-    };
+    /// <summary>Human-readable SERVERPROPERTY('EngineEdition') description for the probe result.
+    /// <para>Delegates to <see cref="CollectorEngineCapability.DescribeEngineEdition"/> (#2511) rather than
+    /// keeping a second switch: the capability messages both MCP surfaces return name the edition, and two
+    /// edition tables in one repo drift — with the copy nobody is reading being the one that drifts.</para>
+    /// </summary>
+    public static string DescribeEngineEdition(int engineEdition) =>
+        CollectorEngineCapability.DescribeEngineEdition(engineEdition);
 }
 
 /// <summary>
