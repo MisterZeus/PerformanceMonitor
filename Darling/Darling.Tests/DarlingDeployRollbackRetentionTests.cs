@@ -276,8 +276,8 @@ public sealed class DarlingDeployRollbackRetentionTests
     {
         var script = DeployScript;
 
-        Assert.Contains("$runningFrom.Equals($InstallRoot, [StringComparison]::OrdinalIgnoreCase)", script, StringComparison.Ordinal);
-        Assert.Contains("$runningFrom = if ([string]::IsNullOrWhiteSpace($PSScriptRoot))", script, StringComparison.Ordinal);
+        Assert.Contains("$runningFrom = $PSScriptRoot", script, StringComparison.Ordinal);
+        Assert.Contains("if (Test-DarlingSamePath $runningFrom $InstallRoot) {", script, StringComparison.Ordinal);
 
         /* The refusal has to happen before anything is stopped or copied, or it is not a refusal. */
         var refusal = script.IndexOf("would write the new build over the copy of itself", StringComparison.Ordinal);
@@ -500,6 +500,76 @@ public sealed class DarlingDeployRollbackRetentionTests
         Assert.True(check > pruneExit, "-PruneOnly must not require a registered service — it copies nothing");
         Assert.True(check < stopGuard && check < stop && check < copy,
             "the unregistered-service refusal must come before the stop guard, the stop, and the copy — after any of them it has already cost something (#2525)");
+    }
+
+    /// <summary>
+    /// The service must not only exist — it must be the one that RUNS FROM the directory about to be
+    /// overwritten.
+    ///
+    /// <para><b>The failure this prevents is a clean, successful-looking run that upgraded nothing.</b>
+    /// <c>Stop-Service</c> and <c>Start-Service</c> act on the service by NAME, never by path. So an
+    /// <c>-InstallRoot</c> aimed at a stale copy of the tree — an old runbook, a paste from another box, a
+    /// leftover directory that still holds the exe and therefore satisfies every other precondition — stops
+    /// the REAL service (a real outage on a monitoring host), lays the new build down in a directory nothing
+    /// reads, restarts the real service on its old untouched binaries, finds <c>darling.json</c> unchanged
+    /// because it was never touched, and reports success from end to end. Every check passes and the
+    /// operator believes they upgraded.</para>
+    ///
+    /// <para>Checked unconditionally rather than only when <c>-InstallRoot</c> was passed: when it was not,
+    /// the two are equal by construction and this costs a registry read, and a check gated on the caller's
+    /// argument is absent for exactly the caller who needs it.</para>
+    /// </summary>
+    [Fact]
+    public void TheDeployScript_RefusesAnInstallRootTheServiceDoesNotRunFrom()
+    {
+        var script = DeployScript;
+
+        var crossCheck = script.IndexOf("$registeredRoot = Get-DarlingInstallRootFromService $serviceName", StringComparison.Ordinal);
+        Assert.True(crossCheck >= 0, "upgrade-darling.ps1 no longer cross-checks -InstallRoot against the registered ImagePath (#2525)");
+        Assert.Contains("elseif (-not (Test-DarlingSamePath $registeredRoot $InstallRoot)) {", script, StringComparison.Ordinal);
+
+        /* Unconditional. A `if ($PSBoundParameters.ContainsKey('InstallRoot'))` around this would make it
+           absent for the caller it exists to protect. */
+        Assert.DoesNotContain("PSBoundParameters", script, StringComparison.Ordinal);
+
+        var stopGuard = script.IndexOf("$holders = @(Get-DarlingProcessesUnderPath $InstallRoot |", StringComparison.Ordinal);
+        var stop = script.IndexOf("Stop-Service -Name $serviceName", StringComparison.Ordinal);
+        var copy = script.IndexOf("Laying the new build over", StringComparison.Ordinal);
+
+        Assert.True(crossCheck < stopGuard && crossCheck < stop && crossCheck < copy,
+            "the wrong-install-root refusal must come before the stop guard, the stop and the copy — after the stop it has already cost an outage (#2525)");
+    }
+
+    /// <summary>
+    /// Path equality has ONE spelling in this script, and it is the one that gates every destructive step:
+    /// the self-overwrite refusal, the source-is-the-install-directory refusal, and the wrong-install-root
+    /// refusal all ask <c>Test-DarlingSamePath</c>. Two hand-rolled copies of a comparison that decides
+    /// whether an upgrade may touch a tree is the same failure this whole PR is a case study in.
+    ///
+    /// <para>Run as shipped over a table, with the platform's own separator so the same cases execute here
+    /// and on Windows. The trailing-separator and case rows are the ones that matter: a registered
+    /// <c>ImagePath</c> and a hand-typed <c>-InstallRoot</c> routinely differ by exactly those, and a
+    /// comparison that called them different would refuse every correct upgrade.</para>
+    /// </summary>
+    [Fact]
+    public void TheDeployScript_ComparesPathsOneWay_AndToleratesTheWaysPeopleTypeThem()
+    {
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(DeployScript, "Test-DarlingSamePath"));
+        probe.AppendLine("$sep = [IO.Path]::DirectorySeparatorChar");
+        probe.AppendLine("$root = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'PerformanceMonitorDarling')).TrimEnd($sep)");
+
+        /* same, same + trailing separator, same in another case, a sibling, a child, and the empty case */
+        probe.AppendLine("Test-DarlingSamePath $root $root");
+        probe.AppendLine("Test-DarlingSamePath $root ($root + $sep)");
+        probe.AppendLine("Test-DarlingSamePath $root $root.ToUpperInvariant()");
+        probe.AppendLine("Test-DarlingSamePath $root ($root + 'Old')");
+        probe.AppendLine("Test-DarlingSamePath $root ($root + $sep + 'viewer')");
+        probe.AppendLine("Test-DarlingSamePath $root ''");
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        Assert.Equal(["True", "True", "True", "False", "False", "False"], answers);
     }
 
     /// <summary>

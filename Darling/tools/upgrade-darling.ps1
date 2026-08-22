@@ -196,6 +196,29 @@ function Test-DarlingRollbackBackupIsRecent($backups, [int]$withinMinutes, [date
 
 # ============================ the install tree ============================
 
+# True when two paths name the same directory. One spelling of path equality for the whole script: the
+# comparison decides whether an upgrade is allowed to touch a tree, and two hand-rolled copies of it is
+# the same "two spellings of one rule" that #2525 is a case study in.
+#
+# Separator from the runtime rather than a hardcoded backslash, for the same reason as the process filter
+# below - a rule that gates a destructive operation should be verifiable off the platform it ships to.
+function Test-DarlingSamePath([string]$left, [string]$right) {
+    if ([string]::IsNullOrWhiteSpace($left) -or [string]::IsNullOrWhiteSpace($right)) { return $false }
+
+    $sep = [IO.Path]::DirectorySeparatorChar
+    $alt = [IO.Path]::AltDirectorySeparatorChar
+
+    try {
+        $l = [IO.Path]::GetFullPath($left).TrimEnd($sep, $alt)
+        $r = [IO.Path]::GetFullPath($right).TrimEnd($sep, $alt)
+    }
+    catch {
+        return $false
+    }
+
+    return $l.Equals($r, [StringComparison]::OrdinalIgnoreCase)
+}
+
 # Where the service is ACTUALLY installed, read from the registered ImagePath rather than guessed from
 # where this script happens to be sitting. Returns $null when the service is not installed.
 #
@@ -463,14 +486,14 @@ $sourceRoot = if ($sourceIsZip) { [IO.Path]::GetDirectoryName($Source) } else { 
 #
 # Scoped to the copy path. -PruneOnly and -ListRollbacks exit above this and write no binaries, so the
 # installed copy is exactly the right thing to run for those - and it is the one the service's report names.
-$runningFrom = if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) { $null } else { [IO.Path]::GetFullPath($PSScriptRoot).TrimEnd('\') }
-if ($runningFrom -and $runningFrom.Equals($InstallRoot, [StringComparison]::OrdinalIgnoreCase)) {
+$runningFrom = $PSScriptRoot
+if (Test-DarlingSamePath $runningFrom $InstallRoot) {
     Fail "This script is running from the install directory, so the upgrade would write the new build over the copy of itself that PowerShell is currently reading. Extract the new zip to a staging folder (e.g. C:\staging\<version>) and run ITS upgrade-darling.ps1 instead. To prune rollback backups from the installed copy, use -PruneOnly, which copies nothing."
 }
 
 # And the degenerate case the rule above does not cover: a source folder that IS the install directory,
 # handed in from a script running somewhere else. Copying a tree over itself is not an upgrade.
-if (-not $sourceIsZip -and $sourceRoot.Equals($InstallRoot, [StringComparison]::OrdinalIgnoreCase)) {
+if (-not $sourceIsZip -and (Test-DarlingSamePath $sourceRoot $InstallRoot)) {
     Fail "The source folder is the install directory itself, so there is nothing to upgrade from. Point -Source at the new build."
 }
 
@@ -527,6 +550,32 @@ else {
 # gone is a perfectly reasonable thing to want, and it copies nothing.
 if (-not (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) {
     Fail "The '$serviceName' service is not registered on this machine, so there is nothing for this copy to stop and start around it. NOTHING has been stopped or copied. If '$InstallRoot' is a staging tree rather than an install, you want install-darling.ps1; if you only meant to reclaim disk, re-run with -PruneOnly, which needs no service."
+}
+
+# ...and it has to be THIS install's service.
+#
+# "A service by that name exists" and "that service runs from the directory I am about to overwrite" are
+# different claims, and the gap between them is a SILENT SUCCESS - the worst shape a failure can take here.
+# Stop-Service and Start-Service act on the service BY NAME, never by path, so an -InstallRoot pointing at
+# a stale copy of the tree (an old runbook, a paste from another box, a leftover directory that still holds
+# the exe and therefore passes every check above) produces a run in which nothing is detectably wrong: the
+# REAL service is stopped - a real outage on a monitoring host - the new build is laid down in a directory
+# nothing reads, the real service is restarted on its old untouched binaries, darling.json is unchanged
+# because it was never touched, and the script reports success end to end. The operator believes they
+# upgraded. Nothing did, and the next person to look will be debugging a version that never shipped.
+#
+# Not gated on whether -InstallRoot was passed. When it was not, the two are equal by construction and this
+# costs a registry read; gating it would make the check absent for precisely the one caller who needs it.
+$registeredRoot = Get-DarlingInstallRootFromService $serviceName
+
+if ([string]::IsNullOrWhiteSpace($registeredRoot)) {
+    # Registered but unreadable ImagePath. Not a refusal - we know the service exists and the auto-resolve
+    # path would have failed earlier - but the operator should know this was not confirmed rather than
+    # assume it was.
+    Warn "Could not read the '$serviceName' service's ImagePath, so this could not confirm that '$InstallRoot' is the directory the service actually runs from. Check that before trusting the result."
+}
+elseif (-not (Test-DarlingSamePath $registeredRoot $InstallRoot)) {
+    Fail "The '$serviceName' service runs from '$registeredRoot', not from '$InstallRoot'. NOTHING has been stopped or copied. Stopping and starting act on the service by NAME, so upgrading '$InstallRoot' would have taken the real service down, written the new build somewhere it does not read, and brought it back up on its old binaries — reporting success the whole way. Drop -InstallRoot to upgrade the registered install, or pass -InstallRoot '$registeredRoot' if that is really the one you meant."
 }
 
 # ============================ the stop guard ============================
