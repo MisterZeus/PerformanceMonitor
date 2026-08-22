@@ -99,6 +99,16 @@ INSERT INTO analysis_findings
      incident_id, remediation_action_json, drill_down_json)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)";
 
+    /*
+        #2506 added the UPPER bound ($3). Without it the read had a start and no end, so an as_of
+        anchor could only ever move the window's start EARLIER and every anchored read would still
+        return everything up to now — the anchor validated, the caller told the window had moved, and
+        the answer unchanged. That is the exact defect this convention exists to prevent, so the bound
+        is part of the read rather than something the caller filters afterwards.
+
+        It binds ONLY when the caller anchored; unanchored, $3 is NoUpperBound and the read is the
+        half-open window it has always been. See that field for why "now" is the wrong default.
+    */
     public const string GetRecentFindingsSql = @"
 SELECT finding_id, analysis_time, server_id, server_name, database_name,
        time_range_start, time_range_end, severity, confidence, category,
@@ -108,8 +118,9 @@ SELECT finding_id, analysis_time, server_id, server_name, database_name,
 FROM analysis_findings
 WHERE server_id = $1
 AND   analysis_time >= $2
+AND   analysis_time <= $3
 ORDER BY analysis_time DESC, severity DESC
-LIMIT $3";
+LIMIT $4";
 
     public const string GetLatestFindingsSql = @"
 SELECT finding_id, analysis_time, server_id, server_name, database_name,
@@ -368,16 +379,23 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// does not exist.</para>
     /// </summary>
     public async Task<List<AnalysisFinding>> GetRecentFindingsAsync(
-        int serverId, int hoursBack = 24, int limit = 100)
+        int serverId, int hoursBack = 24, int limit = 100, DateTime? asOfUtc = null)
     {
         var findings = new List<AnalysisFinding>();
 
         try
         {
+            /* #2506: the window's END, from which the START is measured. Null is "now" — the pre-#2506
+               read exactly. Made naive-UTC like every other bound here, because analysis_time is a
+               naive-UTC column and a Kind=Utc parameter would be inferred as timestamptz and silently
+               zone-shifted. */
+            var windowEnd = DateTime.SpecifyKind(asOfUtc ?? DateTime.UtcNow, DateTimeKind.Unspecified);
+
             await using var connection = await _postgres.OpenConnectionAsync();
             using var command = new NpgsqlCommand(GetRecentFindingsSql, connection);
             command.Parameters.AddWithValue(serverId);
-            command.Parameters.AddWithValue(NaiveUtcNow().AddHours(-hoursBack));
+            command.Parameters.AddWithValue(windowEnd.AddHours(-hoursBack));
+            command.Parameters.AddWithValue(asOfUtc is null ? NoUpperBound : windowEnd);
             command.Parameters.AddWithValue(limit);
 
             using var reader = await command.ExecuteReaderAsync();
@@ -692,6 +710,21 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// <summary>Naive-UTC now, Kind-Unspecified — the product's PG timestamp discipline.</summary>
     private static DateTime NaiveUtcNow() =>
         DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+
+    /// <summary>
+    /// What <see cref="GetRecentFindingsSql"/>'s upper bound is when the caller did NOT anchor: an
+    /// instant no row can reach, i.e. no bound at all.
+    ///
+    /// <para><b>Why not "now".</b> Two reasons, and the second is the one that would have hurt. First,
+    /// #2495's promise is that a caller sending only <c>hours_back</c> gets byte-for-byte the window it
+    /// always got, and this read has been half-open for its whole life. Second, <c>analysis_time</c> is
+    /// stamped by the WRITER's clock and would be filtered by the READER's; those are the same host
+    /// today, and the day they are not, a bounded default read would intermittently drop the newest run
+    /// — a findings read that "sometimes misses the analysis that just finished", with nothing in it to
+    /// point at a clock. An anchored read has a caller-supplied end and neither problem.</para>
+    /// </summary>
+    private static readonly DateTime NoUpperBound =
+        new(9999, 12, 31, 23, 59, 59, DateTimeKind.Unspecified);
 
     /// <summary>Kind-Unspecified for writes — Npgsql 6+ rejects Kind-Utc against <c>timestamp</c>.</summary>
     private static DateTime AsNaive(DateTime value) =>

@@ -128,12 +128,25 @@ public sealed class DarlingAnalysisService
     /// Runs the full analysis pipeline for a server.
     /// Default time range is the last 4 hours. Host-UTC window (Lite's clock semantics —
     /// Darling's collectors stamp rows with the service host's UTC clock).
+    ///
+    /// <para>#2506: <paramref name="asOfUtc"/> moves the END of that window off "now" while
+    /// <paramref name="hoursBack"/> stays its LENGTH, so an incident can be analyzed where it happened.
+    /// Null — every caller but the anchored MCP tool — is the pre-#2506 behaviour exactly. Anchoring
+    /// reaches the whole pipeline through the context, including the anomaly detector's hour-of-day ×
+    /// day-of-week baseline, which is keyed off the window rather than off the clock; that is what makes
+    /// the answer for a past window the same KIND of answer, and not merely a differently-filtered one.
+    /// An anchored pass does not persist — see <see cref="AnalysisContext.PersistFindings"/>.</para>
     /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1068:CancellationToken parameters must come last",
+        Justification = "The two tokens are at positions 4 and 5 and the Darling worker passes them POSITIONALLY. " +
+                        "Moving asOfUtc ahead of them to satisfy the rule would silently rebind that call site's " +
+                        "arguments — a compiling change of meaning on the one caller that matters. Appending is the " +
+                        "only edit that cannot do that, and Lite's twin keeps the same order so the two stay transplantable.")]
     public async Task<List<AnalysisFinding>> AnalyzeAsync(
         int serverId, string serverName, int hoursBack = 4, CancellationToken cancellationToken = default,
-        CancellationToken shutdownToken = default)
+        CancellationToken shutdownToken = default, DateTime? asOfUtc = null)
     {
-        var timeRangeEnd = DateTime.UtcNow;
+        var timeRangeEnd = asOfUtc ?? DateTime.UtcNow;
         var timeRangeStart = timeRangeEnd.AddHours(-hoursBack);
 
         var context = new AnalysisContext
@@ -142,6 +155,7 @@ public sealed class DarlingAnalysisService
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
+            AsOfUtc = asOfUtc,
             CancellationToken = cancellationToken,
 
             /* #2430. The fifth argument is what keeps the abandon classification truthful once
@@ -271,25 +285,38 @@ public sealed class DarlingAnalysisService
                     ?? FactRemediation.BuildMissingIndexAction(finding); // WS4: missing-index CREATE — copy-paste only
             }
 
-            // 7. Insert the survivors in one batched pass, persisting remediation_action_json.
-            await _findingStore.InsertFindingsAsync(findings, context);
+            // 7. Insert the survivors in one batched pass, persisting remediation_action_json —
+            //    UNLESS the window was anchored at a past instant (#2506), in which case the pass is
+            //    exploratory and writes nothing. The findings are still built, enriched and returned in
+            //    full; only the row is withheld, because the row would claim to be a current
+            //    observation. AnalysisContext.PersistFindings carries the whole argument.
+            if (context.PersistFindings)
+            {
+                await _findingStore.InsertFindingsAsync(findings, context);
+            }
 
             LastAnalysisTime = DateTime.UtcNow;
 
             // 8. Notify listeners — the returned/enriched findings (now action-bearing) also
             //    flow back to the caller (the worker), which routes them to the shared
-            //    AnalysisNotificationService.
-            AnalysisCompleted?.Invoke(this, new AnalysisCompletedEventArgs
+            //    AnalysisNotificationService. Gated with the insert for the same reason and not a
+            //    weaker one: this event is how findings reach notification, and an alert about last
+            //    Tuesday delivered today is the persistence problem with a shorter fuse.
+            if (context.PersistFindings)
             {
-                ServerId = context.ServerId,
-                ServerName = context.ServerName,
-                Findings = findings,
-                AnalysisTime = LastAnalysisTime.Value
-            });
+                AnalysisCompleted?.Invoke(this, new AnalysisCompletedEventArgs
+                {
+                    ServerId = context.ServerId,
+                    ServerName = context.ServerName,
+                    Findings = findings,
+                    AnalysisTime = LastAnalysisTime.Value
+                });
+            }
 
             _logger?.LogInformation(
-                "[DarlingAnalysisService] Analysis complete for {Server}: {Count} finding(s), highest severity {Severity:F2}",
-                context.ServerName, findings.Count, findings.Count > 0 ? findings.Max(f => f.Severity) : 0);
+                "[DarlingAnalysisService] Analysis complete for {Server}: {Count} finding(s), highest severity {Severity:F2}{Exploratory}",
+                context.ServerName, findings.Count, findings.Count > 0 ? findings.Max(f => f.Severity) : 0,
+                context.PersistFindings ? string.Empty : " (anchored window — exploratory, not persisted)");
 
             return findings;
         }
@@ -343,10 +370,15 @@ public sealed class DarlingAnalysisService
     /// <summary>
     /// Runs the collect + score pipeline without graph traversal.
     /// Returns raw scored facts with amplifier details for direct inspection.
+    ///
+    /// <para>#2506: <paramref name="asOfUtc"/> anchors the END of the window; null is "now", which is
+    /// every caller but the anchored MCP tool. Nothing here persists, so the anchor carries no
+    /// write-side question — this is a read that happens to score what it read.</para>
     /// </summary>
-    public async Task<List<Fact>> CollectAndScoreFactsAsync(int serverId, string serverName, int hoursBack = 4)
+    public async Task<List<Fact>> CollectAndScoreFactsAsync(
+        int serverId, string serverName, int hoursBack = 4, DateTime? asOfUtc = null)
     {
-        var timeRangeEnd = DateTime.UtcNow;
+        var timeRangeEnd = asOfUtc ?? DateTime.UtcNow;
         var timeRangeStart = timeRangeEnd.AddHours(-hoursBack);
 
         var context = new AnalysisContext
@@ -354,7 +386,8 @@ public sealed class DarlingAnalysisService
             ServerId = serverId,
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
-            TimeRangeEnd = timeRangeEnd
+            TimeRangeEnd = timeRangeEnd,
+            AsOfUtc = asOfUtc
         };
 
         try
@@ -426,10 +459,16 @@ public sealed class DarlingAnalysisService
     /// Gets recent findings for a server within the given time range. The MCP findings read
     /// passes <see cref="FindingOccurrences.WindowCoveringLimit"/> so its occurrence stats cover
     /// the whole window; the store's default 100 stays for everyone else.
+    ///
+    /// <para>#2506: <paramref name="asOfUtc"/> anchors the window's END. This one is a pure read of
+    /// rows the SCHEDULED passes already wrote, so anchoring it asks "what did analysis say about this
+    /// server at the time" — the only way to see findings the retention sweep has not yet reached but
+    /// the default 24-hour window has scrolled past.</para>
     /// </summary>
-    public async Task<List<AnalysisFinding>> GetRecentFindingsAsync(int serverId, int hoursBack = 24, int limit = 100)
+    public async Task<List<AnalysisFinding>> GetRecentFindingsAsync(
+        int serverId, int hoursBack = 24, int limit = 100, DateTime? asOfUtc = null)
     {
-        return await _findingStore.GetRecentFindingsAsync(serverId, hoursBack, limit);
+        return await _findingStore.GetRecentFindingsAsync(serverId, hoursBack, limit, asOfUtc);
     }
 
     /// <summary>

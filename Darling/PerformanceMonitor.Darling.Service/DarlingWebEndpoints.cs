@@ -1075,9 +1075,9 @@ public static class DarlingWebEndpoints
         {
             /* ── analysis reads (AuditConfig/CompareAnalysis/GetAnalysisFacts/GetAnalysisFindings) ── */
             ["audit_config"] = R(CatAnalysis, "Configuration-audit findings for a server.", PServer()),
-            ["compare_analysis"] = R(CatAnalysis, "Compare a window's analysis facts against an earlier baseline.", PServer(), PHours(4), PInt("baseline_hours_back", 28)),
-            ["get_analysis_facts"] = R(CatAnalysis, "Raw analysis facts for a window, filtered by source and minimum severity.", PServer(), PHours(4), PText("source"), PDouble("min_severity", 0)),
-            ["get_analysis_findings"] = R(CatAnalysis, "Persisted analysis findings for a server.", PServer(), PHours(24)),
+            ["compare_analysis"] = R(CatAnalysis, "Compare a window's analysis facts against an earlier baseline.", PServer(), PHours(4), PInt("baseline_hours_back", 28), PAsOf()),
+            ["get_analysis_facts"] = R(CatAnalysis, "Raw analysis facts for a window, filtered by source and minimum severity.", PServer(), PHours(4), PText("source"), PDouble("min_severity", 0), PAsOf()),
+            ["get_analysis_findings"] = R(CatAnalysis, "Persisted analysis findings for a server.", PServer(), PHours(24), PAsOf()),
 
             /* ── sessions (DarlingMcpSessionTools) ── */
             ["get_active_queries"] = R(CatSessions, "Currently-active queries, optionally blocking-only.", PServer(), PHours(1), PText("database_name"), PBool("blocking_only", false), PLimit(50), PAsOf()),
@@ -1519,9 +1519,9 @@ public static class DarlingWebEndpoints
         {
             /* ── analysis reads (take the DarlingAnalysisService) ── */
             ["audit_config"] = (c, pg, an) => DarlingMcpTools.AuditConfig(an, pg, Server(c)),
-            ["compare_analysis"] = (c, pg, an) => DarlingMcpTools.CompareAnalysis(an, pg, Server(c), Hours(c, 4), QueryInt(c, "baseline_hours_back", null, 28)),
-            ["get_analysis_facts"] = (c, pg, an) => DarlingMcpTools.GetAnalysisFacts(an, pg, Server(c), Hours(c, 4), Str(c, "source"), QueryDouble(c, "min_severity", 0)),
-            ["get_analysis_findings"] = (c, pg, an) => DarlingMcpTools.GetAnalysisFindings(an, pg, Server(c), Hours(c, 24), QueryBool(c, "include_drilldown", false)),
+            ["compare_analysis"] = (c, pg, an) => DarlingMcpTools.CompareAnalysis(an, pg, Server(c), Hours(c, 4), QueryInt(c, "baseline_hours_back", null, 28), as_of: AsOf(c)),
+            ["get_analysis_facts"] = (c, pg, an) => DarlingMcpTools.GetAnalysisFacts(an, pg, Server(c), Hours(c, 4), Str(c, "source"), QueryDouble(c, "min_severity", 0), as_of: AsOf(c)),
+            ["get_analysis_findings"] = (c, pg, an) => DarlingMcpTools.GetAnalysisFindings(an, pg, Server(c), Hours(c, 24), QueryBool(c, "include_drilldown", false), as_of: AsOf(c)),
 
             /* ── sessions ── */
             ["get_active_queries"] = (c, pg, an) => DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), Str(c, "database_name"), QueryBool(c, "blocking_only", false), Rows(c, "limit", 50), as_of: AsOf(c)),

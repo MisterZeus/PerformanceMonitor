@@ -50,6 +50,40 @@ public class AnalysisContext
     public TimeSpan ServerUtcOffset { get; set; }
 
     /// <summary>
+    /// The explicit UTC instant this pass's window was anchored at (#2506's <c>as_of</c>), or null when
+    /// the window simply ends at "now". Null is the ONLY shape the scheduled worker, the WPF viewers and
+    /// the alerting path ever produce, so every one of them keeps its behaviour untouched.
+    ///
+    /// <para>It is carried rather than inferred because <see cref="TimeRangeEnd"/> cannot answer the
+    /// question: a scheduled pass's end is "now" and an anchored pass's end can be a second ago, and the
+    /// two are indistinguishable by value. <see cref="PersistFindings"/> is the decision that needs the
+    /// answer, and getting it from a comparison against the clock would make persistence depend on how
+    /// long the pass took to start.</para>
+    /// </summary>
+    public DateTime? AsOfUtc { get; set; }
+
+    /// <summary>
+    /// Whether this pass's findings are WRITTEN to the store. False for exactly one reason: the window was
+    /// anchored at a past instant, which makes the pass exploratory by definition.
+    ///
+    /// <para><b>Why the engine refuses instead of the caller remembering to ask.</b> A finding row's
+    /// identity, for every consumer we have, is its <c>analysis_time</c> — the moment the pass ran, not the
+    /// window it looked at. The viewers' Recommendations tab reads <c>MAX(analysis_time)</c> and calls the
+    /// result the server's CURRENT state; the findings read filters on <c>analysis_time</c> and then
+    /// collapses on <c>(story_path_hash, incident_id)</c> to produce occurrences / first_seen / last_seen /
+    /// peak_severity. So a backdated pass stamped now would (a) become "what is wrong with this server" for
+    /// every human looking at the viewer and (b) inflate the very occurrence stats an operator uses to
+    /// decide whether a live incident is getting worse — caused, invisibly, by somebody else's exploratory
+    /// read. Recording the window on the row does not fix either: <c>time_range_start</c>/
+    /// <c>time_range_end</c> are ALREADY persisted and already returned, and no consumer filters on them.
+    ///
+    /// <para>Making it a derived rule rather than a settable flag is the point. There is no legitimate
+    /// caller for "anchored AND persist", so there must be no way to express it — including for the next
+    /// caller, who will not have read this comment.</para></para>
+    /// </summary>
+    public bool PersistFindings => AsOfUtc is null;
+
+    /// <summary>
     /// Duration of the examined period in milliseconds.
     /// </summary>
     public double PeriodDurationMs => (TimeRangeEnd - TimeRangeStart).TotalMilliseconds;

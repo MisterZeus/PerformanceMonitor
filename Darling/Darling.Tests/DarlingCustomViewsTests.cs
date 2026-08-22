@@ -193,7 +193,7 @@ public sealed class DarlingCustomViewsTests
         AssertParamKeys("get_wait_trend", "wait_type", "server", "hours", "as_of");
         AssertParamKeys("get_plan_xml", "query_hash", "server", "database_name");
         AssertParamKeys("get_top_queries_by_cpu", "server", "hours", "top", "database_name", "parallel_only", "min_dop", "as_of");
-        AssertParamKeys("compare_analysis", "server", "hours", "baseline_hours_back");
+        AssertParamKeys("compare_analysis", "server", "hours", "baseline_hours_back", "as_of");
         AssertParamKeys("get_fleet_overview", "hours");
         AssertParamKeys("list_servers");
     }

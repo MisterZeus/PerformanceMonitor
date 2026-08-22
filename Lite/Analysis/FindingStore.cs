@@ -67,6 +67,20 @@ public class FindingStore
 {
     private readonly DuckDbInitializer _duckDb;
 
+    /// <summary>
+    /// What <see cref="GetRecentFindingsAsync"/>'s upper bound is when the caller did NOT anchor: an
+    /// instant no row can reach, i.e. no bound at all. Matches the Darling twin's PgFindingStore.
+    ///
+    /// <para><b>Why not "now".</b> Two reasons, and the second is the one that would have hurt. First,
+    /// #2495's promise is that a caller sending only <c>hours_back</c> gets byte-for-byte the window it
+    /// always got, and this read has been half-open for its whole life. Second, <c>analysis_time</c> is
+    /// stamped by the WRITER's clock and would be filtered by the READER's; those are the same process
+    /// today, and the day they are not, a bounded default read would intermittently drop the newest run
+    /// — a findings read that "sometimes misses the analysis that just finished", with nothing in it to
+    /// point at a clock. An anchored read has a caller-supplied end and neither problem.</para>
+    /// </summary>
+    private static readonly DateTime NoUpperBound = new(9999, 12, 31, 23, 59, 59);
+
     public FindingStore(DuckDbInitializer duckDb)
     {
         _duckDb = duckDb;
@@ -274,15 +288,30 @@ public class FindingStore
     /// does not exist. Matches the Darling twin's PgFindingStore exactly.</para>
     /// </summary>
     public async Task<List<AnalysisFinding>> GetRecentFindingsAsync(
-        int serverId, int hoursBack = 24, int limit = 100)
+        int serverId, int hoursBack = 24, int limit = 100, DateTime? asOfUtc = null)
     {
         var findings = new List<AnalysisFinding>();
+
+        /* #2506: the window's END, from which the START is measured. Null is "now" — the pre-#2506
+           read exactly. */
+        var windowEnd = asOfUtc ?? DateTime.UtcNow;
 
         using var readLock = _duckDb.AcquireReadLock();
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync();
 
         using var cmd = connection.CreateCommand();
+
+        /*
+            #2506 added the UPPER bound ($3). Without it the read had a start and no end, so an as_of
+            anchor could only ever move the window's start EARLIER and every anchored read would still
+            return everything up to now — the anchor validated, the caller told the window had moved,
+            and the answer unchanged. That is the exact defect this convention exists to prevent, so
+            the bound is part of the read rather than something the caller filters afterwards.
+
+            It binds ONLY when the caller anchored; unanchored, $3 is NoUpperBound and the read is the
+            half-open window it has always been. See that field for why "now" is the wrong default.
+        */
         cmd.CommandText = @"
 SELECT finding_id, analysis_time, server_id, server_name, database_name,
        time_range_start, time_range_end, severity, confidence, category,
@@ -292,11 +321,13 @@ SELECT finding_id, analysis_time, server_id, server_name, database_name,
 FROM analysis_findings
 WHERE server_id = $1
 AND   analysis_time >= $2
+AND   analysis_time <= $3
 ORDER BY analysis_time DESC, severity DESC
-LIMIT $3";
+LIMIT $4";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
-        cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-hoursBack) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = windowEnd.AddHours(-hoursBack) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = asOfUtc is null ? NoUpperBound : windowEnd });
         cmd.Parameters.Add(new DuckDBParameter { Value = limit });
 
         using var reader = await cmd.ExecuteReaderAsync();

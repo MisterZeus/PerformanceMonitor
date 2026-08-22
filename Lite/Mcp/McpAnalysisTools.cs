@@ -11,23 +11,30 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpAnalysisTools
 {
-    [McpServerTool(Name = "analyze_server"), Description("Runs the diagnostic inference engine against a server's collected data. Scores wait stats, blocking, memory, config, and other facts, then traverses a relationship graph to build evidence-backed stories about what's wrong and why. Anomaly detection compares the analysis window against 30-day time-bucketed baselines (hour-of-day x day-of-week) to identify deviations that are unusual for this specific time slot, not just unusual overall. Returns structured findings with severity scores, evidence chains, baseline context for anomalies, and recommended next tools to call. A remediable finding also carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed. A force-plan remediation additionally carries structured_remediation: the same decision as machine-readable fields — eligible, named blockers (parameter_sensitivity_cofired, secondary_replica_evidence), evidence numbers, and split force_sql/unforce_sql/verify_sql artifacts — so agents consume the verdict as data instead of parsing comment prose.")]
+    [McpServerTool(Name = "analyze_server"), Description("Runs the diagnostic inference engine against a server's collected data. Scores wait stats, blocking, memory, config, and other facts, then traverses a relationship graph to build evidence-backed stories about what's wrong and why. Anomaly detection compares the analysis window against 30-day time-bucketed baselines (hour-of-day x day-of-week) to identify deviations that are unusual for this specific time slot, not just unusual overall. Returns structured findings with severity scores, evidence chains, baseline context for anomalies, and recommended next tools to call. A remediable finding also carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed. A force-plan remediation additionally carries structured_remediation: the same decision as machine-readable fields — eligible, named blockers (parameter_sensitivity_cofired, secondary_replica_evidence), evidence numbers, and split force_sql/unforce_sql/verify_sql artifacts — so agents consume the verdict as data instead of parsing comment prose. Set as_of to analyze a PAST window instead of the present — hours_back stays the window's LENGTH, and the anomaly baseline moves with it, so the findings are the ones that window deserves rather than today's findings over older rows. An anchored run is EXPLORATORY: its findings are returned in full but deliberately NOT written to the store, because a finding row is stamped with the time the analysis RAN and would then be read as this server's current state by get_analysis_findings and by the viewer. The result says so in persisted / persistence_note.")]
     public static async Task<string> AnalyzeServer(
         AnalysisService analysisService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of data to analyze. Default 4. Longer windows give more stable results but may miss recent spikes.")] int hours_back = 4)
+        [Description("Hours of data to analyze. Default 4. Longer windows give more stable results but may miss recent spikes.")] int hours_back = 4,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
+
+        /* Null when the caller sent no anchor, and that distinction is load-bearing here rather than
+           cosmetic: ValidateWindow hands back "now" for an absent as_of, and passing THAT through would
+           make every ordinary run look anchored to the engine — which is exactly the set of runs that
+           must still persist. AnalysisContext.AsOfUtc means "anchored", not "the window ends somewhere". */
+        var anchor = string.IsNullOrWhiteSpace(as_of) ? (DateTime?)null : windowEnd;
 
         try
         {
             var findings = await analysisService.AnalyzeAsync(
-                resolved.ServerId, resolved.ServerName, hours_back);
+                resolved.ServerId, resolved.ServerName, hours_back, asOfUtc: anchor);
 
             if (analysisService.InsufficientDataMessage != null)
             {
@@ -39,6 +46,15 @@ public sealed class McpAnalysisTools
                 }, McpHelpers.JsonOptions);
             }
 
+            /* #2506: whether this run's findings reached the store, and why not when they did not.
+               Reported rather than left to the documentation because the caller cannot otherwise tell:
+               an anchored run returns a complete, correct set of findings that simply does not exist in
+               analysis_findings, and an agent that assumed otherwise would tell someone to "check the
+               persisted findings" for a run that never wrote any. */
+            var persistenceNote = anchor is null
+                ? null
+                : "as_of was supplied, so this analysis ran over a PAST window and is exploratory: the findings below are complete but were NOT written to the store. A finding row carries the time the analysis RAN, and the reads that consume those rows (get_analysis_findings, the viewer's Recommendations tab) treat the newest analysis_time as this server's CURRENT state — so persisting a backdated run would make last week's findings today's headline and would inflate the occurrence stats of any live incident sharing a story path. Re-run without as_of to analyze and persist the present.";
+
             if (findings.Count == 0)
             {
                 /* A successful analysis that found nothing wrong: a true negative ("all clear"),
@@ -46,7 +62,12 @@ public sealed class McpAnalysisTools
                 return McpHelpers.Status(
                     "empty",
                     "No significant findings. All metrics are within normal ranges.",
-                    new { analysis_time = analysisService.LastAnalysisTime?.ToString("o") });
+                    new
+                    {
+                        analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
+                        persisted = anchor is null,
+                        persistence_note = persistenceNote
+                    });
             }
 
             // Correlate-and-focus slice 1 (review §1d): each finding's "what else fired this window".
@@ -60,6 +81,10 @@ public sealed class McpAnalysisTools
                 status = "findings",
                 finding_count = findings.Count,
                 analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
+                persisted = anchor is null,
+                /* Null on the ordinary unanchored run — nothing needs saying when the answer is the
+                   one every caller already assumed. */
+                persistence_note = persistenceNote,
                 time_range = new
                 {
                     start = findings[0].TimeRangeStart?.ToString("o"),
@@ -130,18 +155,23 @@ public sealed class McpAnalysisTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of data to analyze. Default 4.")] int hours_back = 4,
         [Description("Filter to a specific source category: waits, blocking, config, memory. Omit for all.")] string? source = null,
-        [Description("Minimum severity to include. Default 0 (all facts). Use 0.5 to see only significant facts.")] double min_severity = 0)
+        [Description("Minimum severity to include. Default 0 (all facts). Use 0.5 to see only significant facts.")] double min_severity = 0,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
+
+        /* Null for an absent anchor — see analyze_server's note. Nothing here persists, so the
+           distinction costs nothing; it is kept so AnalysisContext.AsOfUtc means one thing everywhere. */
+        var anchor = string.IsNullOrWhiteSpace(as_of) ? (DateTime?)null : windowEnd;
 
         try
         {
             var facts = await analysisService.CollectAndScoreFactsAsync(
-                resolved.ServerId, resolved.ServerName, hours_back);
+                resolved.ServerId, resolved.ServerName, hours_back, asOfUtc: anchor);
 
             if (facts.Count == 0)
             {
@@ -202,12 +232,13 @@ public sealed class McpAnalysisTools
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours back for the comparison (recent) period. Default 4.")] int hours_back = 4,
-        [Description("Hours back for the baseline period start, measured from now. Default 28 (yesterday same time). The baseline period will be the same duration as the comparison period.")] int baseline_hours_back = 28)
+        [Description("Hours back for the baseline period start, measured from the end of the comparison window (now, or as_of). Default 28 (yesterday same time). The baseline period will be the same duration as the comparison period.")] int baseline_hours_back = 28,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateHoursBack(baseline_hours_back);
         if (validation != null) return validation;
@@ -217,11 +248,13 @@ public sealed class McpAnalysisTools
 
         try
         {
-            var now = DateTime.UtcNow;
-            var comparisonEnd = now;
-            var comparisonStart = now.AddHours(-hours_back);
-            var baselineEnd = now.AddHours(-baseline_hours_back + hours_back);
-            var baselineStart = now.AddHours(-baseline_hours_back);
+            /* BOTH windows hang off the anchor, not just the comparison one — baseline_hours_back has
+               always been measured from the comparison window's end, and moving only that end would
+               silently change what the two windows are relative to each other. */
+            var comparisonEnd = windowEnd;
+            var comparisonStart = windowEnd.AddHours(-hours_back);
+            var baselineEnd = windowEnd.AddHours(-baseline_hours_back + hours_back);
+            var baselineStart = windowEnd.AddHours(-baseline_hours_back);
 
             var (baselineFacts, comparisonFacts) = await analysisService.ComparePeriodsAsync(
                 resolved.ServerId, resolved.ServerName,
@@ -550,20 +583,30 @@ public sealed class McpAnalysisTools
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of finding history to retrieve. Default 24.")] int hours_back = 24,
-        [Description("If true, each finding carries drill_down: the persisted evidence rows (e.g. the parameter-sensitive plans, top spill queries) behind the chain's latest occurrence. Default false - the rows can be bulky and the summary usually suffices.")] bool include_drilldown = false)
+        [Description("If true, each finding carries drill_down: the persisted evidence rows (e.g. the parameter-sensitive plans, top spill queries) behind the chain's latest occurrence. Default false - the rows can be bulky and the summary usually suffices.")] bool include_drilldown = false,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
+
+        /* Null for an absent anchor — see analyze_server's note. */
+        var anchor = string.IsNullOrWhiteSpace(as_of) ? (DateTime?)null : windowEnd;
 
         try
         {
             /* #2000: the window-covering limit, not the store default 100 — occurrence stats
-               computed over a silently-truncated read would lie about first_seen/occurrences. */
+               computed over a silently-truncated read would lie about first_seen/occurrences.
+
+               #2506: the window is on ANALYSIS TIME — when the scheduled pass ran — so an anchor here
+               asks "what was analysis saying about this server then", which is a different question
+               from "analyze that window now" (that is analyze_server with the same anchor). Both are
+               worth having: this one is the historical record and cannot change, the other recomputes
+               from whatever rows the store still holds. */
             var findings = await analysisService.GetRecentFindingsAsync(
-                resolved.ServerId, hours_back, FindingOccurrences.WindowCoveringLimit);
+                resolved.ServerId, hours_back, FindingOccurrences.WindowCoveringLimit, asOfUtc: anchor);
 
             if (findings.Count == 0)
             {
