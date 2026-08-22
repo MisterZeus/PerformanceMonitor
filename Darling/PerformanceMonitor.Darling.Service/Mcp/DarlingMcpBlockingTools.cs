@@ -404,7 +404,10 @@ public sealed class DarlingMcpBlockingTools
                 var captures = await DarlingBlockingTrendReader.GetDeadlockCaptureCountsAsync(
                     postgres, resolved.ServerId, start, now);
                 return await EmptyTrend(
-                    "deadlocks", resolved.ServerName, hours_back, captures,
+                    /* SINGULAR: the subject lands in "No {subject} was recorded", and "no deadlocks
+                       was recorded" is not a sentence. It also reads correctly in the other two,
+                       where it modifies the collector rather than the event. */
+                    "deadlock", resolved.ServerName, hours_back, captures,
                     () => DarlingBlockingTrendReader.HasAnyDeadlockCaptureAsync(postgres, resolved.ServerId));
             }
 
@@ -437,6 +440,7 @@ public sealed class DarlingMcpBlockingTools
     /// that number itself. Lite's twin returns the SAME sentences word for word.</para>
     /// </summary>
     private static async Task<string> EmptyTrend(
+        /* SINGULAR ("blocking", "deadlock"): it is the subject of "No {subject} was recorded". */
         string subject,
         string serverName,
         int hoursBack,

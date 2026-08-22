@@ -299,7 +299,10 @@ public sealed class McpBlockingTools
                 /* Same two facts as the blocking trend above, same denominator, same reason. */
                 var captures = await dataService.GetDeadlockCaptureCountsAsync(resolved.ServerId, hours_back);
                 return await EmptyTrend(
-                    "deadlocks", resolved.ServerName, hours_back, captures,
+                    /* SINGULAR: the subject lands in "No {subject} was recorded", and "no deadlocks
+                       was recorded" is not a sentence. It also reads correctly in the other two,
+                       where it modifies the collector rather than the event. */
+                    "deadlock", resolved.ServerName, hours_back, captures,
                     () => dataService.HasAnyDeadlockCaptureAsync(resolved.ServerId));
             }
 
@@ -335,6 +338,7 @@ public sealed class McpBlockingTools
     /// Darling's <c>DarlingMcpBlockingTools.EmptyTrend</c> returns the SAME sentences word for word.</para>
     /// </summary>
     private static async Task<string> EmptyTrend(
+        /* SINGULAR ("blocking", "deadlock"): it is the subject of "No {subject} was recorded". */
         string subject,
         string serverName,
         int hoursBack,
