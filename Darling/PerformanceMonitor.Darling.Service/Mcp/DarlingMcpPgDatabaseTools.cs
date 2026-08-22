@@ -229,20 +229,34 @@ public sealed class DarlingMcpPgDatabaseTools
                 total_temp_files = totalTempFiles,
                 total_temp_bytes = totalTempBytes,
                 total_deadlocks = totalDeadlocks,
-                cluster_cache_hit_pct = totalAccesses > 0
+                /* OF_RETURNED, not cluster_. Every total here is summed over the rows the read's LIMIT let
+                   through, so on a cluster with more active databases than `limit` this is a ratio over the
+                   top-N and NOT the instance's. The name says which, because a `cluster_` prefix would be a
+                   number that silently changes when a caller raises the limit - a field claiming more
+                   comprehensiveness than it structurally has. Computing the true instance ratio would cost a
+                   second unfiltered aggregate on every call for a figure the per-database rows already
+                   support, so the honest name is the fix rather than the extra query. */
+                cache_hit_pct_of_returned = totalAccesses > 0
                     ? Math.Round((double)totalHits / totalAccesses * 100, 2)
                     : (double?)null,
+                /* And the discriminator that makes the caveat actionable rather than fine print: when the
+                   limit bit, the caller knows the totals are a top-N and can raise it. */
+                limit_reached = databases.Count >= limit,
                 /* Named at the top so a reader sees it before drawing a conclusion from any total below. */
                 statistics_were_reset_in_window = resetsSeen > 0,
                 top_spiller = totalTempBytes > 0 ? databases[0].database : null,
-                note = resetsSeen > 0
+                note = (resetsSeen > 0
                     ? "All figures are windowed differences, clamped per interval so a statistics reset "
                     + "cannot produce a negative rate or a spike. At least one database's statistics WERE "
                     + "reset in this window - see stats_reset_count / counter_rewind_count per database - "
                     + "so its totals are lower bounds rather than exact counts."
                     : "All figures are windowed differences, clamped per interval so a statistics reset "
                     + "cannot produce a negative rate or a spike. No reset was detected in this window, so "
-                    + "the totals are complete for the samples collected.",
+                    + "the totals are complete for the samples collected.")
+                    + (databases.Count >= limit
+                        ? $" The row limit of {limit} was REACHED, so every total above covers only the "
+                        + "databases returned - more may have had activity. Raise limit for the full picture."
+                        : string.Empty),
                 databases,
             }, McpHelpers.JsonOptions);
         }

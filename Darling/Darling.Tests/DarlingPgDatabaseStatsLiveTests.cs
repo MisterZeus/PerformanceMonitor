@@ -268,6 +268,31 @@ public sealed class DarlingPgDatabaseStatsLiveTests
             Assert.Equal(5d / 305 * 100, spill.GetProperty("rollback_pct").GetDouble(), 2);
             Assert.Equal(90_000_000 / 9, spill.GetProperty("avg_temp_file_bytes").GetInt64());
 
+            /* ── the totals are scoped to the rows the LIMIT let through, and the payload says so ──
+
+               Every total is a sum over the returned rows, so on a cluster with more active databases than
+               `limit` the hit ratio is a top-N figure and not the instance's. That is why the field is
+               cache_hit_pct_of_returned rather than cluster_*: a `cluster_` name is one a caller could
+               change by raising the limit. Asserted by TRUNCATING deliberately — with four databases
+               active and a limit of two, the read must disclose the cut rather than quietly presenting a
+               partial sum as the whole. */
+            var truncated = JsonDocument.Parse(
+                await DarlingMcpPgDatabaseTools.GetPgDatabaseStats(dataSource, ServerName, 4, 2)).RootElement;
+
+            Assert.Equal(2, truncated.GetProperty("database_count").GetInt32());
+            Assert.True(truncated.GetProperty("limit_reached").GetBoolean());
+            Assert.Contains("row limit of 2 was REACHED", truncated.GetProperty("note").GetString()!, StringComparison.Ordinal);
+
+            /* The unlimited call must NOT claim truncation — the flag has to discriminate, or it is
+               decoration that would read as a permanent caveat on every answer. */
+            Assert.False(hit.GetProperty("limit_reached").GetBoolean());
+            Assert.DoesNotContain("was REACHED", hit.GetProperty("note").GetString()!, StringComparison.Ordinal);
+
+            /* The name itself, pinned: a rename back to cluster_* would restore exactly the overclaim this
+               replaced, and no arithmetic assertion could see it. */
+            Assert.False(hit.TryGetProperty("cluster_cache_hit_pct", out _));
+            Assert.True(hit.TryGetProperty("cache_hit_pct_of_returned", out _));
+
             /* ── the anchor reaches the query, proven by CONTENT ──
 
                A window before any of this exists returns no rows, and the answer must be the GAP wording
