@@ -49,10 +49,11 @@ public sealed class ViewerCollectorCoverageTests
         // store), so it is covered by the reader-layer scan and needs no allow-list entry.
 
         // UNBUILT UI (parity board Tier 1) -- remove each when the PostgreSQL tab ships.
-        // The eight PostgreSQL collector tables are read through MCP today, not the WPF viewer: each has a
+        // The nine PostgreSQL collector tables are read through MCP today, not the WPF viewer: each has a
         // reader class + MCP tool (get_pg_wait_stats, get_pg_top_queries, get_pg_wraparound_risk,
         // get_pg_xmin_horizon, get_pg_replication_slots, get_pg_autovacuum_health, get_pg_io_stats,
-        // get_pg_blocking) and is exposed over /api/read, so the data is not invisible — it is just not on a
+        // get_pg_blocking, get_pg_database_stats) and is exposed over /api/read, so the data is not
+        // invisible — it is just not on a
         // WPF tab, because the viewer's surfaces are SQL-Server-shaped and a PostgreSQL target's signals do
         // not slot into them. Deliberately listed one per line so removing one at a time is a one-line diff.
         "pg_wait_stats",
@@ -68,6 +69,10 @@ public sealed class ViewerCollectorCoverageTests
         // Rendering samples through a surface labelled as an event log would misrepresent coverage, which is
         // a worse outcome than the tab not existing yet.
         "pg_blocking_edges",
+        // pg_database_stats (#2539) is read by get_pg_database_stats over /api/read, not by a WPF tab, for
+        // the same reason as the seven above: the viewer's surfaces are SQL-Server-shaped and there is no
+        // tab whose meaning survives being pointed at a PostgreSQL target.
+        "pg_database_stats",
     };
 
     [Fact]
