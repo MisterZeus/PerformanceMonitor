@@ -1158,6 +1158,30 @@ ORDER BY collection_time";
     }
 
     /// <summary>
+    /// Whether this server has EVER recorded a query-stats sample, ignoring any window.
+    /// <para>Lets an empty query-duration trend say WHICH kind of nothing it found — see
+    /// <c>LocalDataService.HasAnyMemoryStatAsync</c> for the reasoning. Reads <c>v_query_stats</c>, the
+    /// same source <see cref="GetQueryDurationTrendAsync"/> reads here. Darling's twin probes the BASE
+    /// <c>query_stats</c> table instead, because ITS duration trend does — on a Darling store
+    /// <c>v_query_stats</c> is the payload-resolving view rather than a passthrough. Each probe follows
+    /// its own read; the SENTENCES the two SKUs return are identical, which is what the caller sees.</para>
+    /// </summary>
+    public async Task<bool> HasAnyQueryStatAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT 1
+FROM v_query_stats
+WHERE server_id = $1
+LIMIT 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return await command.ExecuteScalarAsync() is not null and not DBNull;
+    }
+
+    /// <summary>
     /// Gets procedure duration trend — elapsed time per second per collection snapshot.
     /// </summary>
     public async Task<List<QueryTrendPoint>> GetProcedureDurationTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)

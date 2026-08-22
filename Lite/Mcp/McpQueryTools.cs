@@ -286,6 +286,21 @@ public sealed class McpQueryTools
             if (hoursError != null) return hoursError;
 
             var points = await dataService.GetQueryDurationTrendAsync(resolved.ServerId, hours_back);
+
+            if (points.Count == 0)
+            {
+                /* Same two states again, same words as Darling's twin. The probe reads v_query_stats
+                   because THIS trend does; Darling's probes the base table because ITS trend does. Each
+                   probe follows its own read — what the caller sees is one sentence, not two. */
+                return await dataService.HasAnyQueryStatAsync(resolved.ServerId)
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"No query samples recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected query stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
+                    : McpHelpers.Status(
+                        "unavailable",
+                        $"No query stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the query_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_top_queries_by_cpu will be equally empty until it does.");
+            }
+
             var result = points.Select(p => new
             {
                 time = p.CollectionTime.ToString("o"),
