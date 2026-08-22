@@ -174,6 +174,36 @@ Use the same `env:`/`file:` secret references (systemd `LoadCredential=` pairs n
 
 **Scripted (recommended):** the packaged zips ship `install-darling.ps1` beside the service exe. Extract the zip to its final location (e.g. `C:\PerformanceMonitorDarling`), then from an elevated PowerShell in that folder run `.\install-darling.ps1`. It checks the install location and refuses anywhere the service could not read itself (see [below](#the-install-location-has-to-be-machine-scoped)), checks for `darling.json` (copying the sample and stopping for you to edit it on first run), runs the `--test-connection` pre-flight, registers the Event Log source, creates the service under the virtual account (or upgrades an existing install's binPath in place, preserving config/store/credentials), starts it, and creates Desktop + Start Menu **Darling Viewer** shortcuts (pin to taskbar from the Start Menu entry — Windows does not allow programmatic pinning). `uninstall-darling.ps1` reverses it, deliberately leaving the store/config in place unless you pass `-PurgeData`.
 
+#### Upgrading an existing install
+
+`install-darling.ps1` registers a service; it does not lay a new build over an old one. That step — stop, back up, copy, start, verify — is `upgrade-darling.ps1`, shipped in the same zip.
+
+Extract the new zip to a **staging** folder and run *its* copy:
+
+```powershell
+Expand-Archive PerformanceMonitorDarling-3.5.1.zip -DestinationPath C:\staging\3.5.1
+C:\staging\3.5.1\upgrade-darling.ps1 -Source C:\staging\3.5.1
+```
+
+It resolves the install directory from the registered service, verifies the zip's SHA256 when you point it at one (`-Source ...\PerformanceMonitorDarling-3.5.1.zip`, checked against `-Sha256` or a `SHA256SUMS.txt` beside it), backs the install root's files up to `_rollback_manual_<stamp>`, prunes the backups past the newest `-KeepRollbacks` (3), lays the new build down, confirms `darling.json` is byte-identical, and starts the service. Re-running after a failure is safe and is the intended recovery: a backup taken in the last `-BackupWindowMinutes` (60) is reused rather than replaced, so a re-run cannot overwrite the good pre-upgrade copy with a copy of a half-upgraded tree.
+
+**It never kills a process**, and it checks for them twice. Before stopping anything it names processes running out of the install tree that a service stop will *not* close — your own `psql.exe`, a shell sitting in the folder, a Darling Viewer you left open — and refuses, costing nothing but a re-run. After the service is down it checks again with no exclusions; anything still there is usually a postmaster that outlived the stop, and that is exactly what must not be killed (the bundled PostgreSQL lives under `pg-runtime` and killing it takes the store down). Give it a few seconds and re-run.
+
+**A rollback backup holds the install root's *files*, not `viewer\`, `wwwroot\`, `runtimes\` or `pg-runtime\`** — that is what keeps one to ~120 MB instead of ~1 GB. It matters in one case: if a copy dies partway, those subdirectories can be left mixed old-and-new, and a full revert is the *previous version's zip re-extracted* followed by the backup's files over the top. The script says so at the point of failure.
+
+It **refuses to run from the install directory itself** — the copy would overwrite the script PowerShell is reading — which is why the staging folder above is not optional.
+
+**Backups pile up, and nothing used to remove them.** A dogfood box was found carrying 46 of them, 5.48 GB, the oldest three weeks old, with the service naming every one on every start ([#2525](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2525)). Retention above fixes new deploys; boxes that already have a backlog clear it with the installed copy, which needs no staging folder and does not stop the service:
+
+```powershell
+C:\PerformanceMonitorDarling\upgrade-darling.ps1 -ListRollbacks   # show what would go
+C:\PerformanceMonitorDarling\upgrade-darling.ps1 -PruneOnly       # remove all but the newest 3
+```
+
+The service reports the set once per start with a count, a total and that command — informational while you are within retention, a warning past it. It never deletes one itself: it did not create them.
+
+**The install is not verified when the service reaches Running.** That means the process started, not that it collects. The script prints the post-start checklist; work it about 10–15 minutes later against the store, and hold the upgrade unverified until every line passes.
+
 #### The install location has to be machine-scoped
 
 Extract to a local, machine-scoped path — `C:\PerformanceMonitorDarling` is the documented one. **Not** anywhere under a user profile (`C:\Users\...`, including your Desktop or Downloads), and not a UNC path or a mapped drive.
