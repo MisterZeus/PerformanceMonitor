@@ -109,6 +109,102 @@ public sealed class ServerPageTabsTests
     }
 
     /// <summary>
+    /// Every REQUIRED parameter of a read the page fetches is one the page actually sends.
+    ///
+    /// <para>The pin above is the other half of this, and on its own it cannot see the failure that matters here.
+    /// It asks whether every key sent is bound; a read fetched with NO key at all sends nothing wrong and passes
+    /// it vacuously. Four reads in the catalog carry required params — <c>get_wait_trend</c>,
+    /// <c>get_perfmon_trend</c>, <c>get_plan_xml</c> and <c>get_query_trend</c> — and every one of them answers a
+    /// request that omits its key with a 400 inside one panel, which is exactly the shape of failure this class
+    /// exists to catch by inspection rather than at runtime.</para>
+    ///
+    /// <para>Written when #2520 put the first two-required-key read on the page: <c>get_query_trend</c> needs a
+    /// <c>query_hash</c> AND a <c>database_name</c>, so a drill-down that wired up one of them would look
+    /// finished, parse, render its picker, and return a 400 on every selection. Both sides are derived —
+    /// <c>CatalogDescriptors</c> for what is required, the shipped module for what is sent — so neither can
+    /// drift into agreeing with a stale copy of the other.</para>
+    /// </summary>
+    [Fact]
+    public void EveryRequiredParameter_OfAReadThePageFetches_IsSent()
+    {
+        var problems = new List<string>();
+
+        foreach (var (read, keys) in ParamsSentIn(ServerTabsJs))
+        {
+            if (!DarlingWebEndpoints.CatalogDescriptors.TryGetValue(read, out var descriptor))
+            {
+                continue; // the read-existence pin owns this failure and names it better.
+            }
+
+            var sent = keys.ToHashSet(StringComparer.Ordinal);
+            foreach (var missing in descriptor.Params.Where(p => p.Required && !sent.Contains(p.Name)))
+            {
+                problems.Add($"{read} is fetched without its required '{missing.Name}' — that panel 400s at runtime");
+            }
+        }
+
+        Assert.True(problems.Count == 0, string.Join("; ", problems));
+
+        /* And the guard is only worth having if some read on the page actually has a required param — otherwise
+           it passes for the wrong reason and would keep passing after the drill-down was deleted. */
+        var required = ParamsSentIn(ServerTabsJs)
+            .Where(p => DarlingWebEndpoints.CatalogDescriptors.ContainsKey(p.Read))
+            .SelectMany(p => DarlingWebEndpoints.CatalogDescriptors[p.Read].Params.Where(x => x.Required))
+            .ToArray();
+        Assert.NotEmpty(required);
+    }
+
+    /// <summary>
+    /// The per-query drill-down offers exactly the queries the table above it shows (#2520).
+    ///
+    /// <para><c>get_query_trend</c> was the one read in the catalog whose absence from the web was missing UI
+    /// rather than a stated boundary: it keys on a required <c>query_hash</c> plus a required
+    /// <c>database_name</c>, every other panel on this page fetches with nothing but a server and a window, so
+    /// there was no query_hash anywhere on the surface to send. The Queries tab's Top Queries table now carries
+    /// a picker, in the shape the Wait Stats tab already established.</para>
+    ///
+    /// <para><b>The rule this pins is the one waitsPanel wrote down.</b> <c>get_wait_types</c> is deliberately
+    /// not read there because it returns the full distinct set and would offer wait types absent from the
+    /// table, making the two disagree. The same rule binds here, and it is enforced by construction rather than
+    /// by care: the picker's option VALUE is the row's index into the very array the table rendered, so the
+    /// query trended is the same array element the reader is looking at — not a matching name that a second,
+    /// broader read happened to supply. So the composite is asserted to fetch exactly two reads: the table's,
+    /// and the trend. A third would be the "list every query" read this design exists to refuse.</para>
+    /// </summary>
+    [Fact]
+    public void TheQueryDrillDown_OffersOnlyTheQueriesTheTableAboveItShows()
+    {
+        var js = ServerTabsJs;
+
+        /* The composite spans from its own definition to pickerControl's doc comment, which follows it. */
+        var at = js.IndexOf("export function topQueriesPanel", StringComparison.Ordinal);
+        Assert.True(at > 0, "topQueriesPanel is gone — remap this test before editing it");
+        var end = js.IndexOf("/**\n * A labelled <select>", at, StringComparison.Ordinal);
+        Assert.True(end > at, "pickerControl no longer follows the composite — remap this test before editing it");
+        var region = js[at..end];
+
+        Assert.Equal(
+            new[] { "get_query_trend", "get_top_queries_by_cpu" },
+            ReadNamesIn(region).OrderBy(n => n, StringComparer.Ordinal).ToArray());
+
+        /* The picker is seeded from THAT payload's rows, and an option's value indexes into them. This is the
+           mechanism, not a paraphrase of it: replace either line with a second read and the assert above goes
+           red, replace the index with a name lookup and these do. */
+        Assert.Contains("const queries = res.data.queries || [];", region, StringComparison.Ordinal);
+        Assert.Contains("if (q.query_hash && q.database_name) trendable.push({ rank: i + 1, query: q });", region, StringComparison.Ordinal);
+        Assert.Contains("value: String(i),", region, StringComparison.Ordinal);
+        Assert.Contains("trendable[Number(i)].query", region, StringComparison.Ordinal);
+
+        /* And both required keys come off the selected row rather than from anywhere else. */
+        Assert.Contains("query_hash: query.query_hash,", region, StringComparison.Ordinal);
+        Assert.Contains("database_name: query.database_name,", region, StringComparison.Ordinal);
+
+        /* The Queries tab reaches it, and get_wait_types stays unread for the reason waitsPanel gives. */
+        Assert.Contains("topQueriesPanel(server, ctx),", js, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"get_wait_types\"", js, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The page speaks the catalog's canonical time key. Both <c>hours</c> and <c>hours_back</c> reach the same
     /// binding, so this is a consistency rule rather than a correctness one — but it is the rule that keeps the
     /// pin above meaningful: with two spellings in play, a reviewer cannot tell a deliberate alias from a typo
@@ -302,6 +398,7 @@ public sealed class ServerPageTabsTests
             ["waitsPanel("] = new[] { "get_wait_stats", "get_wait_trend" },
             ["fileIoPanel("] = new[] { "get_file_io_trend" },
             ["perfmonPanel("] = new[] { "get_perfmon_stats", "get_perfmon_trend" },
+            ["topQueriesPanel("] = new[] { "get_top_queries_by_cpu", "get_query_trend" },
         };
         foreach (var (call, reads) in composites)
         {

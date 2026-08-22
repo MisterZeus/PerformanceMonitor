@@ -33,7 +33,7 @@
  * here (query text, XML) build a <pre> through el() and never touch innerHTML.
  */
 
-import { el, readTool, mount, loadingStrip, errorStrip, emptyStrip, disclosure, noticeStrip } from "../util.js";
+import { el, readTool, mount, truncate, loadingStrip, errorStrip, emptyStrip, disclosure, noticeStrip } from "../util.js";
 import { renderPanel, VIZ } from "../panels.js";
 import { renderLineChart, SERIES_COLORS } from "../charts.js";
 
@@ -231,15 +231,140 @@ async function drawPerfmonTrend(slot, server, ctx, counterName) {
   );
 }
 
-/** A labelled <select> over a list of strings, calling back with the chosen value. Options are set through
- *  el()'s text path, so a counter or wait-type name from a monitored server can never become markup (R4). */
+/**
+ * Top Queries by CPU, plus that ONE query's per-collection history — the browser's per-query drill-down (#2520).
+ *
+ * The desktop viewer reaches this by double-clicking a Top Queries row, which opens QueryStatsHistoryWindow:
+ * the chosen query's metric chart over the window and a grid of its per-collection snapshots. This is the same
+ * drill-down with the selection made explicit, and it is the only way get_query_trend can be reached from a
+ * browser at all — the read requires BOTH a query_hash and a database_name, and every other panel on this page
+ * fetches with nothing but a server and a window, so there was no query_hash anywhere on the surface to send.
+ *
+ * THE PICKER IS SEEDED FROM THIS PAYLOAD'S OWN ROWS, in the order the table above it renders them, and an
+ * option's value is that row's index in the array the table drew. So the query being trended is by construction
+ * one of the queries shown — not merely the same query by name, the same array element. That is waitsPanel's
+ * rule (the reason get_wait_types is deliberately NOT read there) applied to queries: a second, broader "every
+ * query" read would offer queries absent from the table and make the two disagree, and a reader who cannot find
+ * the trended query in the table above has been given two answers, not one.
+ *
+ * The chart carries avg CPU and avg elapsed only. Both are milliseconds, so one y-domain holds them honestly,
+ * and both survive the hourly rollup this read falls back to past the raw tier's four days. The per-collection
+ * measures that do NOT survive it — executions, DOP, the plan hash — go in the grid below, where the read's
+ * null reads as the blank it is instead of flattening a chart to a zero nobody measured.
+ */
+export function topQueriesPanel(server, ctx) {
+  const { panel, body } = panelShell("Top Queries by CPU", ctx.label + ", with a per-collection trend for the query you pick");
+  (async () => {
+    const res = await readTool("get_top_queries_by_cpu", { server, hours: ctx.hours, top: 20 });
+    if (res.kind === "error") return mount(body, errorStrip(res.message));
+    if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+
+    const queries = res.data.queries || [];
+    const parts = [
+      VIZ.table(res.data, {
+        rowsKey: "queries",
+        columns: TOP_QUERY_COLUMNS,
+        emptyText:
+          "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) " +
+          "before it reports non-zero values.",
+      }),
+    ];
+
+    /* get_query_trend keys on both values, so a row carrying neither cannot be trended and is not offered.
+       That is a real case rather than defensive coding: rows collected before a column existed read as null,
+       and offering one would send a request the read answers with a 400 the reader cannot act on. The rank
+       kept here is the row's position in the TABLE, so the label points at a row the reader can see. */
+    const trendable = [];
+    queries.forEach((q, i) => {
+      if (q.query_hash && q.database_name) trendable.push({ rank: i + 1, query: q });
+    });
+
+    if (trendable.length) {
+      const chartSlot = el("div", {}, [loadingStrip()]);
+      const options = trendable.map((t, i) => ({
+        value: String(i),
+        label: "#" + t.rank + " · " + t.query.database_name + " · " + truncate(t.query.query_text || "(no statement text captured)", 60),
+      }));
+      const picker = pickerControl("Query", options, (i) => drawQueryTrend(chartSlot, server, ctx, trendable[Number(i)].query));
+      parts.push(el("div", { class: "picker-row" }, [picker]), chartSlot);
+      drawQueryTrend(chartSlot, server, ctx, trendable[0].query);
+    } else if (queries.length) {
+      parts.push(
+        emptyStrip(
+          "None of these rows carries both a query_hash and a database name, which is what get_query_trend " +
+            "keys on, so there is nothing here to trend."
+        )
+      );
+    }
+    mount(body, parts);
+  })();
+  return panel;
+}
+
+async function drawQueryTrend(slot, server, ctx, query) {
+  mount(slot, loadingStrip());
+  const trend = await readTool("get_query_trend", {
+    server,
+    query_hash: query.query_hash,
+    database_name: query.database_name,
+    hours: ctx.hours,
+  });
+  if (trend.kind !== "data") {
+    mount(slot, trend.kind === "empty" ? emptyStrip(trend.message) : errorStrip(trend.message));
+    return;
+  }
+
+  /* #2353: the read routes to the hourly rollup once the window reaches past the raw tier's four-day
+     retention, and reports which tier answered and how far it really reached. Those sentences are rendered
+     rather than dropped, because this page's range goes to 30 days: without them the DOP and plan-hash
+     columns simply go blank, and a blank column reads as "nothing to see" rather than "not measured here". */
+  const notes = [];
+  if (trend.data.aggregate_note) notes.push(trend.data.aggregate_note);
+  if (trend.data.truncated) {
+    notes.push(
+      "History for this query starts " +
+        trend.data.effective_hours_back +
+        " hours back, not the " +
+        trend.data.hours_back +
+        " the window asked for — earlier collections have aged out of the tier that answered."
+    );
+  }
+
+  mount(slot, [
+    notes.length ? noticeStrip(notes.join(" ")) : null,
+    renderLineChart({
+      points: trend.data.trend || [],
+      xKey: "collection_time",
+      series: [
+        { key: "avg_cpu_ms", label: "Avg CPU", color: SERIES_COLORS[0] },
+        { key: "avg_elapsed_ms", label: "Avg Elapsed", color: SERIES_COLORS[1] },
+      ],
+      formatValue: (v) => Math.round(v).toLocaleString() + " ms",
+      unit: "ms",
+    }),
+    VIZ.table(trend.data, {
+      rowsKey: "trend",
+      columns: QUERY_TREND_COLUMNS,
+      emptyText: "No collections recorded this query in the window the read could reach.",
+    }),
+  ]);
+}
+
+/**
+ * A labelled <select>, calling back with the chosen value. An option is a plain string when its value IS its
+ * label (a wait type, a counter name) and a {value, label} pair when it is not — the query picker's value is a
+ * row index, because a query has no short name to key on and its text is far too long to be one. Both the value
+ * and the label are set through el()'s text/attribute paths, so neither a counter name nor a statement captured
+ * from a monitored server can become markup (R4).
+ */
 function pickerControl(label, options, onPick) {
+  const items = options.map((o) => (typeof o === "string" ? { value: o, label: o } : o));
   const sel = el(
     "select",
     { class: "range-select-inline", "aria-label": label },
-    options.map((o) => el("option", { value: o, text: o }))
+    items.map((o) => el("option", { value: o.value, text: o.label }))
   );
-  sel.value = options[0];
+  sel.value = items[0].value;
   sel.addEventListener("change", () => onPick(sel.value));
   return el("label", { class: "range-control" }, [el("span", { text: label }), sel]);
 }
@@ -777,15 +902,10 @@ export const SERVER_TABS = [
             "read says so rather than showing an empty chart.",
         }
       ),
-      table(
-        "Top Queries by CPU",
-        "get_top_queries_by_cpu",
-        { server, hours: ctx.hours, top: 20 },
-        "queries",
-        TOP_QUERY_COLUMNS,
-        ctx.label,
-        "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes)."
-      ),
+      /* #2520: the same table this tab always had, now with the drill-down attached. The CPU tab keeps the
+         plain table — the drill-down belongs where the second question gets asked, and two of these would
+         mean two fetches of get_top_queries_by_cpu for one page's worth of the same twenty rows. */
+      topQueriesPanel(server, ctx),
       table(
         "Top Procedures by CPU",
         "get_top_procedures_by_cpu",
@@ -1397,6 +1517,24 @@ const TOP_QUERY_COLUMNS = [
   { key: "max_dop", label: "Max DOP", format: "int" },
   { key: "total_spills", label: "Spills", format: "int" },
   { key: "query_hash", label: "Query Hash", mono: true },
+];
+
+/* The per-collection snapshots get_query_trend returns, minus the two the chart already draws. Executions,
+   DOP and the plan hash are here rather than on the chart because they are not milliseconds and one y-domain
+   cannot hold two units honestly; the plan hash in particular is what answers "did it get worse, or did it get
+   a different plan". All three come back null (never zero) when the hourly rollup answered, and the notice
+   above the chart says why. */
+const QUERY_TREND_COLUMNS = [
+  { key: "collection_time", label: "Time", format: "time" },
+  { key: "execution_count", label: "Execs", format: "int" },
+  { key: "cpu_ms", label: "CPU", format: "ms" },
+  { key: "elapsed_ms", label: "Elapsed", format: "ms" },
+  { key: "avg_cpu_ms", label: "Avg CPU", format: "ms" },
+  { key: "avg_elapsed_ms", label: "Avg Elapsed", format: "ms" },
+  { key: "spills", label: "Spills", format: "int" },
+  { key: "min_dop", label: "Min DOP", format: "int" },
+  { key: "max_dop", label: "Max DOP", format: "int" },
+  { key: "query_plan_hash", label: "Plan Hash", mono: true },
 ];
 
 const TOP_PROC_COLUMNS = [

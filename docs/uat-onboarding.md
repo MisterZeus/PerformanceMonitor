@@ -497,17 +497,20 @@ exclusion list — 92 read endpoints out of 111 tools — and these are the excl
 
 The pages are Fleet Overview, per-server, Alert History, Availability Groups and Custom Views. The per-server
 page carries twelve sub-tabs — Overview, Wait Stats, CPU, Memory, Blocking, File I/O, Queries, Configuration,
-Config Changes, Activity, System Events and Collection Health — reaching 72 of the 92 read endpoints, against
-the viewer's nineteen top-level per-server tabs (65 counting their inner tabs). So most of what the viewer
-shows is now here, and what is not divides into three groups.
+Config Changes, Activity, System Events and Collection Health — 72 of the 92 read endpoints on that page
+alone, 73 across all five pages, against the viewer's nineteen top-level per-server tabs (65 counting their
+inner tabs). So most of what the viewer shows is now here, and what is not divides into three groups.
 
 **Reads that exist but no web page shows.** `get_database_scoped_config`, whose `databases[].settings[]` shape
 the table renderer cannot draw, and `get_store_metrics`, which is store-wide and has no per-server home.
 
-Also `get_query_trend` — one query's per-collection history, keyed on a **required** `query_hash`. The web has
-no per-query drill-down to select one from, so the read is unreachable there. The viewer does: double-clicking
-a row in Top Queries opens that query's history window. This is a genuine web gap rather than a boundary, and
-it is tracked separately.
+`get_query_trend` was on that list until [#2520](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2520),
+and it was the only entry anywhere in this section whose absence was missing UI rather than a stated boundary:
+the read keys on a **required** `query_hash` plus a **required** `database_name`, and nothing on the web could
+supply either. The Queries tab's Top Queries table now carries a picker, and the query you pick gets a chart of
+its avg CPU and avg duration over the window plus a grid of its per-collection snapshots. **The queries offered
+are exactly the queries the table shows** — the picker indexes into the rows rendered directly above it, rather
+than reading a second, wider list that could offer a query the table does not.
 
 **The eight `get_pg_*` PostgreSQL reads are NOT a web gap, and this section used to say they were.** Neither
 surface shows them: the WPF viewer has no PostgreSQL screens either, so a PostgreSQL target is readable only
@@ -532,9 +535,11 @@ running 0.4 executions a second used to report zero and read as idle.
 **Desktop things a web imitation would be worse than.** No graphical plan viewer, no interactive query
 heatmap **plot** (the underlying read ships as a bucketed table on the Queries tab — same answer, no canvas),
 no block-chain reconstruction and no interactive deadlock graph — the Blocking tab hands you the captured
-blocked-process-report and deadlock-graph XML verbatim instead of pretending. No period-compare grids, no
-per-query drill-down history window, and none of the desktop grids' own affordances: per-column filter
-popups, CSV export, Copy Repro Script, and right-click drill-down into a ±30-minute window.
+blocked-process-report and deadlock-graph XML verbatim instead of pretending. No period-compare grids. The
+per-query drill-down above charts the same history the viewer's window does, but it is not that **window**:
+no stored-plan download or cached-plan fetch from it, and none of the desktop grids' own affordances —
+per-column filter popups, CSV export, Copy Repro Script, and right-click drill-down into a ±30-minute
+window.
 
 What it *can* write is one thing: **Custom Views** — the saved dashboards and notebooks in
 `config.custom_views`, created and edited through the built-in composer, plus `POST /api/compose/run` to
