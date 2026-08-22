@@ -669,15 +669,28 @@ public sealed class EngineCapabilityMissLivePostgresTests
             Assert.Contains("server_config", auroraServerConfig, StringComparison.Ordinal);
             Assert.Contains("Aurora PostgreSQL", auroraServerConfig, StringComparison.Ordinal);
 
-            /* The LIMIT of this change, asserted rather than left to be discovered: only the reads #2511
-               wired to the capability helper can answer on either axis. get_database_config is not one of
-               them — its collector runs on every SQL Server, so the edition axis gave it nothing to say and
-               it was never wired — and on a PostgreSQL target it therefore still reports the old
-               `unavailable`. The kind axis makes EVERY SQL Server read a permanent gap on a PostgreSQL
-               target, which is a much wider wiring job than the twelve gated collectors; it is filed rather
-               than smuggled in, and this line is what stops the gap being mistaken for a fix that regressed. */
-            Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(
-                await DarlingMcpConfigTools.GetDatabaseConfig(postgres, PostgresServerName)));
+            /* The limit this line used to assert is GONE (#2532). It read: only the reads #2511 wired to
+               the capability helper can answer on either axis, so get_database_config — whose collector runs
+               on every SQL Server, which gave the edition axis nothing to say — still reported the old
+               `unavailable` on a PostgreSQL target. The kind axis makes EVERY SQL Server read a permanent
+               gap there, and the wiring has now caught up, so the read that was the named example of the
+               gap is the one asserted here.
+
+               Kept as an explicit pair rather than deleted: this is the read the issue quoted, and a pin
+               that only ever covered collectors #2511 had already wired could not tell the wiring apart
+               from the twelve gates it started with. */
+            var auroraDatabaseConfig = await DarlingMcpConfigTools.GetDatabaseConfig(postgres, PostgresServerName);
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(auroraDatabaseConfig));
+            Assert.Contains("database_config", auroraDatabaseConfig, StringComparison.Ordinal);
+            Assert.Contains("Aurora PostgreSQL", auroraDatabaseConfig, StringComparison.Ordinal);
+            Assert.DoesNotContain("may not have run yet", auroraDatabaseConfig, StringComparison.Ordinal);
+
+            /* And a read from a family that has NOTHING to do with configuration, whose collector is gated
+               off on no engine edition at all — so nothing but the kind axis could ever make it speak. */
+            var auroraWaitStats = await DarlingMcpDataTools.GetWaitStats(postgres, PostgresServerName);
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(auroraWaitStats));
+            Assert.Contains("wait_stats", auroraWaitStats, StringComparison.Ordinal);
+            Assert.Contains("Aurora PostgreSQL", auroraWaitStats, StringComparison.Ordinal);
 
             /* ── Stock PostgreSQL: the same answer, named for the engine it actually is ── */
             var stockFlags = await DarlingMcpConfigTools.GetTraceFlags(postgres, BoxServerName);
