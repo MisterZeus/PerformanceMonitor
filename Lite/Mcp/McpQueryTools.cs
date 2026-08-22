@@ -270,6 +270,122 @@ public sealed class McpQueryTools
         }
     }
 
+    [McpServerTool(Name = "get_query_store_regressions"), Description("Finds queries whose Query Store performance got WORSE, by comparing each (database, query_id) group's averages inside a recent window against its baseline - every capture BEFORE that window. Returns baseline vs recent duration, CPU and logical reads with the regression percent for each, the execution-count-weighted extra duration (the ranking key: a 5 ms regression executed a million times outranks a 5-second one executed twice), the plan counts on both sides, and a duration-driven severity band. get_query_store_top answers what is EXPENSIVE; the most expensive query is usually the one that always was. This answers what CHANGED. Rows are kept only where average CPU regressed by more than 25%.")]
+    public static async Task<string> GetQueryStoreRegressions(
+        LocalDataService dataService,
+        ServerManager serverManager,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Size of the RECENT window, in hours back from now. Everything collected before it is the baseline. Default 24.")] int hours_back = 24,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
+        [Description("Maximum rows to return, worst first. Default 50 (the number the desktop viewer shows).")] int limit = 50)
+    {
+        var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
+        if (error != null) return error;
+
+        try
+        {
+            var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
+            if (validation != null) return validation;
+
+            /*
+                Over-fetch by one. Comparing the row count to the cap reports truncation for a server that
+                happens to have exactly `limit` regressions and nothing more, which is a false positive in
+                the one field whose whole reason for existing is that the cap should not have to be inferred.
+            */
+            var databases = string.IsNullOrWhiteSpace(database_name) ? null : new[] { database_name };
+            var rows = await dataService.GetQueryStoreRegressionsAsync(
+                resolved.ServerId, hours_back, limit + 1, databases);
+
+            if (rows.Count == 0)
+                return await EmptyRegressionsAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back);
+
+            var truncated = rows.Count > limit;
+
+            return JsonSerializer.Serialize(new
+            {
+                server = resolved.ServerName,
+                hours_back,
+                database_name,
+                /*
+                    Named so the caller cannot mistake which side is which. "baseline" is NOT a fixed
+                    lookback: it is everything collected before the window, so a longer hours_back makes
+                    the recent window bigger AND the baseline shorter.
+                */
+                baseline_is = "every Query Store capture collected BEFORE the recent window",
+                gate = "average CPU regressed by more than 25%",
+                regression_count = Math.Min(rows.Count, limit),
+                truncated,
+                regressions = rows.Take(limit).Select(r => new
+                {
+                    database_name = r.DatabaseName,
+                    query_id = r.QueryId,
+                    severity = r.Severity,
+                    baseline_duration_ms = r.BaselineDurationMs,
+                    recent_duration_ms = r.RecentDurationMs,
+                    duration_regression_percent = r.DurationRegressionPercent,
+                    baseline_cpu_ms = r.BaselineCpuMs,
+                    recent_cpu_ms = r.RecentCpuMs,
+                    cpu_regression_percent = r.CpuRegressionPercent,
+                    baseline_reads = r.BaselineReads,
+                    recent_reads = r.RecentReads,
+                    io_regression_percent = r.IoRegressionPercent,
+                    /* The ranking key, and the one number that says whether this regression MATTERS. */
+                    additional_duration_ms = r.AdditionalDurationMs,
+                    baseline_exec_count = r.BaselineExecCount,
+                    recent_exec_count = r.RecentExecCount,
+                    /* A plan count that moved between the two sides is the first thing to check: a query
+                       that regressed while gaining a plan is usually a plan-choice problem, not a data one. */
+                    baseline_plan_count = r.BaselinePlanCount,
+                    recent_plan_count = r.RecentPlanCount,
+                    last_execution_time = r.LastExecutionTime?.ToString("o"),
+                    query_text = r.QueryTextSample,
+                }),
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("get_query_store_regressions", ex);
+        }
+    }
+
+    /// <summary>
+    /// What zero regressions actually means, which is four different things — word for word with Darling.
+    /// <para>Only ONE of them is good news, and the other three look identical to it in a bare empty array.
+    /// The dangerous one is a server whose entire collected history sits INSIDE the requested window: it has
+    /// no BEFORE, so it can never show a regression however badly it regressed, and answering "no
+    /// regressions" there is a confident wrong answer rather than a missing one.</para>
+    /// </summary>
+    private static async Task<string> EmptyRegressionsAsync(
+        LocalDataService dataService, int serverId, string serverName, int hours_back)
+    {
+        var (hasBaseline, hasRecent) = await dataService.GetQueryStoreRegressionCoverageAsync(serverId, hours_back);
+
+        if (!hasBaseline && !hasRecent)
+        {
+            return McpHelpers.Status(
+                "unavailable",
+                $"No Query Store data has EVER been collected for {serverName}, so this is NOT a report of zero regressions — there is nothing to compare. Query Store may be OFF on this server's databases, which get_query_store_health will say; otherwise check that collection is running for this server.");
+        }
+
+        if (!hasBaseline)
+        {
+            return McpHelpers.Status(
+                "unavailable",
+                $"Every Query Store capture for {serverName} falls INSIDE the last {hours_back} hour(s), so there is no baseline to compare against and no regression can be detected however badly one regressed. This is NOT a clean bill of health. Shorten hours_back so more of the collected history falls before the window, or wait until this server has history older than it.");
+        }
+
+        if (!hasRecent)
+        {
+            return McpHelpers.Status(
+                "empty",
+                $"{serverName} has Query Store history from before this window but nothing collected IN the last {hours_back} hour(s), so there is a recent side missing rather than nothing to report. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.");
+        }
+
+        return McpHelpers.Status(
+            "empty",
+            $"No query on {serverName} regressed in the last {hours_back} hour(s). Both a baseline and this window were collected and no query's average CPU is more than 25% worse than its baseline — this IS the all-clear for this read.");
+    }
+
     [McpServerTool(Name = "get_query_duration_trend"), Description("Gets a time-series of average query duration over time. Useful for spotting overall performance degradation or improvement trends across all queries.")]
     public static async Task<string> GetQueryDurationTrend(
         LocalDataService dataService,

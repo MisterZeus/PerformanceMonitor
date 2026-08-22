@@ -730,6 +730,20 @@ export const SERVER_TABS = [
         ctx.label,
         "No Query Store rows in this window."
       ),
+      /* #2484: the Query Store Regressions tab -- the only tab in the per-server page that was entirely
+         unreachable from a browser rather than merely reduced. Built with table(), not an object literal:
+         mount() stringifies anything it cannot consume, so a literal renders as [object Object] and never
+         fetches the read at all. */
+      table(
+        "Query Store Regressions",
+        "get_query_store_regressions",
+        { server, hours: ctx.hours, limit: 50 },
+        "regressions",
+        QUERY_STORE_REGRESSION_COLUMNS,
+        ctx.label,
+        "No query regressed against its baseline in this window. If this server has no history OLDER than " +
+          "the window there is nothing to compare against, and the read says so rather than calling it clear."
+      ),
       table(
         "Long Query Completions",
         "get_long_query_completions",
@@ -1277,6 +1291,31 @@ const TOP_PROC_COLUMNS = [
   { key: "avg_elapsed_ms", label: "Avg Elapsed", format: "ms" },
   { key: "max_cpu_ms", label: "Max CPU", format: "ms" },
   { key: "total_spills", label: "Spills", format: "int" },
+];
+
+/* #2484: the regression grid. Baseline and recent sit BESIDE each other for each metric rather than being
+   collapsed into the percent alone -- a 300% regression on a query that went from 1 ms to 4 ms is not the
+   same finding as one that went from 1 s to 4 s, and the percent alone cannot tell them apart. Extra
+   duration is the ranking key and the column that says whether the regression matters at all. */
+const QUERY_STORE_REGRESSION_COLUMNS = [
+  { key: "severity", label: "Severity" },
+  { key: "database_name", label: "Database" },
+  { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
+  { key: "query_id", label: "Query ID", format: "int" },
+  { key: "additional_duration_ms", label: "Extra Duration", format: "ms" },
+  { key: "duration_regression_percent", label: "Duration +%", format: "num1" },
+  { key: "baseline_duration_ms", label: "Baseline Duration", format: "ms" },
+  { key: "recent_duration_ms", label: "Recent Duration", format: "ms" },
+  { key: "cpu_regression_percent", label: "CPU +%", format: "num1" },
+  { key: "baseline_cpu_ms", label: "Baseline CPU", format: "ms" },
+  { key: "recent_cpu_ms", label: "Recent CPU", format: "ms" },
+  { key: "io_regression_percent", label: "Reads +%", format: "num1" },
+  { key: "recent_exec_count", label: "Recent Execs", format: "int" },
+  /* A plan count that moved between the two sides is the first thing to check: a query that regressed
+     while gaining a plan is usually a plan-choice problem, not a data one. */
+  { key: "baseline_plan_count", label: "Baseline Plans", format: "int" },
+  { key: "recent_plan_count", label: "Recent Plans", format: "int" },
+  { key: "last_execution_time", label: "Last Exec", format: "time" },
 ];
 
 const QUERY_STORE_COLUMNS = [
