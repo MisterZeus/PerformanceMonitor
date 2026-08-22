@@ -279,9 +279,48 @@ public sealed class DarlingMcpTools
                 .OrderByDescending(c => Math.Abs(c.severity_delta))
                 .ToList();
 
+            if (comparisons.Count == 0)
+            {
+                /*
+                    Neither window produced a single fact, and the old payload said that with all-zero
+                    counters and facts: [] -- which reads as "nothing changed" when it actually means
+                    "there was nothing to compare". Those are opposite conclusions about the same server.
+                    No probe is needed to tell them apart: comparisons is the UNION of both windows' keys,
+                    so zero entries is exactly "both fact sets were empty" and the fact_counts already in
+                    hand are the whole answer.
+                */
+                return McpHelpers.Status(
+                    "unavailable",
+                    $"No analysis facts were collected for {resolved.ServerName} in EITHER window, so there is nothing to compare — this is NOT a report that nothing changed. Fact collection needs collected data in the window it scores; check that collection covered both periods (get_collection_log) before drawing any conclusion from this comparison.",
+                    new
+                    {
+                        server = resolved.ServerName,
+                        baseline_start = baselineStart.ToString("o"),
+                        baseline_end = baselineEnd.ToString("o"),
+                        comparison_start = comparisonStart.ToString("o"),
+                        comparison_end = comparisonEnd.ToString("o"),
+                    });
+            }
+
+            /*
+                One window empty and the other populated is the OTHER way this read lies, and it lies
+                loudly: every fact in the populated window lands in new_issues or resolved_issues purely
+                because it has nothing to be compared against. "47 resolved issues" on a server whose recent
+                window simply was not collected is a worse answer than no answer. Data-bearing results keep
+                their own shape rather than the status envelope, so the warning rides in the payload.
+            */
+            var caveat =
+                baselineFacts.Count == 0
+                    ? "The BASELINE window produced no facts at all, so every fact below counts as a new issue only because there was nothing to compare it against. Confirm collection covered the baseline window (get_collection_log) before reading new_issues as a regression."
+                    : comparisonFacts.Count == 0
+                        ? "The COMPARISON window produced no facts at all, so every fact below counts as a resolved issue only because there is nothing in the recent window to compare against. Confirm collection is running (get_collection_log) before reading resolved_issues as an improvement."
+                        : null;
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                /* Null when both windows produced facts — the ordinary case, where nothing needs saying. */
+                caveat,
                 baseline = new
                 {
                     start = baselineStart.ToString("o"),

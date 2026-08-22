@@ -255,11 +255,32 @@ public sealed class DarlingMcpAlertTools
     {
         try
         {
-            var rules = (await new PgMuteRuleStore(postgres).LoadAllAsync()).AsEnumerable();
+            var all = await new PgMuteRuleStore(postgres).LoadAllAsync();
+            var rules = all.AsEnumerable();
             if (enabled_only)
                 rules = rules.Where(r => r.Enabled && (r.ExpiresAtUtc == null || r.ExpiresAtUtc > DateTime.UtcNow));
 
             var list = rules.ToList();
+
+            if (list.Count == 0)
+            {
+                /*
+                    This tool exists so an agent can tell a genuinely healthy-quiet server from one whose
+                    alerts are being suppressed, and an empty array answered that question with silence.
+                    Both kinds of empty are true negatives -- nothing is being suppressed either way, which
+                    is why both are "empty" rather than one being "unavailable" -- but they are not the same
+                    fact. No rule has ever been written is a different state from five rules that all lapsed,
+                    and the second one is a mute somebody INTENDED that is no longer in force.
+                */
+                var configured = all.Count;
+                return McpHelpers.Status(
+                    "empty",
+                    configured == 0
+                        ? "No mute rules are configured for this store, so no alert is being suppressed anywhere — a quiet alert history is genuine rather than muted."
+                        : $"No mute rules are in force right now: {configured} rule(s) exist but every one of them is disabled or expired, so nothing is being suppressed. Pass enabled_only=false to list them — this is a lapsed mute, not an absent one.",
+                    new { enabled_only, configured_count = configured, excluded_by_filter = configured - list.Count });
+            }
+
             return JsonSerializer.Serialize(new
             {
                 total_count = list.Count,

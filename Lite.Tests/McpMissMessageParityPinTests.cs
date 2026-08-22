@@ -1,0 +1,90 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor Lite.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.IO;
+using System.Linq;
+using Xunit;
+
+namespace Lite.Tests;
+
+/// <summary>
+/// The miss SENTENCES the two SKUs share, pinned against both source trees.
+///
+/// <para>#2485 had two halves. One was reads that could not say which kind of nothing they had found; the
+/// other was three tools that answered the same question differently depending on which SKU the client was
+/// pointed at. The first half is fixable in one place per tool. The second is not: every shared sentence
+/// lives twice, once per SKU, and nothing stops one copy being reworded on its own — which is how the
+/// divergence this issue exists to close got there in the first place.</para>
+///
+/// <para>So the sentences are pinned as SOURCE, in both trees at once. A fragment listed here must appear in
+/// <c>Lite/Mcp</c> AND in <c>Darling/PerformanceMonitor.Darling.Service/Mcp</c>; reword one copy and this
+/// fails naming the tree that no longer has it. Fragments are chosen to sit BETWEEN interpolation holes, so
+/// they are the literal bytes both SKUs emit rather than an approximation of them.</para>
+///
+/// <para>This is a per-change pin, not a survey: it holds the sentences this repo has deliberately made
+/// shared, and each change that adds one is expected to add it here. It does not claim to enumerate every
+/// message either server can produce, and a naive extension that tried to would pass vacuously the day
+/// somebody added an unshared one.</para>
+/// </summary>
+public sealed class McpMissMessageParityPinTests
+{
+    private const string LiteMcpDir = "Lite/Mcp";
+    private const string DarlingMcpDir = "Darling/PerformanceMonitor.Darling.Service/Mcp";
+
+    /// <summary>
+    /// Sentence fragments that must read identically on both SKUs. Each sits between interpolation holes, so
+    /// what is compared is the literal text a caller receives.
+    /// </summary>
+    public static TheoryData<string> SharedMissFragments() => new()
+    {
+        /* get_wait_types */
+        "This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.",
+        "Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.",
+
+        /* get_memory_clerks */
+        "This read returns the LATEST snapshot rather than a window, so an empty result is never a quiet period — a live SQL Server always has memory clerks.",
+
+        /* get_mute_rules */
+        "No mute rules are configured for this store, so no alert is being suppressed anywhere — a quiet alert history is genuine rather than muted.",
+        "is disabled or expired, so nothing is being suppressed. Pass enabled_only=false to list them — this is a lapsed mute, not an absent one.",
+
+        /* compare_analysis */
+        "in EITHER window, so there is nothing to compare — this is NOT a report that nothing changed.",
+        "The BASELINE window produced no facts at all, so every fact below counts as a new issue only because there was nothing to compare it against.",
+        "The COMPARISON window produced no facts at all, so every fact below counts as a resolved issue only because there is nothing in the recent window to compare against.",
+    };
+
+    [Theory]
+    [MemberData(nameof(SharedMissFragments))]
+    public void EverySharedMissSentence_ReadsIdenticallyOnBothSkus(string fragment)
+    {
+        Assert.True(
+            AppearsIn(LiteMcpDir, fragment),
+            $"Lite/Mcp no longer contains the shared sentence: \"{fragment}\"");
+
+        Assert.True(
+            AppearsIn(DarlingMcpDir, fragment),
+            $"Darling's MCP tools no longer contain the shared sentence: \"{fragment}\"");
+    }
+
+    /// <summary>
+    /// A non-vacuous floor. Without it, a fragment list that drifted into naming text neither tree contains
+    /// would still be a green suite the day somebody emptied it — the guard-that-stopped-guarding shape.
+    /// </summary>
+    [Fact]
+    public void ThePinCoversTheSentencesThisChangeMadeShared()
+    {
+        Assert.True(SharedMissFragments().Count() >= 8,
+            "the shared-sentence pin lost entries; a sentence that stops being pinned can drift between the SKUs unnoticed");
+    }
+
+    private static bool AppearsIn(string relativeDir, string fragment) =>
+        ParitySource.EnumerateCsFiles(relativeDir)
+            .Any(f => File.ReadAllText(f).Contains(fragment, StringComparison.Ordinal));
+}

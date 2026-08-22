@@ -269,9 +269,27 @@ public sealed class McpAlertTools
     {
         try
         {
-            var rules = muteRuleService.GetRules();
+            var all = muteRuleService.GetRules();
+            var rules = all;
             if (enabled_only)
                 rules = rules.Where(r => r.Enabled && (r.ExpiresAtUtc == null || r.ExpiresAtUtc > DateTime.UtcNow)).ToList();
+
+            if (rules.Count == 0)
+            {
+                /*
+                    Same two facts as Darling's twin, in the same words. Both are true negatives -- nothing
+                    is being suppressed either way -- but "no rule has ever been written" and "five rules
+                    that all lapsed" are different states, and the second is a mute somebody INTENDED that
+                    is no longer in force.
+                */
+                var configured = all.Count;
+                return Task.FromResult(McpHelpers.Status(
+                    "empty",
+                    configured == 0
+                        ? "No mute rules are configured for this store, so no alert is being suppressed anywhere — a quiet alert history is genuine rather than muted."
+                        : $"No mute rules are in force right now: {configured} rule(s) exist but every one of them is disabled or expired, so nothing is being suppressed. Pass enabled_only=false to list them — this is a lapsed mute, not an absent one.",
+                    new { enabled_only, configured_count = configured, excluded_by_filter = configured - rules.Count }));
+            }
 
             var result = new
             {

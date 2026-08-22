@@ -313,6 +313,30 @@ internal static class DarlingDataReader
     }
 
     /// <summary>
+    /// Whether this server has EVER recorded a wait sample, ignoring any window.
+    /// <para>Lets an empty get_wait_types say WHICH kind of nothing it found. "No wait types in the last N
+    /// hours" is true both of a quiet window and of a server nothing has been stored for, and those want
+    /// opposite responses — widen the window, versus go find out why collection is not running. Reads
+    /// <c>v_wait_stats</c>, the same source <see cref="DistinctWaitTypesSql"/> reads, so it can never
+    /// report "collected" for rows the read cannot see. LIMIT 1, so it stops at the first row.</para>
+    /// </summary>
+    public const string HasAnyWaitStatSql = """
+        SELECT 1
+        FROM v_wait_stats
+        WHERE server_id = $1
+        LIMIT 1
+        """;
+
+    /// <summary>Runs <see cref="HasAnyWaitStatSql"/>.</summary>
+    public static async Task<bool> HasAnyWaitStatAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(HasAnyWaitStatSql);
+        AddInt(command, serverId);
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
+    }
+
+    /// <summary>
     /// A single wait type's per-second trend — Lite's <c>GetWaitStatsTrendAsync</c>: the interval rate is
     /// this collection's delta divided by the seconds since the previous collection (a <c>LAG</c> over the
     /// truncate-then-diff epoch idiom proven value-identical DuckDB↔Postgres). $1 server_id, $2 wait_type,
