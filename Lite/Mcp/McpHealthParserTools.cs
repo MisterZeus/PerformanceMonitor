@@ -454,10 +454,10 @@ public sealed class McpHealthParserTools
                 return everCaptured
                     ? McpHelpers.Status(
                         "empty",
-                        $"No wait_info events were captured for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS captured them before, so the window is genuinely quiet rather than blind - widen hours_back to reach the most recent events.")
+                        $"No wait_info events were captured for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS captured them before, so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.")
                     : McpHelpers.Status(
                         "unavailable",
-                        $"No wait_info events have EVER been captured for {resolved.ServerName}, so this is NOT an all-clear - there is nothing here to be clear about. This read is served from the collected system_health ring buffer: check that collection is running for this server and that its system_health session is started before concluding nothing was waiting.");
+                        $"No wait_info events have EVER been captured for {resolved.ServerName}, so this is NOT an all-clear — there is nothing here to be clear about. This read is served from the collected system_health ring buffer: check that collection is running for this server and that its system_health session is started before concluding nothing was waiting.");
             }
 
             return JsonSerializer.Serialize(new
