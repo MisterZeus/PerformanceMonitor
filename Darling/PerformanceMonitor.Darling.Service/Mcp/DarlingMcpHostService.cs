@@ -535,6 +535,11 @@ public sealed class DarlingMcpHostService : BackgroundService
                    and the Dashboard expose, over Darling's Postgres store (STORED reads, no live hit).
                    These are the tools the analysis findings' next_tools recommendations point at. */
                 .WithGeminiCompatibleTools<DarlingMcpDataTools>()
+                /* get_query_store_regressions (#2484) — the viewer's Query Store Regressions tab. Every
+                   other Query Store read answers what is EXPENSIVE; this answers what got WORSE, which is
+                   not derivable from the first (the costliest query is usually the one that always was).
+                   A STORED read over the same query_store_stats the tools above read. */
+                .WithGeminiCompatibleTools<DarlingMcpQueryStoreRegressionTools>()
                 /* The diagnostic-depth data-read tools (blocking/deadlocks, sessions, config-history,
                    index/object) — get_blocking / get_deadlocks / get_deadlock_detail /
                    get_blocked_process_xml, get_session_stats / get_active_queries / get_waiting_tasks,
