@@ -497,15 +497,26 @@ exclusion list — 92 read endpoints out of 111 tools — and these are the excl
 
 The pages are Fleet Overview, per-server, Alert History, Availability Groups and Custom Views. The per-server
 page carries twelve sub-tabs — Overview, Wait Stats, CPU, Memory, Blocking, File I/O, Queries, Configuration,
-Config Changes, Activity, System Events and Collection Health — reaching 71 of the 92 read endpoints, against
+Config Changes, Activity, System Events and Collection Health — reaching 72 of the 92 read endpoints, against
 the viewer's nineteen top-level per-server tabs (65 counting their inner tabs). So most of what the viewer
 shows is now here, and what is not divides into three groups.
 
-**Reads that exist but no web page shows.** The eight `get_pg_*` PostgreSQL reads, because `/api/fleet`'s card
-carries the SQL Server `engine_edition` and no target-engine discriminator, so the browser cannot tell a
-PostgreSQL target from a SQL Server one — a PostgreSQL panel would render on every SQL Server, permanently
-empty. Also `get_database_scoped_config`, whose `databases[].settings[]` shape the table renderer cannot draw,
-and `get_store_metrics`, which is store-wide and has no per-server home.
+**Reads that exist but no web page shows.** `get_database_scoped_config`, whose `databases[].settings[]` shape
+the table renderer cannot draw, and `get_store_metrics`, which is store-wide and has no per-server home.
+
+Also `get_query_trend` — one query's per-collection history, keyed on a **required** `query_hash`. The web has
+no per-query drill-down to select one from, so the read is unreachable there. The viewer does: double-clicking
+a row in Top Queries opens that query's history window. This is a genuine web gap rather than a boundary, and
+it is tracked separately.
+
+**The eight `get_pg_*` PostgreSQL reads are NOT a web gap, and this section used to say they were.** Neither
+surface shows them: the WPF viewer has no PostgreSQL screens either, so a PostgreSQL target is readable only
+through MCP, on both SKUs. The web has an additional obstacle on top of that — `/api/fleet`'s card carries the
+SQL Server `engine_edition` and no target-engine discriminator, so a browser cannot tell a PostgreSQL target
+from a SQL Server one and a PostgreSQL panel would render empty on every SQL Server — but fixing only that
+would not give you a screen, because there is no PostgreSQL screen on either side to reach. If you are
+evaluating this for PostgreSQL monitoring, know that up front: the collection and the reads are real and the
+graphical surfaces are not.
 
 **Data with no read endpoint at all** — **this list is now empty.** It used to hold ten viewer surfaces
 (Query Store regressions, the query heatmap, three of the four Performance Trends charts, the
