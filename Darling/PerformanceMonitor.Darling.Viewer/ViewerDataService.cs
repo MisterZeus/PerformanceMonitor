@@ -712,10 +712,13 @@ SELECT
            than falling through. The column is named only in the probe line, not in this prose, per the V71
            finding: the coverage ratchet strips information_schema lines but cannot strip a comment.
 
-           This one is a genuine gate rather than bookkeeping. The service reads the ceiling column on every
-           tempdb-space check, so a viewer pointed at a V80 store would be reading a store whose service half
-           cannot supply it — and the alert would silently go back to measuring distance to the next autogrow,
-           which is the defect this rung exists to end rather than an error anyone would see. */
+           The reason to gate is the standing invariant rather than a read that would throw — no viewer query
+           names this column; the SERVICE's alert adapter is what reads it. RequiredStoreSchemaVersion is
+           StorageVersion.SchemaVersion, so a fully-migrated store has to map to EXACTLY this or the banner
+           reports a mismatch on a store that is current. What the banner buys on the way is worth having: a
+           store still at 80 has no ceiling recorded anywhere in its history, so every tempdb percentage in it
+           is the old distance-to-next-autogrow measurement, and the operator should know that before reading
+           one. */
         if (hasTempDbMaxSize)
         {
             return 81;
