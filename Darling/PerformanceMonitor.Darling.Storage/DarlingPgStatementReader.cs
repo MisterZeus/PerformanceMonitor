@@ -101,7 +101,13 @@ public static class DarlingPgStatementReader
             )
         )
         SELECT
-            queryid,
+            /* #2554: QUALIFIED, and both of these references need it. The LEFT JOIN below puts
+               t.queryid in scope alongside differenced.queryid, which made a bare `queryid`
+               ambiguous (42702) in the select list AND in the GROUP BY. That is a PARSE-time
+               error, so the read threw on every call from #2219 onward, on every engine,
+               whether or not the store held a single row. Qualifying only the GROUP BY -- the
+               obvious one-line fix -- still fails here, on the select list. */
+            differenced.queryid AS queryid,
             database_id,
             CAST(SUM(delta_calls) AS bigint) AS calls,
             CAST(SUM(delta_total_exec_time_ms) AS bigint) AS total_exec_time_ms,
@@ -126,7 +132,7 @@ public static class DarlingPgStatementReader
         LEFT JOIN collect.pg_statement_text AS t
                ON  t.server_id = $1
                AND t.queryid = differenced.queryid
-        GROUP BY queryid, database_id
+        GROUP BY differenced.queryid, database_id
         HAVING SUM(delta_total_exec_time_ms) > 0
         ORDER BY SUM(delta_total_exec_time_ms) DESC
         LIMIT 50
