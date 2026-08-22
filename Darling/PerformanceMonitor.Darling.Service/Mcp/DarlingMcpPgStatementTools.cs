@@ -48,18 +48,20 @@ public sealed class DarlingMcpPgStatementTools
 
             if (rows.Count == 0)
             {
-                /* The capability answer settles the first two branches of that sentence when the store
-                   knows the engine (#2532); what is left below is the genuinely diagnosable case — an
-                   Aurora target where pg_stat_statements is missing from the connected database — plus the
-                   row whose engine_kind is NULL, where no claim can be made. */
+                /* The capability answer settles the dialect branch and the stock-PostgreSQL branch
+                   whenever the store knows the engine (#2532), so this sentence is reached in exactly two
+                   states: an Aurora target that produced no rows, which has one genuinely diagnosable
+                   cause, and a row whose engine_kind is NULL, where no claim can be made. It names those
+                   two rather than repeating the ones that can no longer reach this line. */
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.ServerName, "pg_statement_stats")
                     ?? McpHelpers.Status(
                         "unavailable",
-                        "No PostgreSQL query statistics for this server and window. If this server is SQL "
-                        + "Server, use get_top_queries_by_cpu instead. If it is Aurora PostgreSQL, check that "
+                        "No PostgreSQL query statistics for this server and window. On Aurora, check that "
                         + "pg_stat_statements is installed in the database the collector connects to — on some "
-                        + "clusters it exists only in the application database, not in postgres.");
+                        + "clusters it exists only in the application database, not in postgres. Otherwise the "
+                        + "store has not recorded this server's engine yet, and a target it cannot classify may "
+                        + "not be a PostgreSQL one at all — check list_servers.");
             }
 
             var totalTimeMs = rows.Sum(r => r.TotalExecTimeMs);
