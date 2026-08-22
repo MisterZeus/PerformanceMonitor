@@ -63,23 +63,54 @@ public sealed class SqlServerPermissionErrorsTests
         => Assert.False(SqlServerPermissionErrors.IsPermissionDenied(number));
 
     /// <summary>
-    /// 262 on Azure SQL Database gets the same treatment 300 already got (#1631): the raw error names
-    /// tempdb and reads as a missing GRANT, and there is no grant to issue there. Empty off Azure, where a
-    /// 262 IS a missing grant and the fix is to issue it — the same asymmetry the 300 hint draws.
+    /// 262 in TEMPDB on Azure SQL Database gets the same treatment 300 already got (#1631): the raw error
+    /// names tempdb and reads as a missing GRANT, and there is no grant to issue there. Empty off Azure,
+    /// where a 262 IS a missing grant and the fix is to issue it — the same asymmetry the 300 hint draws.
     /// </summary>
     [Fact]
-    public void AzureDmvPermissionHint_Explains262_OnAzureOnly()
+    public void AzureDmvPermissionHint_ExplainsTempDb262_OnAzureOnly()
     {
-        var azure262 = AzureDmvPermissionHint.For(262, isAzureSqlDb: true);
+        var azure262 = AzureDmvPermissionHint.For(262, isAzureSqlDb: true, TempDbDenial);
 
-        Assert.Contains("tempdb", azure262, System.StringComparison.Ordinal);
+        Assert.Contains("TEMPDB", azure262, System.StringComparison.Ordinal);
         Assert.Contains("##MS_ServerStateReader##", azure262, System.StringComparison.Ordinal);
         Assert.Contains("no grant to issue", azure262, System.StringComparison.Ordinal);
 
-        Assert.Empty(AzureDmvPermissionHint.For(262, isAzureSqlDb: false));
+        Assert.Empty(AzureDmvPermissionHint.For(262, isAzureSqlDb: false, TempDbDenial));
 
         /* The 300 arm is untouched by the switch that replaced its if-guard, and 229 still says nothing. */
         Assert.Contains("SERVICE OBJECTIVE", AzureDmvPermissionHint.For(300, isAzureSqlDb: true), System.StringComparison.Ordinal);
         Assert.Empty(AzureDmvPermissionHint.For(229, isAzureSqlDb: true));
     }
+
+    /// <summary>
+    /// The review catch on #2512, and the reason 262 reads the message where 300 does not. 300 is
+    /// server-scoped, so its number settles it. 262 names a DATABASE, and the advice inverts on which one:
+    /// in tempdb there is no grant to issue, in a user database there is and the raw error already names
+    /// it. Keying purely off the number appended tempdb guidance — "reach tempdb's space DMVs
+    /// through server-level state access" — to a denial in someone's user database, which is
+    /// worse than appending nothing, because it sends them after a role membership that would not have
+    /// helped. No collector raises that today, but the per-database loop collectors run against arbitrary
+    /// user databases on Azure SQL DB and are one permission change away from it.
+    /// <para>A null message stays silent rather than guessing, so a call site that forgets to pass it
+    /// loses a helpful sentence instead of gaining a wrong one.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("VIEW DATABASE PERFORMANCE STATE permission denied in database 'AdventureWorks'.")]
+    [InlineData("VIEW DATABASE STATE permission denied in database 'reporting_tempdb_stage'.")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void AzureDmvPermissionHint_SaysNothingAbout262_WhenTheDenialIsNotTempDb(string? message)
+        => Assert.Empty(AzureDmvPermissionHint.For(262, isAzureSqlDb: true, message));
+
+    /// <summary>The name is matched QUOTED, and the collation of the server decides its casing.</summary>
+    [Theory]
+    [InlineData("permission denied in database 'tempdb'.")]
+    [InlineData("permission denied in database 'TempDB'.")]
+    [InlineData("permission denied in database 'TEMPDB'.")]
+    public void AzureDmvPermissionHint_MatchesTempDb_WhateverTheCasing(string message)
+        => Assert.NotEmpty(AzureDmvPermissionHint.For(262, isAzureSqlDb: true, message));
+
+    private const string TempDbDenial =
+        "VIEW DATABASE PERFORMANCE STATE permission denied in database 'tempdb'.";
 }

@@ -636,7 +636,8 @@ public partial class RemoteCollectorService
         {
             status = "ERROR";
             errorMessage = $"SQL Error #{ex.Number}: {ex.Message}"
-                + AzureDmvPermissionHint.For(ex.Number, _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition == 5);
+                + AzureDmvPermissionHint.For(
+                    ex.Number, _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition == 5, ex.Message);
             AppLogger.Error("Collector", $"  [{server.DisplayName}] {collectorName} SQL Error #{ex.Number}: {ex.Message}");
 
             if (RetryHelper.IsTransient(ex))

@@ -4497,7 +4497,8 @@ LIMIT 1";
                with SqlServerTargetProvider.Classify, and gained 262 — "permission denied in database
                'tempdb'", the #2150 denial that used to record ERROR every cycle and is the reason
                tempdb_stats was gated off Azure SQL Database at all. */
-            var message = ex.Message + AzureDmvPermissionHint.For(ex.Number, server.Runtime?.Target.IsAzureSqlDb == true);
+            var message = ex.Message + AzureDmvPermissionHint.For(
+                ex.Number, server.Runtime?.Target.IsAzureSqlDb == true, ex.Message);
 
             _logger.LogWarning("  [{Server}] {Collector} => insufficient permissions ({Number}): {Message}",
                 server.Config.DisplayName, collectorName, ex.Number, message);
