@@ -756,6 +756,112 @@ ORDER BY bucket";
         }
         return items;
     }
+
+    /* ───────────────── the denominator an empty trend needs (#2485) ───────────────── */
+
+    /// <summary>
+    /// Successful runs per blocking collector inside the window, with the first and last of them.
+    /// <para>The blocking trend reads EDGE tables — rows exist only where an event happened — so an
+    /// absence of rows is a capture that found nothing and a capture that never ran, wearing the same
+    /// face. <c>collection_log</c> can tell them apart, because a collector that ran and stored nothing
+    /// still records a SUCCESS with zero rows.</para>
+    /// <para>BOTH capture paths are counted, deliberately: <see cref="GetBlockingTrendAsync"/> unions
+    /// <c>v_blocked_process_reports</c> with <c>v_dmv_blocking_snapshots</c>, so counting one of them
+    /// would report "never captured" for a server capturing perfectly well through the other. Only
+    /// SUCCESS counts as having looked — a PERMISSIONS or ERROR row is a collector that did not see the
+    /// window either. Darling's twin is <c>DarlingBlockingTrendReader.BlockingCaptureCountsSql</c>; the
+    /// two must stay in step so a user moving between the SKUs is not told a different story about the
+    /// same state.</para>
+    /// </summary>
+    public Task<List<CollectorCaptureCount>> GetBlockingCaptureCountsAsync(int serverId, int hoursBack) =>
+        GetCaptureCountsAsync(serverId, hoursBack, "collector_name IN ('blocked_process_report', 'dmv_blocking_snapshot')");
+
+    /// <summary>
+    /// Successful runs of the deadlock collector inside the window. One capture path here, not two —
+    /// deadlocks come only from the <c>deadlocks</c> collector's system_health read, and there is no DMV
+    /// fallback to count.
+    /// </summary>
+    public Task<List<CollectorCaptureCount>> GetDeadlockCaptureCountsAsync(int serverId, int hoursBack) =>
+        GetCaptureCountsAsync(serverId, hoursBack, "collector_name = 'deadlocks'");
+
+    /// <summary>
+    /// Whether either blocking collector has EVER run successfully for this server, ignoring any window.
+    /// <para>Asked ONLY when the window count came back zero, and only to pick which sentence is true: a
+    /// server whose collectors have run before has a GAP in this window, while one that has never run
+    /// them is not collecting blocking at all. Both are "not an all-clear" and they want different next
+    /// moves. LIMIT 1, so it stops at the first row.</para>
+    /// </summary>
+    public Task<bool> HasAnyBlockingCaptureAsync(int serverId) =>
+        HasAnyCaptureAsync(serverId, "collector_name IN ('blocked_process_report', 'dmv_blocking_snapshot')");
+
+    /// <summary>Whether the deadlock collector has EVER run successfully for this server. See
+    /// <see cref="HasAnyBlockingCaptureAsync"/> for why the question is asked at all.</summary>
+    public Task<bool> HasAnyDeadlockCaptureAsync(int serverId) =>
+        HasAnyCaptureAsync(serverId, "collector_name = 'deadlocks'");
+
+    /// <summary>
+    /// The shared body behind the two capture-count reads. The collector predicate is a COMPILE-TIME
+    /// literal from the two call sites above — never caller input — so it is concatenated rather than
+    /// bound; the server id and window still bind as parameters.
+    /// </summary>
+    private async Task<List<CollectorCaptureCount>> GetCaptureCountsAsync(int serverId, int hoursBack, string collectorPredicate)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null);
+
+        command.CommandText = @"
+SELECT
+    collector_name,
+    COUNT(*),
+    MIN(collection_time),
+    MAX(collection_time)
+FROM v_collection_log
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+AND   status = 'SUCCESS'
+AND   " + collectorPredicate + @"
+GROUP BY collector_name
+ORDER BY collector_name";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+
+        var items = new List<CollectorCaptureCount>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new CollectorCaptureCount(
+                reader.GetString(0),
+                reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
+                reader.IsDBNull(2) ? null : reader.GetDateTime(2),
+                reader.IsDBNull(3) ? null : reader.GetDateTime(3)));
+        }
+        return items;
+    }
+
+    /// <summary>The shared body behind the two existence probes. Same literal-predicate contract as
+    /// <see cref="GetCaptureCountsAsync"/>.</summary>
+    private async Task<bool> HasAnyCaptureAsync(int serverId, string collectorPredicate)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT 1
+FROM v_collection_log
+WHERE server_id = $1
+AND   status = 'SUCCESS'
+AND   " + collectorPredicate + @"
+LIMIT 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return await command.ExecuteScalarAsync() is not null and not DBNull;
+    }
+
     /// <summary>
     /// Gets lock wait stats trend data (LCK% wait types) for the blocking trends chart.
     /// Returns per-second rates grouped by wait type.
@@ -807,6 +913,13 @@ ORDER BY collection_time, wait_type";
         return items;
     }
 }
+
+/// <summary>
+/// One collector's SUCCESSFUL run count inside a window, with the first and last of those runs — the
+/// denominator an empty blocking or deadlock trend needs to be interpretable (#2485). Darling's twin is
+/// <c>DarlingBlockingTrendReader.CaptureCount</c>.
+/// </summary>
+public sealed record CollectorCaptureCount(string CollectorName, long Runs, DateTime? FirstRunAt, DateTime? LastRunAt);
 
 public class LockWaitTrendPoint
 {

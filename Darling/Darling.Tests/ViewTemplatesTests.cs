@@ -214,9 +214,11 @@ public sealed class ViewTemplatesTests
     /// UAT tester opens, on the store with the least data it will ever have — a fresh install has collected
     /// nothing for its first cycles — and a wall of unexplained blank rectangles on day one is a worse first
     /// impression than the feature not existing. The chart case is the one that bites without looking like it:
-    /// <c>get_blocking_trend</c> and <c>get_deadlock_trend</c> answer an idle server with <c>trend: []</c> and NO
-    /// <c>{status,message}</c> envelope, so the panel has real data in hand and falls through to the chart's
-    /// "Not enough data points to chart yet" — a warming-up message on a server that simply never blocked.</para>
+    /// <c>get_blocking_trend</c> and <c>get_deadlock_trend</c> USED to answer an idle server with <c>trend: []</c>
+    /// and NO <c>{status,message}</c> envelope, so the panel had real data in hand and fell through to the chart's
+    /// "Not enough data points to chart yet" — a warming-up message on a server that simply never blocked. Those
+    /// two now answer with an envelope (#2485), which renderPanel renders instead; the requirement holds for
+    /// every other chart in the templates, none of which has one.</para>
     ///
     /// <para>A COUNT rather than a spot-check, and exact rather than a floor: <c>emptyText</c> appears nowhere
     /// else in this module, so one dropped sentence is one panel that will render blank in front of a new

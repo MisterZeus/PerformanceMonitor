@@ -168,9 +168,11 @@ function vizLine(data, desc) {
   /* ZERO points is a different statement from ONE point, and only the descriptor knows which sentence is true.
      renderLineChart says "Not enough data points to chart yet" below two rows, which is right while collection is
      warming up and wrong for a read whose empty array means the thing simply did not happen: get_blocking_trend
-     and get_deadlock_trend return `trend: []` with no {status,message} envelope on an idle server, so a healthy
-     server got a warming-up message about a condition it never had. A descriptor's emptyText wins at exactly
-     zero; the one-point case still falls through, because there the chart's own sentence IS the true one. */
+     and get_deadlock_trend used to return `trend: []` with no {status,message} envelope on an idle server, so a
+     healthy server got a warming-up message about a condition it never had. Those two now answer with an
+     envelope (#2485) and are classified as "empty" before they reach a viz at all; this guard still stands for
+     every OTHER line read, which has no envelope of its own. A descriptor's emptyText wins at exactly zero; the
+     one-point case still falls through, because there the chart's own sentence IS the true one. */
   if (!points.length && desc.emptyText) return emptyStrip(desc.emptyText);
   const series = seriesCfg.map((s, i) => ({
     key: s.key,

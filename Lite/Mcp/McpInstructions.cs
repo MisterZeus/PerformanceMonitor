@@ -84,8 +84,8 @@ internal static class McpInstructions
         | `get_blocked_process_reports` | Parsed blocking from sp_HumanEventsBlockViewer (extended events) | `server_name`, `hours_back`, `limit` |
         | `get_blocked_process_xml` | Raw blocked process report XML | `server_name`, `hours_back`, `limit` |
         | `get_long_query_completions` | Longest completed queries (rpc/batch over the trace threshold) + attentions/cancels from the opt-in long-query trace, duration DESC (empty until the collector is enabled) | `server_name`, `hours_back`, `limit` |
-        | `get_blocking_trend` | Time-series of blocking event counts | `server_name`, `hours_back` |
-        | `get_deadlock_trend` | Time-series of deadlock event counts | `server_name`, `hours_back` |
+        | `get_blocking_trend` | Time-series of blocking event counts. An empty result distinguishes a genuine all-clear (`empty`, with the collector run counts in `hints` so you can see how many captures the window actually holds) from a window no collector covered (`unavailable`), which is NOT an all-clear | `server_name`, `hours_back` |
+        | `get_deadlock_trend` | Time-series of deadlock event counts. An empty result distinguishes a genuine all-clear (`empty`, with the collector run counts in `hints` so you can see how many captures the window actually holds) from a window no collector covered (`unavailable`), which is NOT an all-clear | `server_name`, `hours_back` |
 
         ### Memory Tools
         | Tool | Purpose | Key Parameters |

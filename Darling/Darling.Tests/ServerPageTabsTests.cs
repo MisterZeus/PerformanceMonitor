@@ -235,9 +235,11 @@ public sealed class ServerPageTabsTests
     /// returning DATA whose row array is empty, and both renderers had a wrong generic for that case. vizTable
     /// falls back to "No rows in this window", which on a collector that is off, opt-in, or daily reads as a
     /// fault. vizLine fell through to the chart's "Not enough data points to chart yet", which is right while
-    /// collection is warming up and wrong for the two reads whose empty array means the thing did not happen:
-    /// <c>get_blocking_trend</c> and <c>get_deadlock_trend</c> answer an idle server with <c>trend: []</c> and no
-    /// envelope at all, so a healthy server was told its blocking chart was still warming up.</para>
+    /// collection is warming up and wrong for a read whose empty array means the thing did not happen:
+    /// <c>get_blocking_trend</c> and <c>get_deadlock_trend</c> used to answer an idle server with <c>trend: []</c>
+    /// and no envelope at all, so a healthy server was told its blocking chart was still warming up. Those two
+    /// now carry an envelope of their own (#2485) and are handled a layer above this guard; the guard still
+    /// stands, because every other line read on these tabs has no envelope and lands here at zero rows.</para>
     ///
     /// <para>Both helpers THROW without a sentence, and every tab is built during the DOM-shim run, so a panel
     /// that forgot one cannot reach a browser. The zero-versus-one distinction was verified against the shipped
