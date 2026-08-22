@@ -199,7 +199,13 @@ public sealed class DarlingAnalysisStoreTests
            reads share one column list), with the twins' ordering/window semantics. */
         Assert.Contains("remediation_action_json", PgFindingStore.GetRecentFindingsSql);
         Assert.Contains("ORDER BY analysis_time DESC, severity DESC", PgFindingStore.GetRecentFindingsSql);
-        Assert.Contains("LIMIT $3", PgFindingStore.GetRecentFindingsSql);
+        Assert.Contains("LIMIT $4", PgFindingStore.GetRecentFindingsSql);
+
+        /* #2506: the window is BOUNDED at both ends. Pinned because the read had a start and no end for
+           its whole life, and an as_of anchor over a half-open window is the worst outcome the anchor
+           convention has — validated, advertised, and answering as of now anyway. */
+        Assert.Contains("AND   analysis_time >= $2", PgFindingStore.GetRecentFindingsSql);
+        Assert.Contains("AND   analysis_time <= $3", PgFindingStore.GetRecentFindingsSql);
         Assert.Contains("remediation_action_json", PgFindingStore.GetLatestFindingsSql);
         Assert.Contains("SELECT MAX(analysis_time) FROM analysis_findings WHERE server_id = $1", PgFindingStore.GetLatestFindingsSql);
 

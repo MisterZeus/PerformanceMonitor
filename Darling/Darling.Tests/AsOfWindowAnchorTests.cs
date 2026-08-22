@@ -224,15 +224,14 @@ public sealed class AsOfWindowAnchorTests
     [Fact]
     public void EveryWindowedRead_TakesTheAnchor_ExceptTheNamedExclusions()
     {
-        /* analyze_server / get_analysis_* / compare_analysis window INSIDE the analysis engine (they hand it
-           a bare hours_back), so anchoring them is an engine change rather than a read-surface one, and
-           analyze_server also PERSISTS what it finds. get_pvs_stats and get_fleet_overview mix a
+        /* The analysis family came OFF this list in #2506 — the anchor now reaches the engine, not just
+           the tool, and analyze_server refuses to persist when it is anchored rather than declining the
+           anchor. What is left are the two permanent kinds. get_pvs_stats and get_fleet_overview mix a
            latest-snapshot measurement with a windowed one: anchoring only the windowed half would return a
            result whose two halves describe different instants, which is worse than not offering it.
            get_store_metrics windows in days over the store's own growth series. */
         var excluded = new[]
         {
-            "analyze_server", "get_analysis_facts", "get_analysis_findings", "compare_analysis",
             "get_pvs_stats", "get_fleet_overview", "get_store_metrics",
         };
 
@@ -276,6 +275,7 @@ public sealed class AsOfWindowAnchorTests
         var offenders = new List<string>();
         var examined = 0;
         var anchorable = AnchorableServiceMethods();
+        var anchorableAnalysis = AnchorableAnalysisServiceMethods();
 
         foreach (var file in RepoFilesIn(mcpDirectory))
         {
@@ -332,12 +332,27 @@ public sealed class AsOfWindowAnchorTests
                     .Distinct()
                     .ToArray();
 
-                if (!reaches || namesNow || dropped.Length > 0)
+                /*
+                    #2506: the same category, one seam over. The analysis family's window is built inside
+                    AnalysisService / DarlingAnalysisService rather than in the tool, so its tools resolve
+                    the anchor and then hand it to a SERVICE — and a tool that resolves an anchor and calls
+                    AnalyzeAsync without it satisfies every other check on this list (the body still names
+                    windowEnd, from its own `out var`) while answering as of now. That is precisely the
+                    shape #2495's review found eight of, so it gets its own arm rather than a comment.
+                */
+                var droppedAnalysis = Regex.Matches(body, @"analysisService\.(\w+)\(")
+                    .Where(m => anchorableAnalysis.Contains(m.Groups[1].Value) && !CallPasses(body, m.Index, "asOfUtc"))
+                    .Select(m => m.Groups[1].Value)
+                    .Distinct()
+                    .ToArray();
+
+                if (!reaches || namesNow || dropped.Length > 0 || droppedAnalysis.Length > 0)
                 {
                     offenders.Add($"{Path.GetFileName(file)}:{marks[i].Groups[1].Value}" +
                         (reaches ? "" : " (never uses the resolved anchor)") +
                         (namesNow ? " (names DateTime.UtcNow)" : "") +
-                        (dropped.Length > 0 ? $" (anchor not passed to {string.Join(", ", dropped)})" : ""));
+                        (dropped.Length > 0 ? $" (anchor not passed to {string.Join(", ", dropped)})" : "") +
+                        (droppedAnalysis.Length > 0 ? $" (anchor not passed to analysisService.{string.Join(", ", droppedAnalysis)})" : ""));
                 }
             }
         }
@@ -375,6 +390,40 @@ public sealed class AsOfWindowAnchorTests
         }
 
         Assert.True(methods.Count >= 40, $"only {methods.Count} anchor-taking service methods found — the scan is broken");
+        return methods;
+    }
+
+    /// <summary>
+    /// The ANALYSIS-service entry points that accept the anchor (#2506) — the same trick as
+    /// <see cref="AnchorableServiceMethods"/>, read off both SKUs' shipped sources.
+    ///
+    /// <para>Both SKUs are scanned into ONE set because the two services are deliberate twins with the
+    /// same member names, and the tools that call them are twins too. A per-SKU set would let one side
+    /// drop the anchor while the other kept it and still report nothing, which is the drift the
+    /// cross-SKU shape of this whole test exists to catch.</para>
+    /// </summary>
+    private static HashSet<string> AnchorableAnalysisServiceMethods()
+    {
+        var methods = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var directory in new[] { "Lite/Analysis", "Darling/PerformanceMonitor.Darling.Analysis" })
+        {
+            foreach (var file in RepoFilesIn(directory).Where(f => Path.GetFileName(f).EndsWith("AnalysisService.cs", StringComparison.Ordinal)))
+            {
+                var source = File.ReadAllText(file).Replace("\r\n", "\n", StringComparison.Ordinal);
+                foreach (Match m in Regex.Matches(source, @"public (?:async )?[\w<>?,\[\]\(\) ]+ (\w+)\(([^{]*?)\)\s*(?:=>|\n\s*\{)"))
+                {
+                    if (m.Groups[2].Value.Contains("asOfUtc", StringComparison.Ordinal))
+                    {
+                        methods.Add(m.Groups[1].Value);
+                    }
+                }
+            }
+        }
+
+        /* AnalyzeAsync, CollectAndScoreFactsAsync, GetRecentFindingsAsync — the three the analysis tools
+           reach the window through. Asserted so a regex that stopped matching cannot empty the set and
+           make the arm above pass by finding nothing to check. */
+        Assert.True(methods.Count >= 3, $"only {methods.Count} anchor-taking analysis-service methods found — the scan is broken");
         return methods;
     }
 
