@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
@@ -344,8 +345,26 @@ public sealed class DarlingMcpBlockingTools
         try
         {
             var now = DateTime.UtcNow;
+            var start = now.AddHours(-hours_back);
             var points = await DarlingBlockingTrendReader.GetBlockingTrendAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, start, now);
+
+            if (points.Count == 0)
+            {
+                /*
+                    An empty trend is two facts, and the WRONG one is the reassuring one. "No blocking"
+                    reads as an all-clear and a caller who believes it stops looking; "nothing collected"
+                    means nothing at all is known about the window. The stored tables cannot tell them
+                    apart -- both are an absence of rows in an EDGE table -- so the denominator has to come
+                    from collection_log, which records a SUCCESS with zero rows for a collector that ran
+                    and saw nothing. Probed only here, on the path that already found nothing.
+                */
+                var captures = await DarlingBlockingTrendReader.GetBlockingCaptureCountsAsync(
+                    postgres, resolved.ServerId, start, now);
+                return await EmptyTrend(
+                    "blocking", resolved.ServerName, hours_back, captures,
+                    () => DarlingBlockingTrendReader.HasAnyBlockingCollectorRunAsync(postgres, resolved.ServerId));
+            }
 
             return JsonSerializer.Serialize(new
             {
@@ -375,8 +394,22 @@ public sealed class DarlingMcpBlockingTools
         try
         {
             var now = DateTime.UtcNow;
+            var start = now.AddHours(-hours_back);
             var points = await DarlingBlockingTrendReader.GetDeadlockTrendAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, start, now);
+
+            if (points.Count == 0)
+            {
+                /* Same two facts as the blocking trend above, same denominator, same reason. */
+                var captures = await DarlingBlockingTrendReader.GetDeadlockCaptureCountsAsync(
+                    postgres, resolved.ServerId, start, now);
+                return await EmptyTrend(
+                    /* SINGULAR: the subject lands in "No {subject} was recorded", and "no deadlocks
+                       was recorded" is not a sentence. It also reads correctly in the other two,
+                       where it modifies the collector rather than the event. */
+                    "deadlock", resolved.ServerName, hours_back, captures,
+                    () => DarlingBlockingTrendReader.HasAnyDeadlockCollectorRunAsync(postgres, resolved.ServerId));
+            }
 
             return JsonSerializer.Serialize(new
             {
@@ -389,5 +422,58 @@ public sealed class DarlingMcpBlockingTools
         {
             return McpHelpers.FormatError("get_deadlock_trend", ex);
         }
+    }
+
+    /// <summary>
+    /// The empty answer both per-minute trends give, and the whole point of #2485: <c>trend: []</c> is the
+    /// same bytes on a server that had no blocking and on one that collected nothing, and an agent holding
+    /// only the JSON cannot tell a clean bill of health from a hole in coverage.
+    ///
+    /// <para>Two statuses, picked by the denominator rather than by the edge rows. <c>empty</c> means captures
+    /// ran in this window and none of them saw the event -- a real all-clear, bounded by the sampling
+    /// interval. <c>unavailable</c> means no capture ran, so the window says nothing either way; the
+    /// existence probe then separates a server that has never collected this at all from one with a GAP,
+    /// because "check that collection is running" and "widen the window" are different next moves.</para>
+    ///
+    /// <para><paramref name="hints"/> carries the per-collector run counts. A count of three events means
+    /// something different in a window of 60 captures than in a window of 4, and the caller cannot supply
+    /// that number itself. Lite's twin returns the SAME sentences word for word.</para>
+    /// </summary>
+    private static async Task<string> EmptyTrend(
+        /* SINGULAR ("blocking", "deadlock"): it is the subject of "No {subject} was recorded". */
+        string subject,
+        string serverName,
+        int hoursBack,
+        List<DarlingBlockingTrendReader.CaptureCount> captures,
+        Func<Task<bool>> hasEverCapturedAsync)
+    {
+        var captureCount = captures.Sum(c => c.Runs);
+        var hints = new
+        {
+            server = serverName,
+            hours_back = hoursBack,
+            capture_count = captureCount,
+            captures = captures.Select(c => new
+            {
+                collector = c.CollectorName,
+                runs = c.Runs,
+                first_run_at = c.FirstRunAt?.ToString("o"),
+                last_run_at = c.LastRunAt?.ToString("o"),
+            }),
+        };
+
+        if (captureCount > 0)
+            return McpHelpers.Status(
+                "empty",
+                $"No {subject} was recorded for {serverName} in the last {hoursBack} hour(s). {captureCount} collector run(s) DID execute over this window, so this is a genuine all-clear rather than missing data — see hints.captures for which collectors ran and when.",
+                hints);
+
+        var everCaptured = await hasEverCapturedAsync();
+        return McpHelpers.Status(
+            "unavailable",
+            everCaptured
+                ? $"No {subject} collector runs are recorded for {serverName} in the last {hoursBack} hour(s), so this is NOT an all-clear — nothing was captured and the window says nothing either way. Collection HAS run for this server outside the window, so this is a gap rather than a dead collector: widen hours_back, or use get_collection_health to find where it stopped."
+                : $"No {subject} collector runs have EVER been recorded for {serverName}, so this is NOT an all-clear — there is nothing to read. Check that collection is running for this server before concluding it was quiet.",
+            hints);
     }
 }

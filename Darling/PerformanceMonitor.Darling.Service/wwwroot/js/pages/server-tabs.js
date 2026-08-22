@@ -305,10 +305,12 @@ function stat(title, read, params, stats, subtitle, span = 1) {
 }
 
 /**
- * A line panel over a read's row array. `opts.emptyText` is REQUIRED for the same reason table()'s is, and for
- * one extra: two of these reads (get_blocking_trend, get_deadlock_trend) answer an idle server with `trend: []`
- * and NO {status,message} envelope, so without a sentence a perfectly healthy server was told "Not enough data
- * points to chart yet" about a condition it simply never had.
+ * A line panel over a read's row array. `opts.emptyText` is REQUIRED for the same reason table()'s is: without
+ * a sentence, a read whose empty array means the thing simply did not happen inherits renderLineChart's
+ * "Not enough data points to chart yet", which describes a condition it never had. get_blocking_trend and
+ * get_deadlock_trend used to be the sharpest example; #2485 gave those two a {status,message} envelope, so they
+ * now answer above this layer and their emptyText is the fallback rather than the sentence you see. Every other
+ * line read still lands here at zero rows.
  */
 function line(title, read, params, rowsKey, xKey, series, opts = {}) {
   if (!opts.emptyText) throw new Error("line(" + title + "): a chart panel must explain its own empty state.");

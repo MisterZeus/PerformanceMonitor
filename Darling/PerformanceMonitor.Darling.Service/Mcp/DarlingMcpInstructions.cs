@@ -123,8 +123,8 @@ internal static class DarlingMcpInstructions
         | `get_deadlock_detail` | The raw deadlock graph XML for the recent deadlocks | `server_name`, `hours_back` (default 24), `limit` (default 5), `dedup_key` (optional) |
         | `get_blocked_process_xml` | The raw blocked-process-report XML | `server_name`, `hours_back` (default 24), `limit` (default 5) |
         | `get_long_query_completions` | Longest completed queries (rpc/batch over the trace threshold) + attentions/cancels from the opt-in long-query trace, duration DESC (empty until the collector is enabled) | `server_name`, `hours_back` (default 24), `limit` (default 30) |
-        | `get_blocking_trend` | Per-minute blocking-incident counts over time (XE, DMV-snapshot fallback) | `server_name`, `hours_back` (default 24) |
-        | `get_deadlock_trend` | Per-minute deadlock counts over time | `server_name`, `hours_back` (default 24) |
+        | `get_blocking_trend` | Per-minute blocking-incident counts over time (XE, DMV-snapshot fallback). An empty result distinguishes a genuine all-clear (`empty`, with the collector run counts in `hints` so you can see how many captures the window actually holds) from a window no collector covered (`unavailable`), which is NOT an all-clear | `server_name`, `hours_back` (default 24) |
+        | `get_deadlock_trend` | Per-minute deadlock counts over time. An empty result distinguishes a genuine all-clear (`empty`, with the collector run counts in `hints` so you can see how many captures the window actually holds) from a window no collector covered (`unavailable`), which is NOT an all-clear | `server_name`, `hours_back` (default 24) |
         | `get_session_stats` | Latest per-application connection/session counts (running/sleeping/dormant) + resource totals | `server_name` |
         | `get_active_queries` | Captured running-query snapshots over the window (waits, CPU, blocking, grants) | `server_name`, `hours_back` (default 1), `database_name`, `blocking_only`, `limit` (default 50) |
         | `get_waiting_tasks` | Individual waiting tasks captured at collection time | `server_name`, `hours_back` (default 1), `limit` (default 30) |
