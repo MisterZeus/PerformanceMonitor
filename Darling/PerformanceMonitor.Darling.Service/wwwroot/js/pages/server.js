@@ -53,6 +53,20 @@ let pageHours = 24;
 let gridNode = null;
 let current = { server: null, tab: null };
 
+/* The render generation, and why it appeared with the engine branch rather than with the page.
+ *
+ * `route()` re-renders this page on every hash change — every sub-tab click — and again on every 60s poll, so
+ * two renderServer() calls are routinely in flight at once, and /api/fleet does not promise to answer them in
+ * order. Before the tab set depended on the card, the only async work here touched header nodes captured in
+ * its own closure, which a newer render had already detached from the document: a late response wrote to
+ * garbage and nobody saw it. Now the callback writes MODULE state — `current`, and the grid redrawPanels()
+ * reads — so the last response to land wins regardless of which render is on screen. Two servers in flight
+ * paints one server's panels under the other's header and URL.
+ *
+ * A generation counter rather than an AbortController because the losing render must not cancel the shared
+ * /api/fleet fetch out from under the winning one; the fetch is fine, it is only its RESULT that is stale. */
+let renderGeneration = 0;
+
 /** The {hours,label} context every tab build() is given. */
 function rangeContext() {
   const opt = RANGE_OPTIONS.find((o) => o.hours === pageHours) || RANGE_OPTIONS[3];
@@ -60,6 +74,7 @@ function rangeContext() {
 }
 
 export function renderServer(main, server, tabId) {
+  const generation = ++renderGeneration;
   current = { server, tab: null };
 
   const dot = el("span", { class: "dot" });
@@ -81,6 +96,10 @@ export function renderServer(main, server, tabId) {
   mount(main, [head, whySlot, tabsSlot, gridNode]);
 
   loadServerCard(server, (card, reason) => {
+    /* A newer render has started since this fetch went out — everything below writes module state or mounts
+       into nodes this render no longer owns, so the only correct thing to do with a stale answer is drop it. */
+    if (generation !== renderGeneration) return;
+
     fillServerHead(dot, badgeSlot, engineSlot, whySlot, card, reason);
 
     const tabs = serverTabsFor(card);

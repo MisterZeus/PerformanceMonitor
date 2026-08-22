@@ -340,6 +340,15 @@ public sealed class ServerPageTabsTests
         /* The shell asks that function and maps whatever it hands back. It never reads the boolean, never reads
            the token, and never spells either engine's name — the card carries all three already. */
         Assert.Contains("const tabs = serverTabsFor(card);", ServerJs, StringComparison.Ordinal);
+
+        /* And the answer is dropped when a newer render has started. Choosing the tab set made this page's
+           async half write MODULE state (`current`, and the grid redrawPanels reads) where it had only ever
+           touched nodes captured in its own closure — so a slow /api/fleet landing after a sub-tab click or a
+           60s poll would paint the older tab into the newer grid, and for two servers in flight would paint
+           one server's panels under the other's header. Pinned because the guard is invisible: the page looks
+           correct without it until two renders overlap. */
+        Assert.Contains("const generation = ++renderGeneration;", ServerJs, StringComparison.Ordinal);
+        Assert.Contains("if (generation !== renderGeneration) return;", ServerJs, StringComparison.Ordinal);
         Assert.DoesNotContain("card.is_postgres", ServerJs, StringComparison.Ordinal);
         Assert.DoesNotContain("card.engine_kind", ServerJs, StringComparison.Ordinal);
         Assert.DoesNotContain("\"aurora-postgres\"", ServerJs, StringComparison.Ordinal);
