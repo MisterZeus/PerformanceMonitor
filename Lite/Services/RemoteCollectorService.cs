@@ -647,11 +647,14 @@ public partial class RemoteCollectorService
             {
                 AppLogger.Warn("Collector", $"Collector '{collectorName}' column not found for server '{server.DisplayName}' (possible version incompatibility): {ex.Message}");
             }
-            else if (ex.Number == 229 || ex.Number == 297 || ex.Number == 300 || ex.Number == 8189)
+            else if (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
             {
                 /* 8189 is sys.traces' own denial (ALTER TRACE missing) — a legitimate least-privilege
                    choice (#1823), so default_trace_events degrades as PERMISSIONS like every other
-                   denied collector instead of erroring every cycle. Mirrors Darling's classifier. */
+                   denied collector instead of erroring every cycle. #2512 moved the number set into
+                   SqlServerPermissionErrors so this no longer MIRRORS Darling's classifier by
+                   transcription — it IS Darling's classifier, and 262 (the tempdb denial behind the
+                   collector's old Azure SQL DB gate) reaches both SKUs at once. */
                 status = "PERMISSIONS";
                 AppLogger.Warn("Collector", $"Collector '{collectorName}' permission denied for server '{server.DisplayName}': {ex.Message}");
             }

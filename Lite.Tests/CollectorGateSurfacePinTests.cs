@@ -62,23 +62,44 @@ public sealed class CollectorGateSurfacePinTests
     }
 
     /// <summary>
-    /// #2150 field report: this fired 11x consecutive on an Azure SQL DB elastic pool with error 262,
-    /// "VIEW DATABASE PERFORMANCE STATE permission denied in database 'tempdb'". The query reads
-    /// <c>tempdb.sys.dm_db_file_space_usage</c> three-part, which a non-administrative login on Azure
-    /// SQL DB cannot be granted, so the collector could only ever fail there.
-    /// <para>Managed Instance must KEEP collecting — it has a real tempdb — which is why this asserts
-    /// both directions rather than just the skip.</para>
+    /// tempdb_stats applies EVERYWHERE, Azure SQL Database included (#2512).
+    ///
+    /// <para><b>This assertion was flipped, and it is worth being precise about what it used to pin.</b>
+    /// It was written for the #2150 field report — 11x consecutive on an Azure SQL DB elastic pool with
+    /// error 262, "VIEW DATABASE PERFORMANCE STATE permission denied in database 'tempdb'" — and it pinned
+    /// TWO different claims in one <c>Assert.False</c>. The first, that the three-part
+    /// <c>tempdb.sys.dm_db_file_space_usage</c> reference cannot be served on Azure SQL Database, was
+    /// checkable and is false: the collector's SQL runs verbatim on GP_S_Gen5_2 and HS_S_Gen5_2 and returns
+    /// real, moving numbers (see <see cref="TempDbStatsCollector.AppliesTo"/> for the measurement). The
+    /// second, that a login might not be able to READ it, is true — but it is a property of the login, not
+    /// of the tier, so it belongs to the fault classifier
+    /// (<see cref="SqlServerPermissionErrors.IsPermissionDenied"/>, which now covers 262) and not to a gate
+    /// that denies every properly-permissioned Azure target to spare the one that is not.</para>
+    ///
+    /// <para><b>The other half of this pin never changed and is the reason it survives rather than being
+    /// deleted.</b> Managed Instance was never gated — it has a real tempdb and full DMV access — and the
+    /// original comment says outright that asserting BOTH directions is what stops an "anything Azure"
+    /// gate creeping in. That risk runs the other way now: this must not be re-narrowed to Azure SQL DB
+    /// later on the strength of the stale doc comment, so both directions still get asserted.</para>
     /// </summary>
     [Fact]
-    public void TempDbStats_AppliesTo_SkipsOnlyAzureSqlDb()
+    public void TempDbStats_AppliesTo_EveryTarget_IncludingAzureSqlDb()
     {
-        Assert.False(TempDbStatsCollector.Instance.AppliesTo(AzureSqlDb));  /* error 262 in tempdb */
+        /* #2512: the gate is gone. The DMVs bind and return real data on both Azure SQL DB tiers. */
+        Assert.True(TempDbStatsCollector.Instance.AppliesTo(AzureSqlDb));
+        /* Never gated, and must stay that way — MI has a real tempdb. */
         Assert.True(TempDbStatsCollector.Instance.AppliesTo(AzureMi));
         Assert.True(TempDbStatsCollector.Instance.AppliesTo(AwsRds));
         Assert.True(TempDbStatsCollector.Instance.AppliesTo(OnPrem2016));
         Assert.True(TempDbStatsCollector.Instance.AppliesTo(OnPrem2014));
         Assert.True(TempDbStatsCollector.Instance.AppliesTo(NoMsdb));
         Assert.True(TempDbStatsCollector.Instance.AppliesTo(Unknown));
+
+        /* The surface the runners actually call — the composed engine gate — must agree, or Darling
+           would still skip what Lite now runs. AppliesTo alone cannot see that half. */
+        Assert.True(CollectorCatalog.AppliesTo(TempDbStatsCollector.Instance, AzureSqlDb));
+        Assert.True(CollectorCatalog.AppliesTo(TempDbStatsCollector.Instance, AzureMi));
+        Assert.True(CollectorCatalog.AppliesTo(TempDbStatsCollector.Instance.Name, AzureSqlDb));
     }
 
     [Fact]

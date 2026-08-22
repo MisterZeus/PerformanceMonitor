@@ -4484,7 +4484,7 @@ LIMIT 1";
                 fanout: null, _logger, cancellationToken);
             return 0;
         }
-        catch (SqlException ex) when (ex.Number is 229 or 297 or 300 or 8189)
+        catch (SqlException ex) when (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
         {
             /* Same Azure explanation Lite appends (#1631): error 300 on Azure SQL Database is a service
                objective limit phrased as a permission denied on 'master', which reads as a missing GRANT
@@ -4492,7 +4492,11 @@ LIMIT 1";
                searchable. Parity is the point — a Darling operator gets the identical sentence Lite gives.
                8189 is sys.traces' own denial ("You do not have permission to run 'SYS.TRACES'", ALTER
                TRACE missing): a legitimate least-privilege choice (#1823) — ALTER TRACE is not read-only —
-               so default_trace_events must degrade as PERMISSIONS, not scream ERROR every cycle. */
+               so default_trace_events must degrade as PERMISSIONS, not scream ERROR every cycle.
+               #2512: the number set moved to SqlServerPermissionErrors, shared with Lite's catch and
+               with SqlServerTargetProvider.Classify, and gained 262 — "permission denied in database
+               'tempdb'", the #2150 denial that used to record ERROR every cycle and is the reason
+               tempdb_stats was gated off Azure SQL Database at all. */
             var message = ex.Message + AzureDmvPermissionHint.For(ex.Number, server.Runtime?.Target.IsAzureSqlDb == true);
 
             _logger.LogWarning("  [{Server}] {Collector} => insufficient permissions ({Number}): {Message}",
