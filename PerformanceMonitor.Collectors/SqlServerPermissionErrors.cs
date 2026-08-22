@@ -13,12 +13,19 @@ namespace PerformanceMonitor.Collectors;
 /// in ONE place. Both runners and <c>ITargetProvider.Classify</c> ask this rather than carrying their
 /// own copy of the list.
 ///
-/// <para><b>Why this is a shared predicate and not three literals.</b> It already WAS three literals,
-/// and they had already drifted: the SQL Server provider classified 916, while Darling's worker catch
-/// and Lite's <c>RunCollectorAsync</c> catch did not — so the engine seam whose stated purpose is that
-/// "the runner and the provider cannot disagree about what an error means" disagreed. Adding one number
-/// to three hand-maintained lists is how the fourth one gets missed; deriving all three from this set is
-/// how it cannot.</para>
+/// <para><b>Why this is a shared predicate and not six literals.</b> It already WAS six literals, and
+/// they had already drifted — in three different directions. The SQL Server provider classified 916;
+/// Darling's collector catch and Lite's <c>RunCollectorAsync</c> catch had 8189 but not 916; the two
+/// failed-jobs msdb reads had 916 but not 8189; and Lite's XE-session catch had neither. So the engine
+/// seam whose stated purpose is that "the runner and the provider cannot disagree about what an error
+/// means" disagreed with itself four ways. Adding one number to six hand-maintained lists is how the
+/// seventh site gets missed; deriving all of them from this set is how it cannot.</para>
+///
+/// <para><b>One set is right for all six because they all answer the same question</b> — "did the login
+/// get told no?" — even though they act on it differently: the collector catches record PERMISSIONS
+/// instead of ERROR, the failed-jobs reads return an empty list instead of failing the alert cycle, and
+/// the XE catch marks the capture unavailable. What each one DOES with the answer is its own business;
+/// what counts as a denial is not.</para>
 ///
 /// <para><b>262 (#2512).</b> "%ls permission denied in database '%.*ls'" — the denial a database-scoped
 /// DMV read raises when the login does not hold the permission IN the named database. It arrived with the

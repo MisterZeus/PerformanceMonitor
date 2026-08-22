@@ -3505,9 +3505,14 @@ LIMIT 1", connection);
         {
             throw;
         }
-        catch (SqlException ex) when (ex.Number is 229 or 297 or 300 or 916)
+        catch (SqlException ex) when (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
         {
-            /* Expected for read-only monitoring accounts; hit every alert cycle, so Info. The named
+            /* #2512: routed through the shared set rather than a fourth copy of it — this one had
+               916 but neither 262 nor 8189, which is the drift the set exists to end. Widening is safe
+               in the only direction that matters here: every number in it means the login cannot read
+               what it asked for, and the response is to return no jobs rather than fail the alert
+               cycle. A 262 naming msdb is exactly this case and used to fall through to the warning.
+               Expected for read-only monitoring accounts; hit every alert cycle, so Info. The named
                remedy is direct table SELECTs, NOT SQLAgentReaderRole: that role gates the sp_help_job*
                interface only and confers nothing on the base tables this query reads — a #1823 field
                box had the role and still landed here every cycle. */

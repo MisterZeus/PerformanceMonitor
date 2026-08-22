@@ -613,7 +613,12 @@ public partial class RemoteCollectorService
                direct SQL failure so the health indicator stops showing OK (#1086). */
             var sqlError = ex.InnerException;
             errorMessage = ex.Message;
-            status = (sqlError.Number == 229 || sqlError.Number == 297 || sqlError.Number == 300)
+            /* #2512: the shared set. This copy was the narrowest of the four — no 916, no 8189, no 262
+               — for no stated reason beyond having been written before the others grew. The additions
+               are inert or correct here rather than merely tolerable: 8189 is sys.traces and cannot
+               arise from an XE session ensure at all, while 262 and 916 both mean the login was denied
+               where it asked, which is the PERMISSIONS this arm already records for 229/297/300. */
+            status = SqlServerPermissionErrors.IsPermissionDenied(sqlError.Number)
                 ? "PERMISSIONS"
                 : "ERROR";
             xeSessionUnavailable = true;
