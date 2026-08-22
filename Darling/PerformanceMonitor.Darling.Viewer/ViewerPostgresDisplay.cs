@@ -62,6 +62,16 @@ internal static class PgDisplay
             unit++;
         }
 
+        /* The unit has to be chosen against the value AS RENDERED, not against the exact quotient. One byte
+           short of a megabyte the quotient is 1023.999…, which stays in KB and then rounds to "1024.0 KB" —
+           a number expressed in its own next unit, which reads as a typo rather than as a size. Re-check
+           once after rounding; one pass is enough, because the second division can only land on 1.0. */
+        if (unit < units.Length - 1 && Math.Round(scaled, 1) >= 1024)
+        {
+            scaled /= 1024;
+            unit++;
+        }
+
         return unit == 0
             ? $"{value:N0} B"
             : string.Create(CultureInfo.CurrentCulture, $"{scaled:N1} {units[unit]}");

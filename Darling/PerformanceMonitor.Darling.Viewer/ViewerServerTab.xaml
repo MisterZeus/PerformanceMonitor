@@ -3632,12 +3632,17 @@
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.RowStyle>
                         <Style TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
+                            <!-- LEAST severe first, same rule. These two happen to be mutually exclusive
+                                 (BuildPostgresCollectorHealth only sets IsFault when there is no engine
+                                 gap), so the order is not load-bearing today — it is written this way so it
+                                 stays correct if that ever stops being true, and so one rule covers every
+                                 row style on these tabs rather than one rule and one exception. -->
                             <Style.Triggers>
-                                <DataTrigger Binding="{Binding IsFault}" Value="True">
-                                    <Setter Property="Background" Value="#33FF6B6B"/>
-                                </DataTrigger>
                                 <DataTrigger Binding="{Binding IsPermanentGap}" Value="True">
                                     <Setter Property="Background" Value="#22FFFFFF"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding IsFault}" Value="True">
+                                    <Setter Property="Background" Value="#33FF6B6B"/>
                                 </DataTrigger>
                             </Style.Triggers>
                         </Style>
@@ -3974,12 +3979,17 @@
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.RowStyle>
                         <Style TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
+                            <!-- LEAST severe first. Both triggers set Background and WPF applies the LAST
+                                 match, and these two are not exclusive: an invalidated slot is usually also
+                                 inactive, because its subscriber has already gone. Declaring inactive last
+                                 would paint the informational amber over the red on exactly the rows that
+                                 need the red. -->
                             <Style.Triggers>
-                                <DataTrigger Binding="{Binding IsInvalidated}" Value="True">
-                                    <Setter Property="Background" Value="#33FF6B6B"/>
-                                </DataTrigger>
                                 <DataTrigger Binding="{Binding IsInactive}" Value="True">
                                     <Setter Property="Background" Value="#33FFB86B"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding IsInvalidated}" Value="True">
+                                    <Setter Property="Background" Value="#33FF6B6B"/>
                                 </DataTrigger>
                             </Style.Triggers>
                         </Style>

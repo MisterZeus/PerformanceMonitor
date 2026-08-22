@@ -430,6 +430,93 @@ public sealed class ViewerPostgresTabsTests
         Assert.Equal("0 ms", PgDisplay.Milliseconds(0));
     }
 
+    /// <summary>
+    /// A size never renders expressed in its own next unit. The unit is chosen against the quotient and the
+    /// quotient is then ROUNDED, so one byte short of a megabyte would otherwise print "1024.0 KB" — a
+    /// number that reads as a typo rather than as a size, on every column built over bytes.
+    /// </summary>
+    [Fact]
+    public void ASize_NeverRendersExpressedInItsOwnNextUnit()
+    {
+        var boundaries = new[]
+        {
+            1024L * 1024 - 1,                      // one byte short of 1 MB
+            1024L * 1024 * 1024 - 1,               // one byte short of 1 GB
+            1024L * 1024 * 1024 * 1024 - 1,        // one byte short of 1 TB
+        };
+
+        foreach (var value in boundaries)
+        {
+            Assert.DoesNotContain("1024", PgDisplay.Bytes(value), StringComparison.Ordinal);
+        }
+
+        /* The exact boundaries and the last value below them still read correctly — a guard that fixed the
+           rounding by breaking the ordinary case would be worse than the defect. */
+        Assert.Equal("1,023 B", PgDisplay.Bytes(1023));
+        Assert.StartsWith("1.0 KB", PgDisplay.Bytes(1024), StringComparison.Ordinal);
+        Assert.StartsWith("1.0 MB", PgDisplay.Bytes(1024 * 1024), StringComparison.Ordinal);
+        Assert.StartsWith("1.0 MB", PgDisplay.Bytes(1024L * 1024 - 1), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// In every PostgreSQL row style, the LEAST severe highlight is declared first.
+    ///
+    /// <para>WPF applies the LAST matching <c>DataTrigger</c> when several set the same property, and these
+    /// flags are not exclusive — an invalidated replication slot is usually also inactive, because its
+    /// subscriber has already gone. Declaring the informational amber last paints it over the red on exactly
+    /// the rows that need the red, which understates severity to someone scanning row colours. Asserted as a
+    /// rule over every row style on these tabs rather than fixed on the one grid where review found it.</para>
+    /// </summary>
+    [Fact]
+    public void EveryPostgresRowStyle_DeclaresItsSeverestHighlightLast()
+    {
+        var xaml = ViewerFile("ViewerServerTab.xaml");
+        var pgRegion = xaml[xaml.IndexOf("<TabItem x:Name=\"PgOverviewTab\"", StringComparison.Ordinal)..];
+
+        /* 2 = act on this, 1 = read this. A flag with no entry fails the scan rather than being skipped:
+           an unranked highlight is one nobody decided the severity of. */
+        var severity = new Dictionary<string, int>(StringComparer.Ordinal)
+        {
+            ["IsFault"] = 2,
+            ["IsInvalidated"] = 2,
+            ["AutovacuumDisabled"] = 2,
+            ["IsPermanentGap"] = 1,
+            ["IsInactive"] = 1,
+        };
+
+        var styles = Regex.Matches(pgRegion, "<Style.Triggers>(.*?)</Style.Triggers>", RegexOptions.Singleline);
+        Assert.True(styles.Count >= 3,
+            $"Only {styles.Count} PostgreSQL row styles found; the scan is not matching the XAML's shape.");
+
+        var problems = new List<string>();
+        foreach (Match style in styles)
+        {
+            var flags = Regex
+                .Matches(style.Groups[1].Value, "DataTrigger Binding=\"\\{Binding (\\w+)\\}\"")
+                .Select(m => m.Groups[1].Value)
+                .ToList();
+
+            foreach (var flag in flags.Where(f => !severity.ContainsKey(f)))
+            {
+                problems.Add($"'{flag}' has no severity ranking — add one rather than leaving it unordered");
+            }
+
+            for (var i = 1; i < flags.Count; i++)
+            {
+                if (severity.TryGetValue(flags[i - 1], out var previous) &&
+                    severity.TryGetValue(flags[i], out var current) &&
+                    current < previous)
+                {
+                    problems.Add($"'{flags[i]}' (severity {current}) is declared after '{flags[i - 1]}' " +
+                                 $"(severity {previous}); WPF applies the LAST match, so the milder state wins");
+                }
+            }
+        }
+
+        Assert.True(problems.Count == 0,
+            "PostgreSQL row highlight(s) declared in the wrong order:\n  " + string.Join("\n  ", problems));
+    }
+
     /// <summary>A percentage of nothing is not 0%. Dividing by a zero denominator has no answer, and "0%"
     /// is a claim about a ratio that was never computable.</summary>
     [Fact]
