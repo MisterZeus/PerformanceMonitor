@@ -12,7 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 
-namespace PerformanceMonitor.Darling.Service.Mcp;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// Reads the per-database <c>pg_stat_database</c> counters from <c>pg_database_stats</c>, differenced across

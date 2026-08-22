@@ -56,9 +56,15 @@ public sealed class DarlingPgReadSqlParsesLiveTests
     /// rather than the reader methods because a method would need a connection, a server and a window; the
     /// constant IS the shipped text, which is the thing under test.
     /// </summary>
+    /// <para>The namespace comes from a reader TYPE rather than a string literal (#2530), for the reason
+    /// the discovery is reflective in the first place: the readers moved to
+    /// <c>PerformanceMonitor.Darling.Storage</c> so the WPF viewer could run the same query text, and a
+    /// hardcoded namespace matched nothing afterwards. The anti-vacuity floor below caught it — a guard that
+    /// stopped guarding, reported as one — but a filter anchored to a type it must find anyway cannot break
+    /// that way twice.</para>
     private static IReadOnlyList<(string Name, string Sql)> ShippedReadSql() =>
         typeof(DarlingPgStatementReader).Assembly.GetTypes()
-            .Where(t => t.Namespace == "PerformanceMonitor.Darling.Service.Mcp"
+            .Where(t => t.Namespace == typeof(DarlingPgStatementReader).Namespace
                         && t.Name.StartsWith("DarlingPg", StringComparison.Ordinal)
                         && t.Name.EndsWith("Reader", StringComparison.Ordinal))
             .SelectMany(t => t
