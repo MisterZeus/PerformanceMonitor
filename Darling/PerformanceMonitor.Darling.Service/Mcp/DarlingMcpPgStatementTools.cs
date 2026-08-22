@@ -7,7 +7,9 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -24,7 +26,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgStatementTools
 {
-    [McpServerTool(Name = "get_pg_top_queries"), Description("Gets the top PostgreSQL query shapes by total execution time over a time period, for Amazon Aurora PostgreSQL targets. Includes Aurora's I/O source breakdown, which stock PostgreSQL cannot provide: a block 'read' may have come from the distributed storage volume or from the local NVMe Optimized Reads cache, and the two have very different costs. Also reports peak memory per statement, the closest PostgreSQL equivalent of a memory grant, and WAL bytes generated, which has no SQL Server DMV counterpart. Returns query_text for each statement, captured hourly and keyed on queryid, or null when none has been captured yet (a statement first seen minutes ago, or a queryid minted by a major-version upgrade). queryid itself is stable within a major version but changes across a major upgrade — which is exactly why the text is STORED rather than fetched live: after an upgrade the live view no longer holds the old ids, so their text would otherwise be unrecoverable and the history would read as a list of integers. This is a separate tool from get_top_queries_by_cpu, which covers SQL Server.")]
+    [McpServerTool(Name = "get_pg_top_queries"), Description("Gets the top PostgreSQL query shapes by total execution time over a time period, for Amazon Aurora PostgreSQL targets. Includes Aurora's I/O source breakdown, which stock PostgreSQL cannot provide: a block 'read' may have come from the distributed storage volume or from the local NVMe Optimized Reads cache, and the two have very different costs. Also reports peak memory per statement, the closest PostgreSQL equivalent of a memory grant, and WAL bytes generated, which has no SQL Server DMV counterpart. Returns query_text for each statement, captured hourly and keyed on queryid, or null when none has been captured yet (a statement first seen minutes ago, or a queryid minted by a major-version upgrade). queryid itself is stable within a major version but changes across a major upgrade — which is exactly why the text is STORED rather than fetched live: after an upgrade the live view no longer holds the old ids, so their text would otherwise be unrecoverable and the history would read as a list of integers. queryid is returned as a STRING, not a number: it is a signed 64-bit value spread over the whole int8 range, so most ids exceed what a JSON number survives and a numeric wire form would be silently rounded by any parser that decodes numbers as IEEE-754 doubles — after which it matches nothing. Compare it and join on it as text. This is a separate tool from get_top_queries_by_cpu, which covers SQL Server.")]
     public static async Task<string> GetPgTopQueries(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -64,65 +66,116 @@ public sealed class DarlingMcpPgStatementTools
                         + "not be a PostgreSQL one at all — check list_servers.");
             }
 
-            var totalTimeMs = rows.Sum(r => r.TotalExecTimeMs);
-
-            var result = rows.Take(limit).Select(r =>
-            {
-                var storageAndCache = r.StorageBlocksRead + r.OrcacheBlocksHit;
-                return new
-                {
-                    queryid = r.QueryId,
-                    database_id = r.DatabaseId,
-                    calls = r.Calls,
-                    total_exec_time_ms = r.TotalExecTimeMs,
-                    avg_exec_time_ms = r.Calls > 0 ? Math.Round((double)r.TotalExecTimeMs / r.Calls, 3) : 0,
-                    max_exec_time_ms = Math.Round(r.MaxExecTimeMs, 3),
-                    rows_returned = r.RowsReturned,
-                    pct_of_total_time = totalTimeMs > 0 ? Math.Round((double)r.TotalExecTimeMs / totalTimeMs * 100, 1) : 0,
-                    /* Aurora's I/O split, which is the point of using aurora_stat_statements over the
-                       vanilla view. A high orcache share means the reads were cheap local NVMe hits; a
-                       high storage share means network round trips to the cluster volume. The community
-                       cache-hit ratio cannot distinguish these and so overstates the cost of one and
-                       understates the other. */
-                    shared_blks_hit = r.SharedBlocksHit,
-                    shared_blks_read = r.SharedBlocksRead,
-                    storage_blks_read = r.StorageBlocksRead,
-                    orcache_blks_hit = r.OrcacheBlocksHit,
-                    orcache_hit_pct_of_reads = storageAndCache > 0
-                        ? Math.Round((double)r.OrcacheBlocksHit / storageAndCache * 100, 1)
-                        : (double?)null,
-                    /* Spills. temp blocks are sort/hash spill to disk, NOT temporary tables - those are
-                       the local_blks_* family and a different problem. */
-                    temp_blks_read = r.TempBlocksRead,
-                    temp_blks_written = r.TempBlocksWritten,
-                    wal_bytes = r.WalBytes,
-                    max_exec_peakmem_bytes = r.MaxPeakMemBytes,
-                    // #2219: the statement text, or null when none has been captured for this queryid yet.
-                    // Null is honest rather than a placeholder — text refreshes hourly, so a statement first
-                    // seen minutes ago has none, and after a major-version upgrade re-keys queryid the new ids
-                    // have none until the next refresh. An empty string would read as "the query is blank".
-                    query_text = r.QueryText,
-                };
-            });
-
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.ServerName,
-                hours_back,
-                total_exec_time_ms = totalTimeMs,
-                /* Every counter here covers the window, so a caller can safely divide one by another.
-                   Only the two high-water marks are not counters, and saying which is cheaper than
-                   letting someone assume max_exec_time_ms is a windowed total. */
-                note = "All counters cover the requested window: calls, total_exec_time_ms and "
-                     + "rows_returned from stored per-interval deltas, and the block and WAL figures "
-                     + "differenced across the window's snapshots. max_exec_time_ms and "
-                     + "max_exec_peakmem_bytes are high-water marks, not windowed totals.",
-                queries = result,
-            }, McpHelpers.JsonOptions);
+            return BuildTopQueriesJson(resolved.ServerName, hours_back, rows, limit);
         }
         catch (Exception ex)
         {
+            /* #2554: a THROW is a miss too, and until now it was the one miss the capability answer could
+               not reach. The gate sat inside `if (rows.Count == 0)`, so it only ever spoke when the query
+               SUCCEEDED and returned nothing — and a stock-PostgreSQL caller, for whom pg_statement_stats
+               can never run at all (its AppliesTo is Aurora-only), got a raw SQL error where its sibling
+               get_pg_wait_stats gives the honest "does not run on that engine, and never will".
+
+               Consulted HERE rather than moved ahead of the read, which is what it looks like it should be.
+               DarlingEngineCapability's contract is explicit that every call site asks AFTER its read came
+               back empty, never before: a server whose registry row says one engine while its collected rows
+               say another — a re-registration, a restored database — must still get its DATA rather than a
+               confident explanation of why it cannot have any. Asking first would trade this defect for that
+               one, across every read. On the throw path there is no data to prefer, so the same contract
+               points the other way.
+
+               And this stays narrow rather than swallowing failures: NotCollectedStatusAsync returns null
+               unless the collector provably cannot run on this server's engine, so a transient error against
+               an Aurora target still surfaces as an error. */
+            var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
+                postgres, resolved.ServerId, resolved.ServerName, "pg_statement_stats");
+            if (gated != null)
+            {
+                return gated;
+            }
+
             return McpHelpers.Status("error", $"Reading PostgreSQL query stats failed: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// The response body, split out from the tool so the WIRE SHAPE can be asserted directly (#2548). The
+    /// tool itself needs a live store and a resolved server, neither of which a serialization guard has any
+    /// business standing up — and a guard that re-implements the projection instead would keep passing while
+    /// the shipped one drifted underneath it.
+    /// </summary>
+    internal static string BuildTopQueriesJson(
+        string serverName,
+        int hoursBack,
+        IReadOnlyList<DarlingPgStatementReader.PgStatementRow> rows,
+        int limit)
+    {
+        var totalTimeMs = rows.Sum(r => r.TotalExecTimeMs);
+
+        var result = rows.Take(limit).Select(r =>
+        {
+            var storageAndCache = r.StorageBlocksRead + r.OrcacheBlocksHit;
+            return new
+            {
+                /* #2548: a STRING, not a number. queryid is a signed int8 whose values are spread over the
+                   whole 64-bit range, so most of them are past 2^53 and every parser that decodes JSON
+                   numbers as IEEE-754 doubles — JSON.parse, json.loads, most agent tooling — silently
+                   rounds one. That is not the same failure as a rounded metric: queryid is the ONLY
+                   identity a PostgreSQL statement has, and every use of it (SELECT … WHERE queryid = …,
+                   matching this row against the operator's own screen, quoting it in a ticket) is an
+                   equality join, which a rounded key loses entirely rather than approximates. A string
+                   costs a type change once; a number costs the value on every read. It also matches how
+                   SQL Server's query_hash already reaches this surface — as text, never as an integer.
+                   database_id stays a number beside it because an oid is unsigned 32-bit and so cannot
+                   reach the rounding range. Invariant culture, because a negative id must render with
+                   ASCII '-' whatever the host's locale would prefer. */
+                queryid = r.QueryId.ToString(CultureInfo.InvariantCulture),
+                database_id = r.DatabaseId,
+                calls = r.Calls,
+                total_exec_time_ms = r.TotalExecTimeMs,
+                avg_exec_time_ms = r.Calls > 0 ? Math.Round((double)r.TotalExecTimeMs / r.Calls, 3) : 0,
+                max_exec_time_ms = Math.Round(r.MaxExecTimeMs, 3),
+                rows_returned = r.RowsReturned,
+                pct_of_total_time = totalTimeMs > 0 ? Math.Round((double)r.TotalExecTimeMs / totalTimeMs * 100, 1) : 0,
+                /* Aurora's I/O split, which is the point of using aurora_stat_statements over the
+                   vanilla view. A high orcache share means the reads were cheap local NVMe hits; a
+                   high storage share means network round trips to the cluster volume. The community
+                   cache-hit ratio cannot distinguish these and so overstates the cost of one and
+                   understates the other. */
+                shared_blks_hit = r.SharedBlocksHit,
+                shared_blks_read = r.SharedBlocksRead,
+                storage_blks_read = r.StorageBlocksRead,
+                orcache_blks_hit = r.OrcacheBlocksHit,
+                orcache_hit_pct_of_reads = storageAndCache > 0
+                    ? Math.Round((double)r.OrcacheBlocksHit / storageAndCache * 100, 1)
+                    : (double?)null,
+                /* Spills. temp blocks are sort/hash spill to disk, NOT temporary tables - those are
+                   the local_blks_* family and a different problem. */
+                temp_blks_read = r.TempBlocksRead,
+                temp_blks_written = r.TempBlocksWritten,
+                wal_bytes = r.WalBytes,
+                max_exec_peakmem_bytes = r.MaxPeakMemBytes,
+                // #2219: the statement text, or null when none has been captured for this queryid yet.
+                // Null is honest rather than a placeholder — text refreshes hourly, so a statement first
+                // seen minutes ago has none, and after a major-version upgrade re-keys queryid the new ids
+                // have none until the next refresh. An empty string would read as "the query is blank".
+                query_text = r.QueryText,
+            };
+        });
+
+        return JsonSerializer.Serialize(new
+        {
+            server = serverName,
+            hours_back = hoursBack,
+            total_exec_time_ms = totalTimeMs,
+            /* Every counter here covers the window, so a caller can safely divide one by another.
+               Only the two high-water marks are not counters, and saying which is cheaper than
+               letting someone assume max_exec_time_ms is a windowed total. */
+            note = "All counters cover the requested window: calls, total_exec_time_ms and "
+                 + "rows_returned from stored per-interval deltas, and the block and WAL figures "
+                 + "differenced across the window's snapshots. max_exec_time_ms and "
+                 + "max_exec_peakmem_bytes are high-water marks, not windowed totals.",
+            queries = result,
+        }, McpHelpers.JsonOptions);
     }
 }
