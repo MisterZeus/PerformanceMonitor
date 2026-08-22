@@ -88,12 +88,12 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
     /// REORDERING that keeps the same names still fails.</para>
     /// </summary>
     [Theory]
-    [InlineData("get_blocking", "server_name,hours_back,limit")]
-    [InlineData("get_deadlocks", "server_name,hours_back,limit")]
-    [InlineData("get_deadlock_detail", "server_name,hours_back,limit")]
-    [InlineData("get_blocked_process_xml", "server_name,hours_back,limit")]
-    [InlineData("get_blocking_trend", "server_name,hours_back")]
-    [InlineData("get_deadlock_trend", "server_name,hours_back")]
+    [InlineData("get_blocking", "server_name,hours_back,limit,as_of")]
+    [InlineData("get_deadlocks", "server_name,hours_back,limit,as_of")]
+    [InlineData("get_deadlock_detail", "server_name,hours_back,limit,as_of")]
+    [InlineData("get_blocked_process_xml", "server_name,hours_back,limit,as_of")]
+    [InlineData("get_blocking_trend", "server_name,hours_back,as_of")]
+    [InlineData("get_deadlock_trend", "server_name,hours_back,as_of")]
     public void ParamContract_MatchesLite(string toolName, string expectedCsv)
     {
         var expected = expectedCsv.Split(',');

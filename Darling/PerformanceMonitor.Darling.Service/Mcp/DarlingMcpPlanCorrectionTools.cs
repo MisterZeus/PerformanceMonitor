@@ -35,19 +35,20 @@ public sealed class DarlingMcpPlanCorrectionTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum recommendation rows. Default 50.")] int limit = 50)
+        [Description("Maximum recommendation rows. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var tuning = await DarlingPlanCorrectionReader.GetLatestAutomaticTuningAsync(postgres, resolved.ServerId);
             var rows = await DarlingPlanCorrectionReader.GetPlanCorrectionsAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);

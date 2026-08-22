@@ -64,12 +64,12 @@ public partial class LocalDataService
     /// compared with everything collected before it, ranked by execution-count-weighted extra duration.
     /// </summary>
     public async Task<List<QueryStoreRegressionRow>> GetQueryStoreRegressionsAsync(
-        int serverId, int hoursBack = 24, int maxRows = 50, IReadOnlyList<string>? databaseNames = null)
+        int serverId, int hoursBack = 24, int maxRows = 50, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         var limitIndex = 4 + dbValues.Count;
 
@@ -224,12 +224,12 @@ LIMIT $" + limitIndex;
     /// <c>DarlingQueryStoreRegressionReader.RegressionCoverageSql</c>.</para>
     /// </summary>
     public async Task<(bool HasBaseline, bool HasRecent)> GetQueryStoreRegressionCoverageAsync(
-        int serverId, int hoursBack = 24)
+        int serverId, int hoursBack = 24, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         command.CommandText = @"
 SELECT

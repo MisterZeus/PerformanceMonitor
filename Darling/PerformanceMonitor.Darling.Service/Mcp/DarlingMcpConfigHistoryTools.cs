@@ -44,21 +44,23 @@ public sealed class DarlingMcpConfigHistoryTools
     public static async Task<string> GetServerConfigChanges(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history to retrieve. Default 168 (7 days).")] int hours_back = 168)
+        [Description("Hours of history to retrieve. Default 168 (7 days).")] int hours_back = 168,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         try
         {
-            var windowStart = NaiveUtcNow().AddHours(-hours_back);
+            var windowEndNaive = NaiveUtc(windowEnd);
+            var windowStart = windowEndNaive.AddHours(-hours_back);
             var snapshots = await DarlingConfigHistoryReader.GetServerConfigSnapshotsAsync(postgres, resolved.ServerId);
             /* The tool reads the full unbounded history and only lower-bounds, so pass DateTime.MaxValue as the
                (no-op) upper edge — the shared both-edges diff then reproduces the prior behavior exactly. */
-            var changes = ConfigChangeDiff.DiffServerConfigChanges(snapshots, windowStart, DateTime.MaxValue);
+            var changes = ConfigChangeDiff.DiffServerConfigChanges(snapshots, windowStart, UpperEdge(as_of, windowEndNaive));
             if (changes.Count == 0)
                 return NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)));
 
@@ -92,19 +94,21 @@ public sealed class DarlingMcpConfigHistoryTools
     public static async Task<string> GetDatabaseConfigChanges(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history to retrieve. Default 168 (7 days).")] int hours_back = 168)
+        [Description("Hours of history to retrieve. Default 168 (7 days).")] int hours_back = 168,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         try
         {
-            var windowStart = NaiveUtcNow().AddHours(-hours_back);
+            var windowEndNaive = NaiveUtc(windowEnd);
+            var windowStart = windowEndNaive.AddHours(-hours_back);
             var snapshots = await DarlingConfigHistoryReader.GetDatabaseConfigSnapshotsAsync(postgres, resolved.ServerId);
-            var changes = ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, windowStart, DateTime.MaxValue);
+            var changes = ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, windowStart, UpperEdge(as_of, windowEndNaive));
             if (changes.Count == 0)
                 return NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)));
 
@@ -135,19 +139,21 @@ public sealed class DarlingMcpConfigHistoryTools
     public static async Task<string> GetTraceFlagChanges(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history to retrieve. Default 168 (7 days).")] int hours_back = 168)
+        [Description("Hours of history to retrieve. Default 168 (7 days).")] int hours_back = 168,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         try
         {
-            var windowStart = NaiveUtcNow().AddHours(-hours_back);
+            var windowEndNaive = NaiveUtc(windowEnd);
+            var windowStart = windowEndNaive.AddHours(-hours_back);
             var snapshots = await DarlingConfigHistoryReader.GetTraceFlagSnapshotsAsync(postgres, resolved.ServerId);
-            var changes = ConfigChangeDiff.DiffTraceFlagChanges(snapshots, windowStart, DateTime.MaxValue);
+            var changes = ConfigChangeDiff.DiffTraceFlagChanges(snapshots, windowStart, UpperEdge(as_of, windowEndNaive));
             if (changes.Count == 0)
                 return NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)));
 
@@ -302,5 +308,15 @@ public sealed class DarlingMcpConfigHistoryTools
             _ => "",
         };
 
-    private static DateTime NaiveUtcNow() => DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+    private static DateTime NaiveUtc(DateTime utc) => DateTime.SpecifyKind(utc, DateTimeKind.Unspecified);
+
+    /// <summary>
+    /// The diff's upper edge. With no <c>as_of</c> the read is still open-ended
+    /// (<see cref="DateTime.MaxValue"/>) — byte-for-byte the pre-#2495 behaviour, and deliberately not
+    /// "now": these snapshots are stamped by the collector, so a capture whose clock ran a little ahead of
+    /// the service's would drop out of a window it belongs in. An anchored read bounds at the anchor,
+    /// because that is the whole point of sending one.
+    /// </summary>
+    private static DateTime UpperEdge(string? asOf, DateTime anchorNaiveUtc) =>
+        string.IsNullOrWhiteSpace(asOf) ? DateTime.MaxValue : anchorNaiveUtc;
 }

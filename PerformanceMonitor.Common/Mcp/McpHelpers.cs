@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Text.Json;
 
 namespace PerformanceMonitor.Common;
@@ -66,6 +67,101 @@ internal static class McpHelpers
             return $"Invalid hours_back value '{hoursBack}'. Must be a positive integer (1-{MaxHoursBack}).";
         if (hoursBack > MaxHoursBack)
             return $"hours_back value '{hoursBack}' exceeds maximum of {MaxHoursBack} hours (7 days). Use a smaller value.";
+        return null;
+    }
+
+    /// <summary>
+    /// Validates a windowed read's two time knobs together and hands back the window's END — the single call
+    /// every windowed read makes in place of a bare <see cref="ValidateHoursBack"/>.
+    ///
+    /// <para>The span is checked BEFORE the anchor so a caller who sent both wrong is told about
+    /// <c>hours_back</c> first, exactly as they were before <c>as_of</c> existed. <paramref name="endUtc"/> is
+    /// only meaningful when this returns null.</para>
+    /// </summary>
+    public static string? ValidateWindow(int hoursBack, string? asOf, out DateTime endUtc)
+    {
+        endUtc = DateTime.UtcNow;
+
+        var hoursError = ValidateHoursBack(hoursBack);
+        if (hoursError != null)
+        {
+            return hoursError;
+        }
+
+        return ResolveAsOf(asOf, out endUtc);
+    }
+
+    /// <summary>
+    /// The <c>as_of</c> parameter's description, shared VERBATIM by every windowed read on both SKUs.
+    ///
+    /// <para>It is a constant rather than 100 hand-typed attribute strings for the reason the rest of the
+    /// two-SKU parity rules exist: the same parameter described two different ways on two servers is a
+    /// divergence no test would catch and every agent would notice.</para>
+    /// </summary>
+    public const string AsOfDescription =
+        "Optional UTC anchor for the END of the window, ISO-8601 (2026-08-18T14:30:00Z, or 2026-08-18 for " +
+        "midnight UTC). Omit to anchor at now. The window is the hours_back hours ENDING here, so a past " +
+        "incident is 'as_of the end of it, hours_back its length' — widening hours_back is NOT the same " +
+        "question, because a wider window is a different aggregate, not the same one with more rows.";
+
+    /// <summary>
+    /// How far past <c>now</c> an <c>as_of</c> anchor may sit and still be accepted.
+    ///
+    /// <para>Not a grace period for asking about the future — it is the client-clock allowance. An agent that
+    /// computes "now" from its own clock and sends it as <c>as_of</c> must not be refused because that clock
+    /// runs a minute or two fast, and a stored read is answering out of a store whose newest row is minutes
+    /// old anyway. Anything beyond this is a real request for data that cannot exist yet.</para>
+    /// </summary>
+    public static readonly TimeSpan AsOfFutureTolerance = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Resolves the END of a windowed read from the optional <c>as_of</c> anchor: <paramref name="endUtc"/>
+    /// receives <see cref="DateTime.UtcNow"/> when the caller sent nothing (the pre-#2495 behaviour, exactly),
+    /// or the parsed instant when they did. Returns null when the anchor is usable, an error message when it
+    /// is not.
+    ///
+    /// <para>REFUSES rather than substitutes, following <see cref="ValidateTop"/>: a caller who sent an anchor
+    /// we could not use asked a specific question, and quietly answering a different one — silently falling
+    /// back to now — is the failure mode this whole parameter exists to remove. A read that says "the last 4
+    /// hours" when it was asked for "the 4 hours ending Tuesday 03:00" is indistinguishable from a correct
+    /// answer.</para>
+    ///
+    /// <para>There is deliberately NO lower bound. An <c>as_of</c> older than anything the store holds is a
+    /// legitimate question with an honest answer — the read's own <c>empty</c> / <c>unavailable</c> status —
+    /// and the caller knows the anchor they sent, so that status is unambiguous. A hardcoded floor would have
+    /// to guess at retention, which is per-deployment, per-server and per-collector, and would refuse real
+    /// reads on a long-retention store. The SPAN is still bounded by <see cref="ValidateHoursBack"/>; only the
+    /// anchor is free.</para>
+    /// </summary>
+    public static string? ResolveAsOf(string? asOf, out DateTime endUtc)
+    {
+        var now = DateTime.UtcNow;
+        endUtc = now;
+
+        if (string.IsNullOrWhiteSpace(asOf))
+        {
+            return null;
+        }
+
+        /* AssumeUniversal so a bare "2026-08-18T14:30:00" is read as UTC rather than as the SERVICE host's
+           local time — the store is UTC throughout, the caller is an agent on some other machine, and a
+           silent local-time reading would shift the window by the host's offset with nothing to show for it.
+           AdjustToUniversal then normalises an explicit offset ("...+02:00") into the same UTC instant. */
+        if (!DateTime.TryParse(
+                asOf,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
+                out var parsed))
+        {
+            return $"Invalid as_of value '{asOf}'. Expected an ISO-8601 UTC instant, e.g. '2026-08-18T14:30:00Z' or '2026-08-18'.";
+        }
+
+        if (parsed > now + AsOfFutureTolerance)
+        {
+            return $"as_of value '{asOf}' is in the future. A stored read cannot cover data that has not been collected yet; anchor at or before now (UTC).";
+        }
+
+        endUtc = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
         return null;
     }
 

@@ -23,17 +23,18 @@ public sealed class McpDefaultTraceTools
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
-        [Description("Maximum number of events to return. Default 100.")] int limit = 100)
+        [Description("Maximum number of events to return. Default 100.")] int limit = 100,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
+            var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
-            var rows = await dataService.GetDefaultTraceEventsAsync(resolved.ServerId, hours_back);
+            var rows = await dataService.GetDefaultTraceEventsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No significant default trace events found in the requested time range.");
 
