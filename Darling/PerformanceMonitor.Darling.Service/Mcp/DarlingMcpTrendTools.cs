@@ -34,9 +34,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// windowed BOTH-sides on the naive-UTC <c>collection_time</c>, byte-identical to the viewer's proven
 /// chart reads. get_perfmon_trend reproduces Lite's miss vocabulary (the intentionally-uncollected Page
 /// Life Expectancy special-case + the collected-counters hint); get_query_trend reproduces Lite's per-key
-/// "empty" miss; the three unkeyed trends return the #1224 "unavailable" miss on an empty window, matching
-/// the merged get_tempdb_trend sibling. A response-shape change here must land in Lite's Mcp*Tools too, and
-/// vice versa.
+/// "empty" miss; the three unkeyed trends now distinguish the two kinds of nothing (#2485) rather than
+/// collapsing both into one "unavailable" — a quiet window answers "empty" and tells the caller to widen
+/// it, while a server the collector has never sampled answers "unavailable" and says so outright. A
+/// response-shape change here must land in Lite's Mcp*Tools too, and vice versa.
 /// </para>
 /// </summary>
 [McpServerToolType]
