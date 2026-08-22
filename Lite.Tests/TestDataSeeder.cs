@@ -1367,11 +1367,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 0,
     }
 
     /// <summary>
-    /// Seeds tempdb_stats across 16 collection points.
-    /// </summary>
-    /// <summary>
-    /// <paramref name="maxSizeMb"/> is the #2515 growth ceiling: null seeds NULL, which is what every row
-    /// collected before the v56 migration looks like and the state the callers here want by default.
+    /// Seeds tempdb_stats across 16 collection points. <paramref name="maxSizeMb"/> is the #2515 growth
+    /// ceiling: null seeds NULL, which is what every row collected before the v56 migration looks like and
+    /// the state the callers here want by default.
     /// </summary>
     internal async Task SeedTempDbAsync(double reservedMb, double unallocatedMb,
         double userObjectMb = 0, double internalObjectMb = 0, double versionStoreMb = 0,

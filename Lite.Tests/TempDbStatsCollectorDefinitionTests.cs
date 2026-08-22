@@ -78,7 +78,7 @@ public sealed class TempDbStatsCollectorDefinitionTests
         /* -1 on any one data file means tempdb as a whole grows without limit, and MIN is what finds it. */
         Assert.Contains("WHEN MIN(df.max_size) = -1", queryText, System.StringComparison.Ordinal);
 
-        /* House convention, and it is load-bearing on a query that now carries a correlated aggregate. */
+        /* House convention, and it is load-bearing on a query that now carries a second aggregate. */
         Assert.Contains("OPTION(RECOMPILE)", queryText, System.StringComparison.Ordinal);
     }
 

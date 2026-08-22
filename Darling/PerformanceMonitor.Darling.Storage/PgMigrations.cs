@@ -1724,8 +1724,9 @@ ALTER TABLE collect.tempdb_stats
     ADD COLUMN IF NOT EXISTS max_size_mb numeric(18,2);
 
 /* Postgres FREEZES a view's SELECT * column list at CREATE, so the V4 passthrough the analysis fact
-   collector reads would keep serving eleven columns forever — the V14 lesson, restated by V80. Appending is
-   the one alteration CREATE OR REPLACE VIEW permits, which is exactly what an ADD COLUMN produces. */
+   collector reads would keep serving the twelve columns it had forever — the V14 lesson, restated by V80.
+   Appending is the one alteration CREATE OR REPLACE VIEW permits, which is exactly what an ADD COLUMN
+   produces. */
 CREATE OR REPLACE VIEW collect.v_tempdb_stats AS SELECT * FROM collect.tempdb_stats;";
 
     /// <summary>

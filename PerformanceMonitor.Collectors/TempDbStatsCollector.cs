@@ -28,6 +28,12 @@ namespace PerformanceMonitor.Collectors;
 /// pre-sized on-prem box only because such a tempdb has already reached its ceiling. Where the ceiling
 /// is a real value it is discoverable — <c>SUM(max_size)</c> over tempdb's ROWS files — so
 /// <c>max_size_mb</c> ships beside the allocation and the consumers divide by the ceiling instead.</para>
+///
+/// <para>Run verbatim against SQL Server 2022 (8 tempdb data files, 1 log file): unlimited files report
+/// <c>-1</c>; capping the eight data files at 100 MB and the LOG at 2,048 MB reports <b>800.00</b>, so the
+/// log's cap really is excluded rather than merely intended to be; returning one data file to UNLIMITED
+/// takes the whole answer back to <c>-1</c>, which is the correct reading — tempdb as a whole can then grow
+/// without limit.</para>
 /// </summary>
 public sealed class TempDbStatsCollector : CollectorDefinitionBase<TempDbStatsCollector.Row>
 {

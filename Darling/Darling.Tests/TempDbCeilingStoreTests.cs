@@ -257,12 +257,13 @@ public sealed class TempDbCeilingStoreTests
     /* ---------------- gated live E2E ---------------- */
 
     /// <summary>
-    /// The same two shapes through the REAL read against live Postgres. The pure arithmetic above cannot see
-    /// a column that is selected but not mapped, an ordinal off by one, or a NULL that arrives as something
-    /// other than zero — and every one of those would put the alert back on the allocation silently.
+    /// All three states of the ceiling through the REAL read against live Postgres. The pure arithmetic
+    /// above cannot see a column that is selected but not mapped, an ordinal off by one, or a NULL that
+    /// arrives as something other than zero — and every one of those would put the alert back on the
+    /// allocation silently.
     /// </summary>
     [Fact]
-    public async Task EndToEnd_TheCeilingSurvivesTheStoreRoundTrip_ForBothShapes()
+    public async Task EndToEnd_TheCeilingSurvivesTheStoreRoundTrip_ForAllThreeStates()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
@@ -294,8 +295,10 @@ public sealed class TempDbCeilingStoreTests
             Assert.True(azure.UsedPercent < DefaultTempDbThresholdPercent,
                 "62 MB allocated against a 65,536 MB cap must not clear the 80% default.");
 
-            /* The unlimited on-prem shape, newer so it wins the ORDER BY: -1 must survive as -1 rather than
-               being read as a cap of one megabyte, which would report 80,000% used. */
+            /* The unlimited on-prem shape, newer so it wins the ORDER BY. -1 must survive the round trip AS
+               -1: the percentage would come out at 80 either way here, but the SIGN is the only thing that
+               separates "this tempdb has no ceiling" from "nobody measured one", and it is what the alert
+               detail renders as Unlimited rather than Unknown. */
             await InsertAsync(connection, collectionTime.AddSeconds(30), 500m, 250m, 50m, 800m, 200m, -1m, ct);
 
             var unlimited = await adapter.GetTempDbSpaceAsync(TestServerKey, ct);
