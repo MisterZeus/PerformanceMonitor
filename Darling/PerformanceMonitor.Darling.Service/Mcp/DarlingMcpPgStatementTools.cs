@@ -48,12 +48,18 @@ public sealed class DarlingMcpPgStatementTools
 
             if (rows.Count == 0)
             {
-                return McpHelpers.Status(
-                    "unavailable",
-                    "No PostgreSQL query statistics for this server and window. If this server is SQL "
-                    + "Server, use get_top_queries_by_cpu instead. If it is Aurora PostgreSQL, check that "
-                    + "pg_stat_statements is installed in the database the collector connects to — on some "
-                    + "clusters it exists only in the application database, not in postgres.");
+                /* The capability answer settles the first two branches of that sentence when the store
+                   knows the engine (#2532); what is left below is the genuinely diagnosable case — an
+                   Aurora target where pg_stat_statements is missing from the connected database — plus the
+                   row whose engine_kind is NULL, where no claim can be made. */
+                return await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_statement_stats")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        "No PostgreSQL query statistics for this server and window. If this server is SQL "
+                        + "Server, use get_top_queries_by_cpu instead. If it is Aurora PostgreSQL, check that "
+                        + "pg_stat_statements is installed in the database the collector connects to — on some "
+                        + "clusters it exists only in the application database, not in postgres.");
             }
 
             var totalTimeMs = rows.Sum(r => r.TotalExecTimeMs);

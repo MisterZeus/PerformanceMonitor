@@ -95,11 +95,13 @@ public sealed class DarlingMcpPgWraparoundTools
 
             if (rows.Count == 0)
             {
-                return McpHelpers.Status(
-                    "unavailable",
-                    "No PostgreSQL freeze-headroom data for this server and window. This collector runs on "
-                    + "any PostgreSQL target, so an empty result means the server is SQL Server, or "
-                    + "pg_wraparound_stats has not collected yet.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_wraparound_stats")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        "No PostgreSQL freeze-headroom data for this server and window. This collector runs on "
+                        + "any PostgreSQL target, so an empty result means the server is SQL Server, or "
+                        + "pg_wraparound_stats has not collected yet.");
             }
 
             var databases = rows
