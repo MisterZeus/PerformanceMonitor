@@ -158,6 +158,7 @@ internal static class McpInstructions
         | `get_health_parser_cpu_tasks` | CPU task/worker-thread snapshots (QUERY_PROCESSING) with deadlock/blocking flags | `server_name`, `hours_back`, `limit` |
         | `get_health_parser_memory_broker` | Memory broker ratio changes and target adjustments | `server_name`, `hours_back`, `limit` |
         | `get_health_parser_memory_node_oom` | Per-NUMA-node out-of-memory events | `server_name`, `hours_back`, `limit` |
+        | `get_health_parser_significant_waits` | Individual wait_info events: a real session's non-BACKUP statement waited 500 ms+ on a non-idle wait type, with the wait type, duration and signal duration, resource, session id and the waiting SQL text. `get_wait_stats` gives the instance-wide totals and can never name the statement that paid them. An empty result says which nothing it is: events captured but none significant (the healthy answer), a quiet window (`empty`), or wait_info never captured (`unavailable`, NOT an all-clear) | `server_name`, `hours_back`, `limit` |
 
         ### Server Information Tools
         | Tool | Purpose | Key Parameters |

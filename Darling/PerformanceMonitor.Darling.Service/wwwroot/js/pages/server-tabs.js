@@ -980,6 +980,18 @@ export const SERVER_TABS = [
         ctx.label,
         "No memory node OOM events in this window — the healthy state for this read."
       ),
+      /* #2484: the ninth member of the get_health_parser_* family. Built with table(), not a bare object
+         literal -- mount() stringifies anything it cannot consume, so a literal renders as [object Object]
+         and never fetches the read at all. */
+      table(
+        "Significant Waits",
+        "get_health_parser_significant_waits",
+        { server, hours: ctx.hours, limit: 50 },
+        "waits",
+        SIGNIFICANT_WAIT_COLUMNS,
+        ctx.label,
+        "No significant waits (a real session waiting 500 ms+ on a non-idle wait type) in this window."
+      ),
       table(
         "Default Trace",
         "get_default_trace_events",
@@ -1670,6 +1682,19 @@ const MEMORY_BROKER_COLUMNS = [
   { key: "previously_allocated", label: "Previously", format: "int" },
   { key: "currently_predicated", label: "Predicated", format: "int" },
   { key: "rate", label: "Rate", format: "num2" },
+];
+
+/* #2484: the Significant Waits grid. Signal duration sits beside the total on purpose -- both are
+   milliseconds, so they share a column format honestly, and a signal close to the total is CPU pressure
+   wearing a wait type's name. The statement goes through codeDisclosure like every other SQL column. */
+const SIGNIFICANT_WAIT_COLUMNS = [
+  { key: "event_time", label: "Time", format: "time" },
+  { key: "wait_type", label: "Wait Type" },
+  { key: "duration_ms", label: "Duration", format: "ms" },
+  { key: "signal_duration_ms", label: "Signal", format: "ms" },
+  { key: "wait_resource", label: "Resource", wrap: true },
+  { key: "session_id", label: "Session", format: "int" },
+  { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
 ];
 
 const MEMORY_OOM_COLUMNS = [
