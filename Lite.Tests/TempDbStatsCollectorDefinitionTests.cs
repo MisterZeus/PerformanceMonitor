@@ -228,7 +228,7 @@ public sealed class TempDbStatsCollectorDefinitionTests
         /* Positional AND typed: 74 must arrive as int, not short, or the INTEGER column takes a
            narrowed write on the Darling COPY path. */
         Assert.Equal(TempDbStatsCollector.Instance.PayloadColumns.Count, writer.Values.Count);
-        Assert.Equal(new object?[] { 5.44m, 1.81m, 0.00m, 7.25m, 54.19m, 1L, 74, 0.13m }, writer.Values);
+        Assert.Equal(new object?[] { 5.44m, 1.81m, 0.00m, 7.25m, 54.19m, 1L, 74, 0.13m, 65536.00m }, writer.Values);
         Assert.IsType<int>(writer.Values[6]);
         Assert.IsType<long>(writer.Values[5]);
     }
