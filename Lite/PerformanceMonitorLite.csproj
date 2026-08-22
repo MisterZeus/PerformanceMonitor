@@ -2,6 +2,16 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
+    <!-- #2501: the portable ZIP is now published for win-x64 as a self-contained app, so the
+         win-x64 restore graph has to be part of the COMMITTED lock file. Without this line the
+         lock file carries only the RID-agnostic target, and the moment a RID restore rewrites
+         it the two CI restores that run BEFORE the publish (build.yml, nightly.yml, both in
+         locked mode) fail NU1004: "project's runtime identifiers: <empty>, lock file's runtime
+         identifiers win-x64". Declaring the RID here makes the project itself ask for that
+         graph, so the RID-less locked-mode restore and the RID publish agree on one lock file.
+         RuntimeIdentifiers (plural) only widens what restore resolves; it sets no RID on the
+         build, so a plain dotnet build stays RID-agnostic and Lite.Tests is untouched. -->
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
     <Nullable>enable</Nullable>
     <UseWPF>true</UseWPF>
     <StartupObject>PerformanceMonitorLite.Program</StartupObject>
