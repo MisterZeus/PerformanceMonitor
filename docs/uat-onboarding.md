@@ -485,7 +485,7 @@ Invoke-RestMethod http://localhost:5153/api/ping
 
 Be clear about this before you file it as a bug. The web dashboard reads the store as the least-privilege
 `viewer` role. Its `/api/read/*` surface is machine-derived from the MCP tool catalog minus an explicit
-exclusion list — 82 read endpoints out of 101 tools — and these are the exclusions that matter to you:
+exclusion list — 90 read endpoints out of 109 tools — and these are the exclusions that matter to you:
 
 - **No plan analysis.** The whole `analyze_query_plan` / `analyze_procedure_plan` / `analyze_query_store_plan` /
   `analyze_plan_xml` family is excluded. **Use the WPF viewer for plans** — it has the graphical plan viewer,
@@ -497,7 +497,7 @@ exclusion list — 82 read endpoints out of 101 tools — and these are the excl
 
 The pages are Fleet Overview, per-server, Alert History, Availability Groups and Custom Views. The per-server
 page carries twelve sub-tabs — Overview, Wait Stats, CPU, Memory, Blocking, File I/O, Queries, Configuration,
-Config Changes, Activity, System Events and Collection Health — reaching 61 of the 82 read endpoints, against
+Config Changes, Activity, System Events and Collection Health — reaching 69 of the 90 read endpoints, against
 the viewer's nineteen top-level per-server tabs (65 counting their inner tabs). So most of what the viewer
 shows is now here, and what is not divides into three groups.
 
@@ -507,15 +507,20 @@ PostgreSQL target from a SQL Server one — a PostgreSQL panel would render on e
 empty. Also `get_database_scoped_config`, whose `databases[].settings[]` shape the table renderer cannot draw,
 and `get_store_metrics`, which is store-wide and has no per-server home.
 
-**Data with no read endpoint at all**, so no amount of web work reaches it: Query Store regressions, the query
-heatmap, three of the four Performance Trends charts, the blocking-duration and deadlock-severity statistics,
-the lock-wait / waiting-task / blocked-session trends, and the raw collection log (the web Collection Health
-tab shows the 7-day rollup, not the log). The daily summary is the current UTC day's roll-up, not the viewer's
-month calendar. That list is tracked as [#2484](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2484) — the data is all already collected, so each item is a missing
-endpoint rather than missing collection, and each is absent from the MCP surface for the same reason.
+**Data with no read endpoint at all** — **this list is now empty.** It used to hold ten viewer surfaces
+(Query Store regressions, the query heatmap, three of the four Performance Trends charts, the
+blocking-duration and deadlock-severity statistics, the lock-wait / waiting-task / blocked-session trends, the
+raw collection log, and the daily-summary month range), all tracked as
+[#2484](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2484). Every one of them is now a read on
+both surfaces — the data was always collected, so each was a missing endpoint rather than missing collection.
+One correction came out of the work: the viewer's execution-count trend was a DUPLICATE of a number
+`get_query_duration_trend` already returned rather than a missing sibling, so it did not become an eleventh
+read; what it got instead was `executions_per_second` beside the truncated integer count, because a server
+running 0.4 executions a second used to report zero and read as idle.
 
-**Desktop things a web imitation would be worse than.** No graphical plan viewer, no query heatmap, no
-block-chain reconstruction and no interactive deadlock graph — the Blocking tab hands you the captured
+**Desktop things a web imitation would be worse than.** No graphical plan viewer, no interactive query
+heatmap **plot** (the underlying read ships as a bucketed table on the Queries tab — same answer, no canvas),
+no block-chain reconstruction and no interactive deadlock graph — the Blocking tab hands you the captured
 blocked-process-report and deadlock-graph XML verbatim instead of pretending. No period-compare grids, no
 per-query drill-down history window, and none of the desktop grids' own affordances: per-column filter
 popups, CSV export, Copy Repro Script, and right-click drill-down into a ±30-minute window.

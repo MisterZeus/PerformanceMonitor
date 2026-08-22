@@ -794,6 +794,23 @@ export const SERVER_TABS = [
         "No query regressed against its baseline in this window. If this server has no history OLDER than " +
           "the window there is nothing to compare against, and the read says so rather than calling it clear."
       ),
+      /* #2484: the Query Heatmap tab. The interactive plot stays desktop-only by design -- there is no
+         heatmap viz in this page's vocabulary and inventing a fifth one is not what the issue asked for --
+         but the READ is portable, and a bucketed table is the same answer: one row per (time bin x
+         magnitude bucket) cell. Bins are the viewer's own 5 minutes (the read's default, left unset here on
+         purpose) so this table and the desktop draw the same picture for the same server and window.
+         Built with table(), not an object literal: mount() stringifies anything it cannot consume, so a
+         literal renders as [object Object] and never fetches the read at all. */
+      table(
+        "Query Heatmap",
+        "get_query_heatmap",
+        { server, hours: ctx.hours, limit: 500 },
+        "cells",
+        QUERY_HEATMAP_COLUMNS,
+        ctx.label,
+        "No query executed in this window. Query stats are collected every cycle whether or not anything " +
+          "ran, so the read distinguishes a server nobody collected from one that was simply idle."
+      ),
       table(
         "Long Query Completions",
         "get_long_query_completions",
@@ -1373,6 +1390,18 @@ const QUERY_STORE_REGRESSION_COLUMNS = [
   { key: "baseline_plan_count", label: "Baseline Plans", format: "int" },
   { key: "recent_plan_count", label: "Recent Plans", format: "int" },
   { key: "last_execution_time", label: "Last Exec", format: "time" },
+];
+
+/* #2484: the heatmap grid, flattened. One row per cell, chronological. Query Count is DISTINCT QUERIES in
+   the cell, not executions -- forty different queries running at 10-100ms is a different finding from one
+   query running forty times, and the column label has to keep them apart. The top query is the most-executed
+   one in the cell, which is what the desktop shows on hover. */
+const QUERY_HEATMAP_COLUMNS = [
+  { key: "time_bucket", label: "Time Bin", format: "time" },
+  { key: "bucket_label", label: "Magnitude" },
+  { key: "query_count", label: "Queries", format: "int" },
+  { key: "top_query_text", label: "Most-Executed Query", render: (r) => codeDisclosure(r.top_query_text) },
+  { key: "top_query_hash", label: "Query Hash" },
 ];
 
 const QUERY_STORE_COLUMNS = [
