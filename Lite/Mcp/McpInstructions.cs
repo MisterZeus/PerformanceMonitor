@@ -75,7 +75,7 @@ internal static class McpInstructions
         | `get_top_procedures_by_cpu` | Expensive stored procedures by CPU time, with the same `cpu_attribution` disclosure | `server_name`, `hours_back`, `top`, `database_name` |
         | `get_query_store_top` | Expensive queries from Query Store (persistent) | `server_name`, `hours_back`, `top`, `database_name` |
         | `get_query_trend` | Time-series for a specific query by query_hash | `query_hash` (required), `database_name` (required), `server_name`, `hours_back` |
-        | `get_query_duration_trend` | Average query duration over time (detect degradation) | `server_name`, `hours_back` |
+        | `get_query_duration_trend` | Average query duration over time (detect degradation). An empty result distinguishes a quiet window (`empty`, widen `hours_back`) from a server nothing has ever been collected for (`unavailable`, collection is not running) | `server_name`, `hours_back` |
 
         ### Blocking & Deadlock Tools
         | Tool | Purpose | Key Parameters |
@@ -92,7 +92,7 @@ internal static class McpInstructions
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
         | `get_memory_stats` | Latest memory snapshot: physical, buffer pool, plan cache | `server_name` |
-        | `get_memory_trend` | Memory usage over time | `server_name`, `hours_back` |
+        | `get_memory_trend` | Memory usage over time. An empty result distinguishes a quiet window (`empty`, widen `hours_back`) from a server nothing has ever been collected for (`unavailable`, collection is not running) | `server_name`, `hours_back` |
         | `get_memory_clerks` | Top memory consumers by clerk type | `server_name` |
         | `get_memory_grants` | Active/recent memory grants (detect grant pressure) | `server_name`, `hours_back` (default 1), `limit` |
         | `get_resource_semaphore` | Latest resource-semaphore snapshot: workspace memory vs target/max ceiling, waiter/timeout/forced-grant pressure | `server_name`, `hours_back` (default 24) |
@@ -102,7 +102,7 @@ internal static class McpInstructions
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
         | `get_file_io_stats` | Latest file I/O stats per database file with latency | `server_name` |
-        | `get_file_io_trend` | I/O latency trend over time per database | `server_name`, `hours_back` |
+        | `get_file_io_trend` | I/O latency trend over time per database. An empty result distinguishes a quiet window (`empty`, widen `hours_back`) from a server nothing has ever been collected for (`unavailable`, collection is not running) | `server_name`, `hours_back` |
 
         ### TempDB Tools
         | Tool | Purpose | Key Parameters |

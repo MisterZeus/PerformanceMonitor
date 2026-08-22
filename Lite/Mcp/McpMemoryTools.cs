@@ -63,6 +63,26 @@ public sealed class McpMemoryTools
             if (hoursError != null) return hoursError;
 
             var points = await dataService.GetMemoryTrendAsync(resolved.ServerId, hours_back);
+
+            if (points.Count == 0)
+            {
+                /*
+                    A bare empty array here told an MCP client nothing at all -- and Darling's twin already
+                    returned a status envelope, so the same tool name gave two different answers depending
+                    on which SKU it was pointed at. Both now make the same distinction in the same words: a
+                    server that collected fine and was quiet in THIS window wants the window widened, while
+                    a server the collector has never touched wants somebody to go look at collection, and
+                    widening will never fill it. Probed only here, against the SAME source the trend read.
+                */
+                return await dataService.HasAnyMemoryStatAsync(resolved.ServerId)
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"No memory samples recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected memory stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
+                    : McpHelpers.Status(
+                        "unavailable",
+                        $"No memory stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the memory_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_memory_stats will be equally empty until it does.");
+            }
+
             var result = points.Select(p => new
             {
                 time = p.CollectionTime.ToString("o"),

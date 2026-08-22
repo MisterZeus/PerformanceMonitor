@@ -34,9 +34,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// windowed BOTH-sides on the naive-UTC <c>collection_time</c>, byte-identical to the viewer's proven
 /// chart reads. get_perfmon_trend reproduces Lite's miss vocabulary (the intentionally-uncollected Page
 /// Life Expectancy special-case + the collected-counters hint); get_query_trend reproduces Lite's per-key
-/// "empty" miss; the three unkeyed trends return the #1224 "unavailable" miss on an empty window, matching
-/// the merged get_tempdb_trend sibling. A response-shape change here must land in Lite's Mcp*Tools too, and
-/// vice versa.
+/// "empty" miss; the three unkeyed trends now distinguish the two kinds of nothing (#2485) rather than
+/// collapsing both into one "unavailable" — a quiet window answers "empty" and tells the caller to widen
+/// it, while a server the collector has never sampled answers "unavailable" and says so outright. A
+/// response-shape change here must land in Lite's Mcp*Tools too, and vice versa.
 /// </para>
 /// </summary>
 [McpServerToolType]
@@ -59,7 +60,22 @@ public sealed class DarlingMcpTrendTools
             var now = DateTime.UtcNow;
             var points = await DarlingTrendReader.GetMemoryTrendAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (points.Count == 0)
-                return McpHelpers.Status("unavailable", "No memory trend data available.");
+            {
+                /*
+                    "No memory trend data available" was true of two opposite states and told the caller
+                    neither. A server that collected fine and was simply quiet in THIS window wants the
+                    window widened; a server the collector has never touched wants somebody to go look at
+                    collection, and widening will never fill it. Probed only here, on the path that already
+                    found nothing, against the SAME source the trend read.
+                */
+                return await DarlingTrendReader.HasAnyMemoryStatAsync(postgres, resolved.ServerId)
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"No memory samples recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected memory stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
+                    : McpHelpers.Status(
+                        "unavailable",
+                        $"No memory stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the memory_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_memory_stats will be equally empty until it does.");
+            }
 
             var result = points.Select(p => new
             {
@@ -182,7 +198,19 @@ public sealed class DarlingMcpTrendTools
             var now = DateTime.UtcNow;
             var points = await DarlingTrendReader.GetFileIoLatencyTrendAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (points.Count == 0)
-                return McpHelpers.Status("unavailable", "No I/O trend data available.");
+            {
+                /* Same two states as the memory trend, same probe discipline. The quiet-window sentence
+                   carries one extra clause the others do not need: this read's top_files CTE requires
+                   delta_reads or delta_writes above zero, so a genuinely idle file set is empty here even
+                   on a server whose file_io_stats collector ran every cycle. */
+                return await DarlingTrendReader.HasAnyFileIoStatAsync(postgres, resolved.ServerId)
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"No file I/O samples recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected file I/O stats before, so this window is genuinely quiet rather than broken — widen hours_back, or read it as no measurable read or write activity on any file in this window.")
+                    : McpHelpers.Status(
+                        "unavailable",
+                        $"No file I/O stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the file_io_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_file_io_stats will be equally empty until it does.");
+            }
 
             var result = points.Select(p => new
             {
@@ -307,7 +335,19 @@ public sealed class DarlingMcpTrendTools
             var now = DateTime.UtcNow;
             var points = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (points.Count == 0)
-                return McpHelpers.Status("unavailable", "No query duration trend data available.");
+            {
+                /* Same two states again. The probe reads the BASE query_stats table because this trend
+                   does — v_query_stats is the payload-resolving view on a V38+ store, and probing a
+                   different relation from the one the read walks is how an existence probe ends up
+                   reporting the wrong branch. */
+                return await DarlingTrendReader.HasAnyQueryStatAsync(postgres, resolved.ServerId)
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"No query samples recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected query stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
+                    : McpHelpers.Status(
+                        "unavailable",
+                        $"No query stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the query_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_top_queries_by_cpu will be equally empty until it does.");
+            }
 
             var result = points.Select(p => new
             {

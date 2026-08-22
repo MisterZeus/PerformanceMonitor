@@ -162,11 +162,11 @@ internal static class DarlingMcpInstructions
 
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_memory_trend` | Memory usage over time: total / target server memory, buffer pool, plan cache | `server_name`, `hours_back` (default 24) |
+        | `get_memory_trend` | Memory usage over time: total / target server memory, buffer pool, plan cache. An empty result distinguishes a quiet window (`empty`, widen `hours_back`) from a server nothing has ever been collected for (`unavailable`, collection is not running) | `server_name`, `hours_back` (default 24) |
         | `get_perfmon_trend` | A single performance counter's value + delta over time (summed across instances) | `counter_name` (required), `server_name`, `hours_back` (default 24) |
-        | `get_file_io_trend` | Per-database file I/O read/write latency over time (top-10 busiest files) | `server_name`, `hours_back` (default 24) |
+        | `get_file_io_trend` | Per-database file I/O read/write latency over time (top-10 busiest files). An empty result distinguishes a quiet window (`empty`, widen `hours_back`) from a server nothing has ever been collected for (`unavailable`, collection is not running) | `server_name`, `hours_back` (default 24) |
         | `get_query_trend` | One query's per-collection history (deltas, avg cpu/elapsed, DOP) by query_hash | `query_hash` (required), `database_name` (required), `server_name`, `hours_back` (default 24) |
-        | `get_query_duration_trend` | Overall query elapsed-ms/sec + executions/sec across all queries over time | `server_name`, `hours_back` (default 24) |
+        | `get_query_duration_trend` | Overall query elapsed-ms/sec + executions/sec across all queries over time. An empty result distinguishes a quiet window (`empty`, widen `hours_back`) from a server nothing has ever been collected for (`unavailable`, collection is not running) | `server_name`, `hours_back` (default 24) |
 
         ### System-health parse-on-read tools
 

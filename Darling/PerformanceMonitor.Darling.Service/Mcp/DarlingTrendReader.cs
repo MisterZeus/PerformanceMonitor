@@ -494,4 +494,69 @@ internal static class DarlingTrendReader
 
         return items;
     }
+
+    /* ─────────── "which nothing is this?" probes for the three windowed trends ─────────── */
+
+    /// <summary>
+    /// Whether this server has EVER recorded a memory sample, ignoring any window.
+    /// <para>Exists so an empty memory trend can say WHICH kind of nothing it found. "No memory trend data
+    /// available" is true both of a quiet window and of a server the collector has never touched, and those
+    /// want opposite responses from the caller — widen the window, versus go find out why collection is not
+    /// running. Reads <c>v_memory_stats</c>, the same source <see cref="MemoryTrendSql"/> reads, so it can
+    /// never report "collected" for rows the trend cannot see. LIMIT 1, so it stops at the first row.</para>
+    /// </summary>
+    public const string HasAnyMemoryStatSql = """
+        SELECT 1
+        FROM v_memory_stats
+        WHERE server_id = $1
+        LIMIT 1
+        """;
+
+    /// <summary>Whether this server has EVER recorded a file I/O sample. Reads <c>v_file_io_stats</c>, the
+    /// same source <see cref="FileIoLatencyTrendSql"/> reads. See <see cref="HasAnyMemoryStatSql"/>.</summary>
+    public const string HasAnyFileIoStatSql = """
+        SELECT 1
+        FROM v_file_io_stats
+        WHERE server_id = $1
+        LIMIT 1
+        """;
+
+    /// <summary>
+    /// Whether this server has EVER recorded a query-stats sample.
+    /// <para>Reads the BASE <c>query_stats</c> table, deliberately, because <see cref="QueryDurationTrendSql"/>
+    /// does: on a V38+ store <c>v_query_stats</c> is the payload-RESOLVING view, not a passthrough, and the
+    /// duration trend projects no text so it never needs it. Probing the view here would be probing a
+    /// different relation from the one the read walks — the exact way an existence probe reports the wrong
+    /// branch in the case it exists to get right.</para>
+    /// </summary>
+    public const string HasAnyQueryStatSql = """
+        SELECT 1
+        FROM query_stats
+        WHERE server_id = $1
+        LIMIT 1
+        """;
+
+    /// <summary>Runs <see cref="HasAnyMemoryStatSql"/>.</summary>
+    public static Task<bool> HasAnyMemoryStatAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+        => HasAnySampleAsync(postgres, HasAnyMemoryStatSql, serverId, cancellationToken);
+
+    /// <summary>Runs <see cref="HasAnyFileIoStatSql"/>.</summary>
+    public static Task<bool> HasAnyFileIoStatAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+        => HasAnySampleAsync(postgres, HasAnyFileIoStatSql, serverId, cancellationToken);
+
+    /// <summary>Runs <see cref="HasAnyQueryStatSql"/>.</summary>
+    public static Task<bool> HasAnyQueryStatAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+        => HasAnySampleAsync(postgres, HasAnyQueryStatSql, serverId, cancellationToken);
+
+    /// <summary>All three probes share one shape: a scalar that is null when no row qualifies.</summary>
+    private static async Task<bool> HasAnySampleAsync(
+        NpgsqlDataSource postgres, string sql, int serverId, CancellationToken cancellationToken)
+    {
+        await using var command = postgres.CreateCommand(sql);
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
+    }
 }
