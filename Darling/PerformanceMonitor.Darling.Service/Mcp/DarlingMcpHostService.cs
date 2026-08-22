@@ -540,6 +540,11 @@ public sealed class DarlingMcpHostService : BackgroundService
                    not derivable from the first (the costliest query is usually the one that always was).
                    A STORED read over the same query_store_stats the tools above read. */
                 .WithGeminiCompatibleTools<DarlingMcpQueryStoreRegressionTools>()
+                /* get_query_heatmap (#2484) — the viewer's Query Heatmap tab. The interactive plot is
+                   desktop-only by design; the READ behind it is not, and a bucketed table is the same
+                   answer. It is the only query read with a TIME axis: the rankings above cannot show that
+                   a window had a quiet half and a bad half. A STORED read over the same query_stats. */
+                .WithGeminiCompatibleTools<DarlingMcpQueryHeatmapTools>()
                 /* The diagnostic-depth data-read tools (blocking/deadlocks, sessions, config-history,
                    index/object) — get_blocking / get_deadlocks / get_deadlock_detail /
                    get_blocked_process_xml, get_session_stats / get_active_queries / get_waiting_tasks,

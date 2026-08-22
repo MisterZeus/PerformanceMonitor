@@ -58,6 +58,12 @@ public sealed class McpMissMessageParityPinTests
         "in EITHER window, so there is nothing to compare — this is NOT a report that nothing changed.",
         "The BASELINE window produced no facts at all, so every fact below counts as a new issue only because there was nothing to compare it against.",
         "The COMPARISON window produced no facts at all, so every fact below counts as a resolved issue only because there is nothing in the recent window to compare against.",
+
+        /* get_query_heatmap (#2484) — the three empty branches, one of which (a collected but IDLE
+           window) no other read has. */
+        "so this is NOT a report of a quiet server — there is nothing to draw. query_stats is a PERIODIC table rather than an edge table: the collector writes rows every cycle for whatever is in the plan cache, so an empty history means nobody looked. Check get_collection_health for this server.",
+        " hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.",
+        " hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid. A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists.",
     };
 
     [Theory]
