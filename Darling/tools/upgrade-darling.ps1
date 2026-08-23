@@ -461,6 +461,33 @@ function Join-DarlingInstallPath([string]$installRoot, [string]$relativePath) {
     catch { return '' }
 }
 
+# True for RAW text that names an absolute location rather than something inside the install root.
+#
+# It exists as its own function because of where it has to be CALLED, which review had to point out twice.
+# The first attempt put this test inside Test-DarlingManifestPathIsPreserved, ahead of normalization, which
+# read correctly and could not fire: every caller of that predicate normalizes first, and normalization
+# strips leading separators - so '\\fileserver\share\x.dll' had already become the ordinary-looking
+# relative 'fileserver\share\x.dll' before the predicate ever saw it. A guard belongs where the raw value
+# IS, not where it reads best, so this is called at the two points raw text enters the script: a line of a
+# manifest, and an entry of a payload. Both refuse the WHOLE input rather than dropping the line, on the
+# same reasoning as the file-count check - this script never writes an absolute path, so one coming back
+# means the input was edited or is not ours, and a partly-believed record is worse than none.
+#
+# Test-DarlingManifestPathIsPreserved calls it too, on its own raw argument, for the caller that hands it
+# one directly.
+function Test-DarlingPathIsAbsolute([string]$rawPath) {
+    if ([string]::IsNullOrWhiteSpace($rawPath)) { return $false }
+
+    $raw = $rawPath.Trim()
+
+    # A colon is a drive qualifier or an alternate data stream, neither of which is a name a Windows file
+    # can otherwise carry. A leading separator is root-relative, and two of them are UNC.
+    if ($raw.Contains(':')) { return $true }
+    if ($raw.StartsWith('\') -or $raw.StartsWith('/')) { return $true }
+
+    return [IO.Path]::IsPathRooted($raw)
+}
+
 # THE EXCLUSION RULE. True for a path this procedure must never remove and must never record.
 #
 # It is applied THREE times and that is deliberate, because the three are different questions. On the way
@@ -475,22 +502,13 @@ function Join-DarlingInstallPath([string]$installRoot, [string]$relativePath) {
 function Test-DarlingManifestPathIsPreserved([string]$relativePath) {
     if ([string]::IsNullOrWhiteSpace($relativePath)) { return $true }
 
-    # A manifest path is RELATIVE and stays inside the install root. Rooted, drive-qualified or
-    # colon-carrying means it did not come from a payload this script recorded, and one statement before a
-    # delete is not where to work out where it did come from.
-    #
-    # Asked of the RAW input, BEFORE normalization, and the order is the whole point. Normalizing strips
-    # leading separators, so asking afterwards can never fire: '\\server\share\x.dll' would already have
-    # become 'server\share\x.dll', a perfectly ordinary-looking relative path, and the answer would be a
-    # confident no to a question nobody asked. A check that cannot fire is a comment wearing a guard's
-    # clothes. Refusing it here means an absolute path in a manifest is REPORTED rather than quietly
-    # reinterpreted as a subdirectory of the install root that might happen to exist.
-    $raw = $relativePath.Trim()
-    if ($raw.Contains(':')) { return $true }
-    if ($raw.StartsWith('\') -or $raw.StartsWith('/')) { return $true }
-    if ([IO.Path]::IsPathRooted($raw)) { return $true }
+    # A manifest path is RELATIVE and stays inside the install root. Asked of THIS function's raw argument,
+    # before normalization strips the leading separators that would answer it. It only fires for a caller
+    # that hands over un-normalized text - Remove-DarlingStaleFiles is the one that does - because the
+    # readers refuse an absolute path at the point they read it, which is where it can still be seen.
+    if (Test-DarlingPathIsAbsolute $relativePath) { return $true }
 
-    $path = ConvertTo-DarlingManifestPath $raw
+    $path = ConvertTo-DarlingManifestPath $relativePath
     if ([string]::IsNullOrWhiteSpace($path)) { return $true }
 
     $segments = @($path.Split('\') | Where-Object { $_ })
@@ -563,6 +581,15 @@ function Get-DarlingPayloadFiles([string]$source, [bool]$sourceIsZip) {
                 foreach ($entry in $archive.Entries) {
                     # A directory entry has an empty Name and a FullName ending in '/'. Only files.
                     if ([string]::IsNullOrEmpty($entry.Name)) { continue }
+
+                    # Checked HERE, on the entry as the archive spells it, because this is the last moment
+                    # an absolute path is still recognisable as one - ConvertTo-DarlingManifestPath on the
+                    # next line strips the leading separators that say so. No build of ours produces such an
+                    # entry, so one is evidence about the archive rather than about the file.
+                    if (Test-DarlingPathIsAbsolute $entry.FullName) {
+                        return [pscustomobject]@{ Ok = $false; Files = @(); Reason = "the zip holds an entry with an absolute path ('$($entry.FullName)'), which no build of ours produces" }
+                    }
+
                     $paths += (ConvertTo-DarlingManifestPath $entry.FullName)
                 }
             }
@@ -574,7 +601,17 @@ function Get-DarlingPayloadFiles([string]$source, [bool]$sourceIsZip) {
             $prefix = [IO.Path]::GetFullPath($source).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
             foreach ($file in @(Get-ChildItem -LiteralPath $source -File -Recurse -Force -ErrorAction Stop)) {
                 if (-not $file.FullName.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
-                $paths += (ConvertTo-DarlingManifestPath $file.FullName.Substring($prefix.Length))
+
+                # The prefix carries a trailing separator, so this substring cannot begin with one and the
+                # test below cannot fire. It is here anyway, so the two payload branches answer the same
+                # question in the same words: a reader who has to work out which of two branches checks what
+                # is a reader who will eventually get it wrong.
+                $relative = $file.FullName.Substring($prefix.Length)
+                if (Test-DarlingPathIsAbsolute $relative) {
+                    return [pscustomobject]@{ Ok = $false; Files = @(); Reason = "the source folder produced an absolute path ('$relative')" }
+                }
+
+                $paths += (ConvertTo-DarlingManifestPath $relative)
             }
         }
     }
@@ -615,6 +652,15 @@ function Read-DarlingInstallManifest([string]$path) {
 
     foreach ($line in $lines) {
         if ($sawMarker) {
+            # THE PLACE THIS CHECK HAS TO BE. A manifest line is raw text off a disk this script does not
+            # control, and one line further on it has been normalized into something that looks relative
+            # whatever it was. Write-DarlingInstallManifest never emits an absolute path, so a manifest
+            # holding one has been hand-edited, corrupted, or written by something else - and the answer to
+            # a record that is not ours is to believe none of it.
+            if (Test-DarlingPathIsAbsolute $line) {
+                return [pscustomobject]@{ Ok = $false; Files = @(); Reason = "the manifest holds an absolute path ('$($line.Trim())'), which this script never writes - it has been edited, corrupted, or written by something else" }
+            }
+
             $normalized = ConvertTo-DarlingManifestPath $line
             if ($normalized) { $files += $normalized }
             continue

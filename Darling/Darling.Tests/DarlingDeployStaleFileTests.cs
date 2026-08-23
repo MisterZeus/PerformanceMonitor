@@ -65,6 +65,7 @@ public sealed class DarlingDeployStaleFileTests
         "Format-DarlingBytes",
         "ConvertTo-DarlingManifestPath",
         "Join-DarlingInstallPath",
+        "Test-DarlingPathIsAbsolute",
         "Test-DarlingManifestPathIsPreserved",
         "Get-DarlingPayloadFiles",
         "Read-DarlingInstallManifest",
@@ -376,6 +377,78 @@ public sealed class DarlingDeployStaleFileTests
             Assert.Equal("False", answers[4]);
             Assert.Equal("False", answers[5]);
             Assert.Equal("False", answers[6]);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// An absolute path is refused where the RAW TEXT is — by the manifest reader, from a real file on disk,
+    /// and by the payload reader, from a real zip.
+    ///
+    /// <para><b>This is the test the first two attempts at the rule did not have, and the reason the rule
+    /// moved.</b> Review caught it twice. The check began life inside
+    /// <c>Test-DarlingManifestPathIsPreserved</c>, then was reordered inside it to run before
+    /// normalization — both read correctly and neither could fire, because every caller of that predicate
+    /// normalizes first and normalization strips the leading separators that say "absolute". A case table
+    /// calling the predicate directly proved it correct and proved nothing about the script, which is
+    /// exactly how a check that cannot fire keeps its green.</para>
+    ///
+    /// <para>So these go through <c>Read-DarlingInstallManifest</c> and <c>Get-DarlingPayloadFiles</c>, the
+    /// two places raw text enters the script, and each manifest is written BY HAND with a consistent
+    /// <c>file-count</c>. That last part is not fussiness: the first version of this fixture appended a line
+    /// to a manifest the writer had produced, which left <c>file-count</c> one short — so it went green on
+    /// the TRUNCATION check while the rule under test was absent. The control row is here for the same
+    /// reason.</para>
+    /// </summary>
+    [Fact]
+    public void TheDeployScript_RefusesAnAbsolutePathWhereTheRawTextIs_NotOnlyInThePredicate()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-2529-absolute-");
+        try
+        {
+            var manifest = Path.Combine(root.FullName, ManifestFileName);
+
+            var probe = new StringBuilder();
+            probe.AppendLine(Functions());
+            probe.AppendLine($"$manifest = '{manifest}'");
+            probe.AppendLine(
+                "function PlantManifest([string[]]$entries) { Set-Content -LiteralPath $manifest -Value (@("
+                + "'manifest-version 1', 'build-source x.zip', 'written-utc 2026-08-23T00:00:00Z', "
+                + "('file-count ' + $entries.Count), '--- files ---') + $entries) }");
+
+            probe.AppendLine(@"PlantManifest @('a.dll', '\\fileserver\share\x.dll')");
+            probe.AppendLine("(Read-DarlingInstallManifest $manifest).Ok");
+
+            probe.AppendLine(@"PlantManifest @('a.dll', 'C:\Windows\System32\kernel32.dll')");
+            probe.AppendLine("(Read-DarlingInstallManifest $manifest).Ok");
+
+            probe.AppendLine(@"PlantManifest @('a.dll', '\Windows\System32\kernel32.dll')");
+            probe.AppendLine("(Read-DarlingInstallManifest $manifest).Ok");
+
+            /* THE CONTROL. Without it, all three rows above could be passing because the fixture is broken
+               rather than because the rule works. */
+            probe.AppendLine(@"PlantManifest @('a.dll', 'viewer\b.dll')");
+            probe.AppendLine("$control = Read-DarlingInstallManifest $manifest");
+            probe.AppendLine("$control.Ok");
+            probe.AppendLine("$control.Files.Count");
+
+            /* And the payload reader, against a real archive carrying a rooted entry. */
+            probe.AppendLine($"$zip = '{Path.Combine(root.FullName, "hostile.zip")}'");
+            probe.AppendLine("Add-Type -AssemblyName 'System.IO.Compression.FileSystem' -ErrorAction SilentlyContinue");
+            probe.AppendLine("$archive = [IO.Compression.ZipFile]::Open($zip, 'Create')");
+            probe.AppendLine("$entry = $archive.CreateEntry('/etc/passwd')");
+            probe.AppendLine("$writer = New-Object IO.StreamWriter($entry.Open())");
+            probe.AppendLine("$writer.Write('x')");
+            probe.AppendLine("$writer.Dispose()");
+            probe.AppendLine("$archive.Dispose()");
+            probe.AppendLine("(Get-DarlingPayloadFiles $zip $true).Ok");
+
+            var answers = RunWindowsPowerShell(probe.ToString());
+
+            Assert.Equal(["False", "False", "False", "True", "2", "False"], answers);
         }
         finally
         {
