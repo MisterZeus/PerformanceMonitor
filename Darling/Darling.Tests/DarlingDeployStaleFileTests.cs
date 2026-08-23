@@ -457,6 +457,59 @@ public sealed class DarlingDeployStaleFileTests
     }
 
     /// <summary>
+    /// The previous build's manifest is read BEFORE the copy, and the post-copy block does not read it
+    /// again.
+    ///
+    /// <para><b>Why the order is load-bearing, which review had to point out.</b> A folder source is copied
+    /// wholesale — <c>Copy-Item -Path "$Source\*" -Recurse -Force</c> takes everything in it, unfiltered —
+    /// so a staging directory made from a box that has already run carries THAT box's manifest, and
+    /// <c>-Force</c> lays it over this install's. Reading afterwards computes this run's stale-file list
+    /// against another install's history. It self-heals on the next upgrade, because the manifest written
+    /// at the end comes from the real payload, but one cycle of a wrong answer is one too many for a list
+    /// that feeds a delete. <c>$configHashBefore</c> is captured before the copy for exactly this reason;
+    /// the manifest now sits beside it.</para>
+    ///
+    /// <para>A text pin rather than a behavioural one, and the limitation is worth stating: this asserts
+    /// the ORDER of two statements in the shipped script, which is the thing that regressed and the thing a
+    /// reader would most plausibly "tidy" back. The behaviour itself is exercised locally against planted
+    /// trees, where reverting the order makes the run report "no files from the previous build were
+    /// dropped" — a confident wrong answer — while naming a file only the other box ever had.</para>
+    /// </summary>
+    [Fact]
+    public void TheDeployScript_ReadsThePreviousManifestBeforeTheCopy_NotAfterIt()
+    {
+        var script = DeployScript;
+
+        var read = script.IndexOf("$previousManifest = Read-DarlingInstallManifest $manifestPath", StringComparison.Ordinal);
+        Assert.True(read >= 0, "upgrade-darling.ps1 no longer reads the previous install manifest (#2529)");
+
+        var copy = script.IndexOf("Expand-Archive -LiteralPath $Source -DestinationPath $InstallRoot -Force", StringComparison.Ordinal);
+        Assert.True(copy >= 0, "upgrade-darling.ps1 no longer lays the new build over the install root");
+
+        Assert.True(read < copy,
+            "upgrade-darling.ps1 reads the previous install manifest AFTER the copy. A folder source is copied "
+            + "wholesale, so a staging directory made from a live install overwrites this install's manifest first, "
+            + "and the stale-file diff is then computed against another box's history (#2529).");
+
+        /* And it is read exactly once. A second read after the copy would take the foreign manifest even
+           with the first one in place, which is the same defect wearing a belt. */
+        Assert.Equal(1, CountOccurrences(script, "Read-DarlingInstallManifest $manifestPath"));
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        var count = 0;
+        var index = 0;
+        while ((index = haystack.IndexOf(needle, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += needle.Length;
+        }
+
+        return count;
+    }
+
+    /// <summary>
     /// The manifest's NAME, in the two places the script spells it. <c>$manifestName</c> is what a run
     /// creates and reads; the exclusion rule carries the same string as a LITERAL so the predicate answers
     /// identically when it is lifted out of the script and run on its own — which is what every probe in

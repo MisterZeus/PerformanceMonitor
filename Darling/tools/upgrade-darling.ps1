@@ -1169,6 +1169,22 @@ if ($holders.Count -gt 0 -and -not $SkipStopGuard) {
 $configPath = Join-Path $InstallRoot $configName
 $configHashBefore = if (Test-Path -LiteralPath $configPath) { (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash } else { $null }
 
+# The previous build's manifest, read BEFORE the copy for the same reason the config hash above is taken
+# before it - and it took review to see why that reason applies here too (#2529).
+#
+# A -Source FOLDER is copied wholesale: Copy-Item -Path "$Source\*" -Recurse -Force takes everything in it,
+# unfiltered. A staging directory made from a live install therefore carries THAT install's manifest, and
+# -Force lays it over this one. Reading afterwards would compute this run's stale-file list against some
+# other box's history - the one scenario the manifest's own write-side filter already names as expected,
+# arriving from the other direction. It self-heals on the next upgrade, because the manifest written at the
+# end comes from the real payload, but one cycle of a wrong answer is one too many for a list that feeds a
+# delete.
+#
+# The copy cannot change the answer to "what did the build before this one lay down here", so before it is
+# not merely safe, it is the only correct time to ask.
+$manifestPath = Join-Path $InstallRoot $manifestName
+$previousManifest = Read-DarlingInstallManifest $manifestPath
+
 # Status is re-read here rather than carried down from the existence check above: it is a snapshot, and
 # between the two the service can legitimately have been stopped by someone else or crashed on its own.
 if ((Get-Service -Name $serviceName).Status -ne 'Stopped') {
@@ -1290,16 +1306,17 @@ if ($configHashBefore) {
 
 # ============================ the files this build no longer ships (#2529) ============================
 #
-# AFTER the copy, never before it: the tree is now everything the new build says it should be, plus
-# whatever an earlier one left in it, so the difference is exactly what this is looking for.
+# AFTER the copy - but only the half that has to be. The tree is now everything the new build says it
+# should be plus whatever an earlier one left in it, so the DIFFERENCE, the existence check against the
+# tree, and the removal all belong here. The previous build's manifest does NOT: it is read further up,
+# before the copy, because a folder source can overwrite it. Review caught the two being conflated, and
+# they are worth keeping apart in the reader's head as well as in the script.
 #
 # NOTHING HERE CALLS Fail, and that is a decision rather than an oversight. A monitoring host that is up
 # with one stale DLL in it is in far better shape than one this script refused to start over a cleanup, so
 # every failure below is a warning and a re-run. The service is still stopped at this point and starting it
 # is what the operator came here for.
 
-$manifestPath = Join-Path $InstallRoot $manifestName
-$previousManifest = Read-DarlingInstallManifest $manifestPath
 $payload = Get-DarlingPayloadFiles $Source $sourceIsZip
 $carryForward = @()
 
