@@ -190,13 +190,30 @@ public static class CollectorRuntimePrecondition
         }
 
         var observed = DescribeObserved(observedUtc);
+        var errored = states.Where(s => IsErrored(s.ActualState)).ToList();
         var readOnly = states.Where(s => IsReadOnly(s.ActualState)).ToList();
-        var off = states.Where(s => !IsReadOnly(s.ActualState)).ToList();
+        var off = states.Where(s => !IsErrored(s.ActualState) && !IsReadOnly(s.ActualState)).ToList();
 
-        /* READ_ONLY first when both shapes are present: it is the one somebody is most likely to have got
-           wrong, because the database WAS configured and stopped collecting on its own. Saying "Query Store
-           is off" about a database whose desired state is READ_WRITE would send the operator to re-run an
-           ALTER that is already in effect. */
+        /* THREE not-collecting states, and each of them has a different remedy. ERROR and READ_ONLY are both
+           states a database reaches AFTER being configured, so the OFF wording — "turn it on" — is not just
+           unhelpful there, it is an instruction to re-issue an ALTER that is already in effect and will
+           silently no-op. The ordering is by how badly the OFF wording would mislead: ERROR is a database
+           whose Query Store broke, which is the one nobody would guess from "not enabled". */
+        if (errored.Count > 0)
+        {
+            return $"Query Store is in the ERROR state on {Describe(errored)} of {serverName}{observed}, and " +
+                   "no database this read covers is recording. ERROR is not OFF: Query Store WAS configured " +
+                   "and stopped on its own after an internal failure, so its desired state is typically still " +
+                   "READ_WRITE and ALTER DATABASE [name] SET QUERY_STORE = ON is already in effect and will " +
+                   "not repair it. Run sys.sp_query_store_consistency_check inside the affected database " +
+                   "first; if that does not clear it, ALTER DATABASE [name] SET QUERY_STORE CLEAR, or cycle " +
+                   "it OFF and back ON — both of which discard the Query Store data already held. " +
+                   PreconditionEpilogue;
+        }
+
+        /* READ_ONLY before OFF for the same reason: the database WAS configured and stopped collecting on
+           its own, and saying "Query Store is off" about a database whose desired state is READ_WRITE sends
+           the operator to re-run an ALTER that is already in effect. */
         if (readOnly.Count > 0)
         {
             return $"Query Store is READ_ONLY and recording nothing new on {Describe(readOnly)} of " +
@@ -216,18 +233,23 @@ public static class CollectorRuntimePrecondition
     }
 
     /// <summary>
-    /// READ_WRITE is the only state that records new runtime statistics. ALL_TRANSACTIONS and friends are
-    /// capture MODES rather than states and never appear here; an unrecognised value counts as collecting,
-    /// so a state this repo has not met cannot manufacture a precondition claim about a working server.
+    /// READ_WRITE is the only <c>actual_state_desc</c> that records new runtime statistics. The other three
+    /// the catalog view can report — OFF, READ_ONLY and ERROR — each get their own sentence above, because
+    /// each has its own remedy. ALL_TRANSACTIONS and friends are capture MODES rather than states and never
+    /// appear here; an unrecognised value counts as collecting, so a state this repo has not met cannot
+    /// manufacture a precondition claim about a working server.
     /// </summary>
     private static bool IsCollecting(string? actualState) =>
         !string.IsNullOrWhiteSpace(actualState)
         && !IsReadOnly(actualState)
-        && !actualState.Equals("OFF", StringComparison.OrdinalIgnoreCase)
-        && !actualState.Equals("ERROR", StringComparison.OrdinalIgnoreCase);
+        && !IsErrored(actualState)
+        && !actualState.Equals("OFF", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsReadOnly(string? actualState) =>
         actualState is not null && actualState.Equals("READ_ONLY", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsErrored(string? actualState) =>
+        actualState is not null && actualState.Equals("ERROR", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// The databases, named rather than counted, up to three — a count alone leaves the reader with another

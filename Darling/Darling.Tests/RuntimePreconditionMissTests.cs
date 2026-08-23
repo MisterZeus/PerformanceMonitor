@@ -168,6 +168,56 @@ public sealed class CollectorRuntimePreconditionTests
     }
 
     /// <summary>
+    /// ERROR is the THIRD not-collecting state, and the one the OFF wording misleads worst about (review
+    /// catch). It is a database whose Query Store was configured and then broke: desired_state is typically
+    /// still READ_WRITE, so "turn it on with SET QUERY_STORE = ON" is an instruction to re-issue an ALTER
+    /// that is already in effect and will silently no-op, while the actual repair — the consistency check,
+    /// then CLEAR — goes unmentioned.
+    /// </summary>
+    [Fact]
+    public void QueryStoreInErrorState_IsDescribedAsBroken_NotAsOff()
+    {
+        var message = CollectorRuntimePrecondition.QueryStoreDisabledMessage(
+            Server,
+            new[]
+            {
+                new CollectorRuntimePrecondition.QueryStoreDatabaseState("BrokenDb", "ERROR"),
+                new CollectorRuntimePrecondition.QueryStoreDatabaseState("OffDb", "OFF"),
+            },
+            DateTime.UtcNow);
+
+        Assert.NotNull(message);
+        Assert.Contains("BrokenDb", message, StringComparison.Ordinal);
+        Assert.Contains("ERROR is not OFF", message, StringComparison.Ordinal);
+        Assert.Contains("sys.sp_query_store_consistency_check", message, StringComparison.Ordinal);
+        Assert.Contains("SET QUERY_STORE CLEAR", message, StringComparison.Ordinal);
+
+        /* The specific wrong instruction this branch exists to avoid. */
+        Assert.DoesNotContain("Turn it on with ALTER", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// ERROR outranks READ_ONLY when both are present, because it is the state nobody would guess from
+    /// either of the other two sentences. Pinned so the ordering cannot be reshuffled by accident.
+    /// </summary>
+    [Fact]
+    public void QueryStoreErrorOutranksReadOnly()
+    {
+        var message = CollectorRuntimePrecondition.QueryStoreDisabledMessage(
+            Server,
+            new[]
+            {
+                new CollectorRuntimePrecondition.QueryStoreDatabaseState("ReadOnlyDb", "READ_ONLY"),
+                new CollectorRuntimePrecondition.QueryStoreDatabaseState("BrokenDb", "ERROR"),
+            },
+            DateTime.UtcNow);
+
+        Assert.NotNull(message);
+        Assert.Contains("ERROR is not OFF", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("readonly_reason", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The two directions this must NOT fire in. A snapshot with any READ_WRITE database in scope means
     /// Query Store is collecting somewhere the read could have looked, so the emptiness has another cause;
     /// and an EMPTY snapshot is no evidence at all, which is not the same as evidence of absence — the
