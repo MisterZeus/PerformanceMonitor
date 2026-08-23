@@ -41,6 +41,12 @@ public sealed class DarlingMcpJobTools
             var rows = await DarlingJobReader.GetRunningJobsAsync(postgres, resolved.ServerId);
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "running_jobs")
+                    /* #2546: the msdb case. "No running SQL Agent jobs found" is an affirmative claim about
+                       the server's Agent, and it is the wrong one when the monitoring login was refused the
+                       job tables — the collector runs, is denied, and records that denial with the GRANT to
+                       issue. Reporting it here is the difference between "nothing is running" and "we cannot
+                       see what is running". */
+                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "running_jobs")
                     ?? McpHelpers.Status("empty", "No running SQL Agent jobs found (or the running_jobs collector has not run yet).");
 
             var jobs = rows.Select(r => new
