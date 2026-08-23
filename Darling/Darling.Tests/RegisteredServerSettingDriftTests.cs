@@ -316,6 +316,188 @@ public sealed class RegisteredServerSettingDriftTests
         Assert.False(drift.AffectsConnection);
     }
 
+    /* ---------------- the same fold is not the same fold on both engines ---------------- */
+
+    /// <summary>
+    /// Raised in review on #2556, and the sharper half of the encryptMode hazard. SQL Server really does have
+    /// three behaviours — three distinct <c>SqlConnectionEncryptOption</c> values — but
+    /// <c>MonitoredServerConnection.BuildPostgresConnectionString</c> branches on <c>OPTIONAL</c> alone, so
+    /// Strict and Mandatory take the SAME <c>SslMode</c> arm. On a PostgreSQL target they are one connection,
+    /// and reporting them as drift — with <c>AffectsConnection</c> true, pulling in the
+    /// <c>--test-connection</c> caveat — would be reporting a connection difference that cannot exist.
+    /// </summary>
+    [Fact]
+    public void StrictAndMandatory_AreOneConnectionOnPostgresAndTwoOnSqlServer()
+    {
+        var pg = FileEntry("pgtarget", "pgtarget-host");
+        pg.Engine = "postgres";
+        pg.Auth = "sql";
+        pg.Username = "monitor";
+        pg.EncryptMode = "Mandatory";
+        var pgStore = StoreRow(pg);
+        pg.EncryptMode = "Strict";
+
+        Assert.Empty(Compare(pg, pgStore));
+
+        var sql = FileEntry("alpha", "alpha-host");
+        sql.EncryptMode = "Mandatory";
+        var sqlStore = StoreRow(sql);
+        sql.EncryptMode = "Strict";
+
+        var drift = Assert.Single(Compare(sql, sqlStore));
+        Assert.Equal("encryptMode", drift.Field);
+    }
+
+    /// <summary>
+    /// Optional IS a different connection on PostgreSQL (<c>SslMode.Prefer</c> against Require/VerifyFull), so
+    /// it is still reported there — and the message prints what each side actually SAYS rather than the
+    /// collapsed bucket, so it can never show a value neither file nor store holds.
+    /// </summary>
+    [Fact]
+    public void OptionalIsStillDriftOnPostgres_AndThePrintedValuesAreTheRealOnes()
+    {
+        var file = FileEntry("pgtarget", "pgtarget-host");
+        file.Engine = "postgres";
+        file.Auth = "sql";
+        file.Username = "monitor";
+        file.EncryptMode = "Strict";
+        var store = StoreRow(file);
+        file.EncryptMode = "Optional";
+
+        var drift = Assert.Single(Compare(file, store));
+        Assert.Equal("encryptMode", drift.Field);
+        Assert.Equal("Optional", drift.FileValue);
+        /* "Strict", not the "Mandatory" it was compared as. */
+        Assert.Equal("Strict", drift.StoreValue);
+        Assert.True(drift.AffectsConnection);
+    }
+
+    /// <summary>
+    /// The follow-on from the same review comment: on PostgreSQL, <c>SslMode.Prefer</c> is chosen without
+    /// consulting <c>TrustServerCertificate</c> at all, so an Optional STORE row makes the flag inert. It
+    /// stays live on SQL Server's Optional, where SqlClient still validates the certificate if the server
+    /// negotiates encryption.
+    /// </summary>
+    [Fact]
+    public void TrustServerCertificateIsInert_OnlyOnAPostgresTargetWhoseStoredModeIsOptional()
+    {
+        var pg = FileEntry("pgtarget", "pgtarget-host");
+        pg.Engine = "postgres";
+        pg.Auth = "sql";
+        pg.Username = "monitor";
+        pg.EncryptMode = "Optional";
+        var pgStore = StoreRow(pg);
+        pg.TrustServerCertificate = true;
+
+        Assert.Empty(Compare(pg, pgStore));
+
+        /* Same target, stored mode Mandatory — now the flag decides Require vs VerifyFull, so it is live. */
+        pgStore.EncryptMode = "Mandatory";
+        pg.EncryptMode = "Mandatory";
+        Assert.Contains("trustServerCertificate", FieldsOf(Compare(pg, pgStore)));
+
+        /* And SQL Server's Optional keeps it. */
+        var sql = FileEntry("alpha", "alpha-host");
+        sql.EncryptMode = "Optional";
+        var sqlStore = StoreRow(sql);
+        sql.TrustServerCertificate = true;
+        Assert.Contains("trustServerCertificate", FieldsOf(Compare(sql, sqlStore)));
+    }
+
+    /// <summary>
+    /// PostgreSQL matches the startup packet's database against <c>pg_database.datname</c> byte for byte, so
+    /// <c>ReportingDB</c> and <c>reportingdb</c> are two databases there. Folding case would MISS a real
+    /// difference — the silent direction, which is what #2552 is about. SQL Server folds case on every default
+    /// collation, so a re-cased catalog name there is the same connection.
+    /// </summary>
+    [Fact]
+    public void DatabaseNameCaseIsDriftOnPostgres_AndIsNotOnSqlServer()
+    {
+        var pg = FileEntry("pgtarget", "pgtarget-host");
+        pg.Engine = "postgres";
+        pg.Auth = "sql";
+        pg.Username = "monitor";
+        pg.Database = "reportingdb";
+        var pgStore = StoreRow(pg);
+        pg.Database = "ReportingDB";
+
+        var drift = Assert.Single(Compare(pg, pgStore));
+        Assert.Equal("database", drift.Field);
+        Assert.Equal("ReportingDB", drift.FileValue);
+        Assert.Equal("reportingdb", drift.StoreValue);
+
+        var sql = FileEntry("alpha", "alpha-host");
+        sql.Database = "reportingdb";
+        var sqlStore = StoreRow(sql);
+        sql.Database = "ReportingDB";
+
+        Assert.Empty(Compare(sql, sqlStore));
+    }
+
+    /// <summary>
+    /// The same asymmetry reaches the exclusion list, which is live on BOTH engines: the SQL Server collectors
+    /// splice <c>DatabaseExclusionFilter</c> against <c>d.name</c>, and
+    /// <c>PostgresTargetProvider.BuildDatabaseListPlan</c> splices the identical filter against
+    /// <c>pg_database.datname</c> to choose the per-database fan-out — where <c>NOT IN</c> is case-sensitive.
+    /// </summary>
+    [Fact]
+    public void ExclusionCaseIsDriftOnPostgres_AndIsNotOnSqlServer()
+    {
+        var pg = FileEntry("pgtarget", "pgtarget-host");
+        pg.Engine = "postgres";
+        pg.Auth = "sql";
+        pg.Username = "monitor";
+        pg.ExcludedDatabases = new List<string> { "scratch" };
+        var pgStore = StoreRow(pg);
+        pg.ExcludedDatabases = new List<string> { "Scratch" };
+
+        var drift = Assert.Single(Compare(pg, pgStore));
+        Assert.Equal("excludedDatabases", drift.Field);
+        Assert.Equal("Scratch", drift.FileValue);
+        Assert.Equal("scratch", drift.StoreValue);
+
+        var sql = FileEntry("alpha", "alpha-host");
+        sql.ExcludedDatabases = new List<string> { "scratch" };
+        var sqlStore = StoreRow(sql);
+        sql.ExcludedDatabases = new List<string> { "Scratch" };
+
+        Assert.Empty(Compare(sql, sqlStore));
+    }
+
+    /// <summary>
+    /// The comparison happens at TWO levels and only one of them is visible from the outer result, which is
+    /// how a guard for the inner one nearly went in passing both with and without itself. The outer
+    /// comparison catches <c>"Scratch"</c> against <c>"scratch"</c> on PostgreSQL whether or not the SET is
+    /// de-duplicated case-sensitively — so the thing that only the inner comparer decides is what the message
+    /// SAYS: a store excluding both variants must not be rendered as excluding one. Under a case-folding
+    /// comparer this reports <c>store=Scratch</c> for a server that excludes <c>Scratch</c> AND
+    /// <c>scratch</c>, which is wrong information in the one sentence the operator gets.
+    /// </summary>
+    [Fact]
+    public void BothCaseVariantsSurviveThePostgresExclusionSet_AndCollapseOnSqlServer()
+    {
+        var pg = FileEntry("pgtarget", "pgtarget-host");
+        pg.Engine = "postgres";
+        pg.Auth = "sql";
+        pg.Username = "monitor";
+        pg.ExcludedDatabases = new List<string> { "Scratch", "scratch" };
+        var pgStore = StoreRow(pg);
+        pg.ExcludedDatabases = new List<string> { "scratch" };
+
+        var drift = Assert.Single(Compare(pg, pgStore));
+        Assert.Equal("excludedDatabases", drift.Field);
+        Assert.Equal("scratch", drift.FileValue);
+        Assert.Equal("Scratch, scratch", drift.StoreValue);
+
+        /* On SQL Server they really are one exclusion, so the set collapses and there is nothing to report. */
+        var sql = FileEntry("alpha", "alpha-host");
+        sql.ExcludedDatabases = new List<string> { "Scratch", "scratch" };
+        var sqlStore = StoreRow(sql);
+        sql.ExcludedDatabases = new List<string> { "scratch" };
+
+        Assert.Empty(Compare(sql, sqlStore));
+    }
+
     /* ---------------- the credential ---------------- */
 
     /// <summary>

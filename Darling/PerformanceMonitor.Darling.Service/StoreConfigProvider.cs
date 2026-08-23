@@ -578,7 +578,14 @@ FROM config_monitored_servers", connection);
     /// <item><c>database</c> — blank folds to the engine's implicit default (<c>master</c> for SQL Server,
     /// <c>postgres</c> for PostgreSQL), which is what <see cref="MonitoredServerConnection"/> substitutes. So
     /// a NULL column against an explicit <c>"master"</c> in the file is not drift, and the message prints the
-    /// database that is actually connected to.</item>
+    /// database that is actually connected to. Compared case-SENSITIVELY on PostgreSQL and case-insensitively
+    /// on SQL Server, because that is what each engine does with the name: PostgreSQL matches the startup
+    /// packet's database against <c>pg_database.datname</c> byte for byte, so <c>ReportingDB</c> and
+    /// <c>reportingdb</c> are two databases there and folding them would MISS a real difference — the silent
+    /// direction, which is the one #2552 is about. On SQL Server the resolution is collation-dependent and
+    /// case-insensitive on every default collation, which is also what <c>ServerDefinitionEquals</c> assumes;
+    /// the stated limit is that a case-SENSITIVE server collation would hide a re-cased catalog name
+    /// there.</item>
     /// <item><c>auth</c> — trimmed, case-insensitive; config validation already restricts it to
     /// integrated/sql.</item>
     /// <item><c>username</c> — only when the STORE row uses SQL auth, because that is the only case where the
@@ -586,16 +593,29 @@ FROM config_monitored_servers", connection);
     /// a SQL login can be.</item>
     /// <item><c>encryptMode</c> — the connect path's own fail-closed fold (trim, upper, anything unrecognized
     /// becomes Mandatory), so <c>"strict"</c> against <c>"Strict"</c> is not drift and a typo against
-    /// <c>Mandatory</c> is not either. THE hazard #2552 named.</item>
+    /// <c>Mandatory</c> is not either. THE hazard #2552 named. It has a SECOND, engine-shaped half that the
+    /// first cut missed: SQL Server really does have three behaviours (three distinct
+    /// <c>SqlConnectionEncryptOption</c> values), but the PostgreSQL builder branches on <c>OPTIONAL</c>
+    /// alone — Strict and Mandatory both land on the same <c>SslMode</c> — so on a PostgreSQL target they are
+    /// ONE bucket, and reporting them as drift would be reporting a connection difference that does not
+    /// exist. The comparison collapses them there; the message still prints what each side actually says, so
+    /// the values shown are never invented.</item>
     /// <item><c>engine</c> — folded through <see cref="MonitoredServer.TargetEngine"/>, so <c>"aurora"</c>
     /// against <c>"postgres"</c> is one engine and not a disagreement.</item>
     /// <item><c>port</c> — PostgreSQL only (SQL Server carries its port inside the host as <c>host,1433</c>),
     /// with 0 folded to the driver default 5432 — so an unset port against an explicit 5432 is not drift.</item>
     /// <item><c>readOnlyIntent</c> / <c>multiSubnetFailover</c> — SQL Server only: ApplicationIntent and
     /// MultiSubnetFailover have no PostgreSQL equivalent and the Npgsql builder never sees them.</item>
-    /// <item><c>excludedDatabases</c> — trimmed, blanks dropped, de-duplicated case-insensitively and ORDERED,
-    /// because the collectors consume it as a <c>NOT IN</c> set (<c>DatabaseExclusionFilter</c>) where order
-    /// and repetition change nothing.</item>
+    /// <item><c>trustServerCertificate</c> — everywhere EXCEPT a PostgreSQL target whose stored mode is
+    /// Optional, where <c>SslMode.Prefer</c> is chosen without consulting the flag at all, so it is inert.
+    /// The gate reads the STORE's mode, since the store's is the one in force.</item>
+    /// <item><c>excludedDatabases</c> — trimmed, blanks dropped, de-duplicated and ORDERED, because it is
+    /// consumed as a <c>NOT IN</c> set (<c>DatabaseExclusionFilter</c>) where order and repetition change
+    /// nothing. Case follows the engine for the same reason <c>database</c> does, and it is live on BOTH:
+    /// the SQL Server collectors splice it against <c>d.name</c>, and <c>PostgresTargetProvider</c> splices
+    /// the same filter against <c>pg_database.datname</c> to choose the per-database fan-out — where
+    /// <c>NOT IN</c> is case-sensitive, so folding case would silently treat two different exclusions as
+    /// one.</item>
     /// <item><c>monthlyCostUsd</c> — compared numerically, so 100 against 100.00 is not drift. Not
     /// connection-relevant, but it does drive the FinOps figures, so it is not cosmetic either.</item>
     /// <item><c>alertDeliveryModeOverride</c> — null means "inherit the global" (#1236) and prints as such.</item>
@@ -623,12 +643,17 @@ FROM config_monitored_servers", connection);
 
         AddDrift(drift, "name", file.DisplayName, store.DisplayName, StringComparison.Ordinal, false);
         AddDrift(drift, "host", Trimmed(file.Host), Trimmed(store.Host), StringComparison.OrdinalIgnoreCase, true);
+        /* PostgreSQL matches a database name byte for byte; SQL Server folds case on every default
+           collation. Getting this backwards on PostgreSQL would MISS a real difference, which is the
+           silent direction. */
+        var nameComparison = storeIsPostgres ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+
         AddDrift(
             drift,
             "database",
             EffectiveDatabase(file.Database, storeIsPostgres),
             EffectiveDatabase(store.Database, storeIsPostgres),
-            StringComparison.OrdinalIgnoreCase,
+            nameComparison,
             true);
         AddDrift(drift, "auth", Trimmed(file.Auth), Trimmed(store.Auth), StringComparison.OrdinalIgnoreCase, true);
 
@@ -643,21 +668,35 @@ FROM config_monitored_servers", connection);
                 true);
         }
 
-        AddDrift(
-            drift,
-            "encryptMode",
-            EffectiveEncryptMode(file.EncryptMode),
-            EffectiveEncryptMode(store.EncryptMode),
-            StringComparison.Ordinal,
-            true);
+        /* Displayed and compared SEPARATELY, and only here. The two are the same everywhere else, but on a
+           PostgreSQL target Strict and Mandatory are one connection while remaining two different words in
+           the file — so the comparison collapses them and the message still prints what each side says
+           rather than a value neither holds. */
+        var fileMode = EffectiveEncryptMode(file.EncryptMode);
+        var storeMode = EffectiveEncryptMode(store.EncryptMode);
+        if (!string.Equals(
+                EncryptModeConnectKey(fileMode, storeIsPostgres),
+                EncryptModeConnectKey(storeMode, storeIsPostgres),
+                StringComparison.Ordinal))
+        {
+            drift.Add(new SettingDrift("encryptMode", fileMode, storeMode, true));
+        }
+
         AddDrift(drift, "engine", EngineToken(file), EngineToken(store), StringComparison.Ordinal, true);
-        AddDrift(
-            drift,
-            "trustServerCertificate",
-            Json(file.TrustServerCertificate),
-            Json(store.TrustServerCertificate),
-            StringComparison.Ordinal,
-            true);
+
+        /* Inert on a PostgreSQL target whose stored mode is Optional: that branch picks SslMode.Prefer
+           without ever reading the flag. Live everywhere else, including SQL Server's Optional, where
+           SqlClient still validates the certificate if the server negotiates encryption. */
+        if (!storeIsPostgres || !string.Equals(storeMode, "Optional", StringComparison.Ordinal))
+        {
+            AddDrift(
+                drift,
+                "trustServerCertificate",
+                Json(file.TrustServerCertificate),
+                Json(store.TrustServerCertificate),
+                StringComparison.Ordinal,
+                true);
+        }
 
         if (storeIsPostgres)
         {
@@ -684,9 +723,9 @@ FROM config_monitored_servers", connection);
         AddDrift(
             drift,
             "excludedDatabases",
-            NormalizeExcludedDatabases(file.ExcludedDatabases),
-            NormalizeExcludedDatabases(store.ExcludedDatabases),
-            StringComparison.OrdinalIgnoreCase,
+            NormalizeExcludedDatabases(file.ExcludedDatabases, storeIsPostgres),
+            NormalizeExcludedDatabases(store.ExcludedDatabases, storeIsPostgres),
+            nameComparison,
             false);
 
         if (file.MonthlyCostUsd != store.MonthlyCostUsd)
@@ -739,6 +778,18 @@ FROM config_monitored_servers", connection);
         _ => "Mandatory",
     };
 
+    /// <summary>
+    /// How many DISTINCT connections the three modes make on this engine, which is not the same number on
+    /// both. SQL Server maps them to three <c>SqlConnectionEncryptOption</c> values, so all three are
+    /// separate. The Npgsql builder branches on <c>OPTIONAL</c> alone — everything else takes the same
+    /// <c>SslMode</c> arm — so on PostgreSQL Strict and Mandatory are ONE bucket and reporting them as drift
+    /// would report a difference the connection cannot express.
+    /// </summary>
+    private static string EncryptModeConnectKey(string canonicalMode, bool isPostgres) =>
+        isPostgres && string.Equals(canonicalMode, "Strict", StringComparison.Ordinal)
+            ? "Mandatory"
+            : canonicalMode;
+
     private static string EngineToken(MonitoredServer server) =>
         server.IsPostgres ? "postgres" : "sqlserver";
 
@@ -750,19 +801,26 @@ FROM config_monitored_servers", connection);
     /// The excluded-database list as the collectors see it: a set. <c>DatabaseExclusionFilter</c> splices it
     /// into a <c>NOT IN</c>, so order, repetition and surrounding whitespace change nothing, and warning about
     /// any of them would be warning about a difference that does not exist.
+    ///
+    /// <para>Case follows the ENGINE, because the <c>NOT IN</c> is evaluated by it: PostgreSQL compares
+    /// <c>datname</c> byte for byte (the list picks the per-database fan-out in
+    /// <c>PostgresTargetProvider.BuildDatabaseListPlan</c>), while SQL Server's <c>d.name</c> comparison folds
+    /// case on every default collation. Folding case on PostgreSQL would treat two genuinely different
+    /// exclusions as one, which is the silent direction.</para>
     /// </summary>
-    private static string NormalizeExcludedDatabases(IEnumerable<string>? names)
+    private static string NormalizeExcludedDatabases(IEnumerable<string>? names, bool isPostgres)
     {
         if (names is null)
         {
             return "(none)";
         }
 
+        var comparer = isPostgres ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase;
         var set = names
             .Where(n => !string.IsNullOrWhiteSpace(n))
             .Select(n => n.Trim())
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+            .Distinct(comparer)
+            .OrderBy(n => n, comparer)
             .ToList();
 
         return set.Count == 0 ? "(none)" : string.Join(", ", set);
