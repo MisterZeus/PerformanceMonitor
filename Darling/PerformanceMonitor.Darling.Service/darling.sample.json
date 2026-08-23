@@ -84,6 +84,20 @@
     //                                    // holds the config-table service-credential pivot). Never the superuser.
     // }
   },
+  // SEEDED ONCE, then read-only. This list bootstraps config.config_monitored_servers on the first
+  // successful start and is never consulted for it again: after that the STORE is authoritative for
+  // which servers are monitored AND for every per-server setting below. So on a seeded box, editing
+  // "host" / "database" / "auth" / "username" / "encryptMode" / "trustServerCertificate" /
+  // "excludedDatabases" / "port" / "engine" / "name" here changes nothing, and neither does adding a
+  // server — a restart cannot apply either. Add servers with the Viewer's Add Server dialog or the MCP
+  // add_servers tool; CHANGE an already-registered server from the Viewer's Manage Servers window
+  // (add_servers skips one that is already monitored as a duplicate). The service names any
+  // disagreement between this list and the registry once per start, in the log.
+  // Two exceptions that ARE still read from this file on every start, because they are never written to
+  // the store: the SQL-auth secret ("encryptedPassword" / "password", including an "env:NAME" or
+  // "file:/path" reference), and this whole file when the store is unreachable.
+  // Note --test-connection reads THIS FILE, so on a seeded box it probes the file's settings rather than
+  // the ones the service will actually connect with.
   "servers": [
     {
       // Integrated auth (recommended): grant the service account VIEW SERVER STATE etc.
