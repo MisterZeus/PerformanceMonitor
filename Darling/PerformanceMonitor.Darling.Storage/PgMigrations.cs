@@ -142,6 +142,7 @@ public static class PgMigrations
         new Migration(83, "pg-database-stats", V83Sql),
         new Migration(84, "pg-index-usage-stats", V84Sql),
         new Migration(85, "pg-table-bloat-stats", V85Sql),
+        new Migration(86, "pg-session-states", V86Sql),
     };
 
     /// <summary>
@@ -1876,6 +1877,82 @@ CREATE TABLE IF NOT EXISTS collect.pg_table_bloat_stats (
 
 CREATE INDEX IF NOT EXISTS idx_pg_table_bloat_stats_time
     ON collect.pg_table_bloat_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V86 — <c>collect.pg_session_states</c> (#2540), the session side of the xmin horizon: which sessions
+    /// are holding a transaction open, for how long, and whether that transaction is what is pinning it.
+    ///
+    /// <para><b><c>horizon_age</c> is the column this table exists for.</b> <c>pg_xmin_horizon</c> already
+    /// names the CLASS of holder; this names the session and, crucially, is able to say that a session is
+    /// NOT one. Measured on a live PostgreSQL 16.15 instance, two of four idle-in-transaction shapes pin
+    /// nothing at all — a READ COMMITTED transaction that only read, and one whose UPDATE matched zero rows,
+    /// both report NULL for <c>backend_xmin</c> and <c>backend_xid</c>. <c>horizon_age</c> is <c>-1</c>
+    /// there, not <c>0</c>: 0 would read as "holding the newest possible xid", which is the opposite
+    /// finding, and confusing the two is how a read ends up telling someone to kill a session that is
+    /// costing them nothing.</para>
+    ///
+    /// <para><b>No query text column, deliberately</b>, and the absence is the design rather than an
+    /// oversight. <c>pg_stat_activity.query</c> carries literal parameter values inline — verified on the
+    /// live rig. <c>pg_blocking_edges</c> stores it because blocking is exceptional and the text IS the
+    /// finding; this table fills on a duration floor an ordinary application can cross, so the same column
+    /// would mean routinely accumulating user data to answer a question that does not need it.
+    /// <c>query_id</c> is PostgreSQL's own normalised fingerprint and joins to
+    /// <c>pg_statement_stats</c>, whose text is already normalised to <c>$1</c> placeholders;
+    /// <c>command_tag</c> is a whitelisted SQL keyword. It is nullable for three separate reasons the read
+    /// must keep apart — PostgreSQL 13 has no such column, 14+ reports NULL when <c>compute_query_id</c> is
+    /// off, and a redacted row reports NULL along with everything else privileged.</para>
+    ///
+    /// <para><b><c>state_is_redacted</c> exists because this feature fails silently without
+    /// <c>pg_monitor</c>.</b> Measured against a least-privileged role: PostgreSQL does not refuse the read,
+    /// it returns every row with <c>state</c>, <c>state_change</c>, <c>xact_start</c>, <c>backend_start</c>
+    /// and <c>query_id</c> NULL and the query text replaced by an insufficient-privilege literal — while
+    /// leaving <c>backend_xmin</c> and <c>backend_xid</c> visible. So the horizon still reads as pinned and
+    /// every column that could explain it is gone. On the same live capture the privileged role saw four
+    /// idle-in-transaction sessions and the unprivileged one saw zero, out of the same nine backends. The
+    /// flag is derived from the privilege literal rather than from a NULL state because background workers
+    /// legitimately report NULL state under full privilege.</para>
+    ///
+    /// <para><c>total_sessions</c>, <c>active_sessions</c>, <c>idle_in_transaction_sessions</c> and
+    /// <c>reportable_sessions</c> repeat per row on purpose: a read that filters to the idle-in-transaction
+    /// rows still owes the reader "out of how many", and <c>reportable_sessions</c> above the stored row
+    /// count is what a capture truncated by the collector's row cap looks like.</para>
+    /// </summary>
+    private const string V86Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_session_states (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    backend_id bigint,
+    pid integer,
+    database_name text,
+    username text,
+    application_name text,
+    client_addr text,
+    backend_type text,
+    state text,
+    wait_event_type text,
+    wait_event text,
+    command_tag text,
+    query_id bigint,
+    state_duration_ms bigint,
+    xact_duration_ms bigint,
+    query_duration_ms bigint,
+    backend_duration_ms bigint,
+    xmin_age bigint,
+    xid_age bigint,
+    horizon_age bigint,
+    is_idle_in_transaction boolean,
+    is_horizon_holder boolean,
+    state_is_redacted boolean,
+    total_sessions integer,
+    active_sessions integer,
+    idle_in_transaction_sessions integer,
+    reportable_sessions integer
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_session_states_time
+    ON collect.pg_session_states(server_id, collection_time);";
 
     /// <summary>
     /// V81 — tempdb's growth CEILING on <c>tempdb_stats</c> (#2515). <c>dm_db_file_space_usage</c>, which is
