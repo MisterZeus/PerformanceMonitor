@@ -453,7 +453,7 @@ public sealed class CollectorEngineCapabilityMovingGateTests
 
     /// <summary>
     /// The shipped catalog, as the axis sees it: every SQL Server collector is a gap on a PostgreSQL
-    /// target and none on a SQL Server one, and the nine PostgreSQL collectors are the mirror image.
+    /// target and none on a SQL Server one, and the PostgreSQL collectors are the mirror image.
     /// Both halves are counted from the catalog rather than listed, so the numbers track it.
     ///
     /// <para>This is the vacuity check for everything above: if the derivation quietly answered TRUE for

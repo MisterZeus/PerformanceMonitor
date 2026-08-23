@@ -129,7 +129,7 @@ public sealed class ViewerCollectorCoverageTests
     /// compile-time path (Darling.Tests sits at <c>Darling/Darling.Tests/</c>; the viewer is the sibling
     /// <c>Darling/PerformanceMonitor.Darling.Viewer/</c>) — PLUS the shared store readers those files name.
     ///
-    /// <para><b>Why the second half exists (#2530).</b> The nine PostgreSQL reads run the SAME query text on
+    /// <para><b>Why the second half exists (#2530).</b> The PostgreSQL reads run the SAME query text on
     /// the MCP surface and on the WPF tabs, from <c>DarlingPg</c>-prefixed readers in
     /// <c>PerformanceMonitor.Darling.Storage</c>. A scan that looked only at <c>ViewerDataService*.cs</c>
     /// would have demanded a SECOND copy of that SQL — including a 200-line recursive blocking walk whose

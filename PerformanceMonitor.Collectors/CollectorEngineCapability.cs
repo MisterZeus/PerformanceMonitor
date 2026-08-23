@@ -170,6 +170,10 @@ public static class CollectorEngineCapability
             ["pg_xmin_horizon"] = "the xmin-horizon holders behind vacuum",
             ["pg_database_stats"] = "the pg_stat_database per-database counters - temp-file spills, cache "
                                   + "hit ratio, deadlocks and the commit/rollback split",
+            ["pg_index_usage_stats"] = "the pg_stat_user_indexes per-index scan counts, sizes and "
+                                     + "droppability facts",
+            ["pg_table_bloat_stats"] = "the statistics-based per-table bloat estimate and its dead-tuple "
+                                     + "counts",
         };
 
     /// <summary>

@@ -55,7 +55,7 @@ public sealed class CrossAppMcpToolInventoryPinTests
     // system_health parser tools). A NEW Darling-only tool must be either ported to Lite or added here.
     private static readonly HashSet<string> KnownLiteMissingMcpTools = new(StringComparer.Ordinal)
     {
-        /* The eight PostgreSQL reads. Darling-ONLY by architecture, not "not ported yet", so these are the
+        /* The PostgreSQL reads. Darling-ONLY by architecture, not "not ported yet", so these are the
            same kind of entry as get_store_metrics rather than a to-do: Lite has no PostgreSQL target and
            cannot acquire one (the engine gate never dispatches a PostgreSQL definition there), and Lite does
            not even create the tables — DuckDbSchemaGenerator.StoredCollectors filters them out, so there is
@@ -78,6 +78,21 @@ public sealed class CrossAppMcpToolInventoryPinTests
            eight above: Lite has no PostgreSQL target and cannot acquire one, and DuckDbSchemaGenerator
            filters the table out, so there is nothing for a Lite twin to read. */
         "get_pg_database_stats",
+
+        /* get_pg_index_usage (#2541) and get_pg_table_bloat (#2542) - per-index usage and the per-table
+           bloat estimate. Same architectural reason as the nine above rather than a porting backlog: Lite
+           has no PostgreSQL target and cannot acquire one, DuckDbSchemaGenerator.StoredCollectors filters
+           both tables out of every generation loop, and Lite passes engineKind: null explicitly - so there
+           is no Lite twin for these to be missing FROM.
+
+           Worth being explicit about get_pg_index_usage in particular, because Lite DOES ship
+           get_index_usage over index_object_stats and the two look like twins. They are not: that one reads
+           SQL Server DMVs and reports seeks/scans/lookups with lock and latch waits, this one reads
+           pg_stat_user_indexes and reports the constraint, replica-identity and validity facts that decide
+           whether a PostgreSQL index can be dropped at all. Conflating them would put T-SQL on a
+           PostgreSQL path, which is the #2213 class of defect. */
+        "get_pg_index_usage",
+        "get_pg_table_bloat",
 
         /* #2068: the store self-metrics read (get_store_metrics) over collect.store_metrics — the central
            Postgres store measuring ITSELF (hypertable sizes/compression, payload dims, whole-store growth)

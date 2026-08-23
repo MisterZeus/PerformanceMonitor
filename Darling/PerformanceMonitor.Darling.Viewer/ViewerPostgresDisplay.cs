@@ -633,4 +633,153 @@ internal static class PgDisplay
             Caveats = string.Join("; ", caveats),
         };
     }
+
+    internal sealed class TableBloatRow
+    {
+        public string DatabaseName { get; init; } = "";
+        public string SchemaName { get; init; } = "";
+        public string TableName { get; init; } = "";
+        public string HeapSize { get; init; } = "";
+
+        /// <summary>The estimate, or the not-applicable dash when it was SUPPRESSED. Never the raw number
+        /// with a caption beside it: a percentage rendered in a grid cell is read as a measurement whatever
+        /// text sits next to it, and this one can be 81 percentage points wrong.</summary>
+        public string BloatEstimate { get; init; } = "";
+
+        public string BloatPctEstimate { get; init; } = "";
+
+        /// <summary>The MEASURED fallback, from the server's own counters and needing no width model.
+        /// Always populated, so a suppressed estimate still leaves the row saying something true.</summary>
+        public string DeadTuplePct { get; init; } = "";
+
+        public string ToastSize { get; init; } = "";
+        public string IndexSize { get; init; } = "";
+        public string HeapGrowth { get; init; } = "";
+
+        /// <summary>Why the estimate is or is not shown, in a few words. The full reason is in the MCP
+        /// read; this is what fits in a column and still stops somebody acting on a blank.</summary>
+        public string Confidence { get; init; } = "";
+
+        public bool EstimateSuppressed { get; init; }
+
+        /// <summary>Only ever true for an estimate that was PUBLISHED - a suppressed row has no percentage
+        /// to be high, and painting it red would assert the very thing the suppression denies.</summary>
+        public bool IsHighBloat { get; init; }
+    }
+
+    /// <summary>
+    /// Projects one bloat row for the grid.
+    ///
+    /// <para>The suppression decision comes from <see cref="DarlingPgTableBloatReader.EstimateIsUnpublishable"/>
+    /// - the SAME call the MCP read makes - rather than from a second copy of the rule here. Two matching
+    /// literals in two projects is exactly how the two surfaces would come to disagree about whether a
+    /// number is publishable, silently and in the direction that shows a figure the other surface had
+    /// already withheld.</para>
+    /// </summary>
+    internal static TableBloatRow TableBloat(DarlingPgTableBloatReader.PgTableBloatRow row)
+    {
+        var suppressed = DarlingPgTableBloatReader.EstimateIsUnpublishable(row);
+
+        var confidence = row.EstimateUnavailable
+            ? "no column statistics - check the monitoring login can SELECT this table"
+            : row.LiveTuples < 0
+                ? "never analyzed - no row count to compare against"
+                : suppressed
+                    ? "statistics stale - ANALYZE this table, then re-read"
+                    : row.PgstattupleAvailable
+                        ? "estimate; confirm exactly with pgstattuple"
+                        : "estimate; pgstattuple is not installed here";
+
+        return new TableBloatRow
+        {
+            DatabaseName = row.DatabaseName ?? "",
+            SchemaName = row.SchemaName ?? "",
+            TableName = row.TableName ?? "",
+            HeapSize = Bytes(row.HeapBytes),
+            BloatEstimate = suppressed ? NotApplicableText : Bytes(row.BloatBytesEstimate),
+            BloatPctEstimate = suppressed
+                ? NotApplicableText
+                : string.Create(CultureInfo.CurrentCulture, $"{row.BloatPctEstimate:N2}%"),
+            DeadTuplePct = row.LiveTuples < 0
+                ? NotApplicableText
+                : Percent(row.DeadTuples, row.LiveTuples + row.DeadTuples),
+            ToastSize = Bytes(row.ToastBytes),
+            IndexSize = Bytes(row.IndexBytes),
+            HeapGrowth = ByteDelta(row.FirstHeapBytes, row.HeapBytes),
+            Confidence = confidence,
+            EstimateSuppressed = suppressed,
+            IsHighBloat = !suppressed && row.BloatPctEstimate >= 50m,
+        };
+    }
+
+    internal sealed class IndexUsageRow
+    {
+        public string DatabaseName { get; init; } = "";
+        public string TableName { get; init; } = "";
+        public string IndexName { get; init; } = "";
+        public string IndexSize { get; init; } = "";
+        public string ScansInWindow { get; init; } = "";
+
+        /// <summary>The server's own lifetime counter, shown BESIDE the windowed figure rather than
+        /// instead of it: they answer different questions, and an operator who checks in psql must not
+        /// find this grid appearing to contradict the server.</summary>
+        public string TotalScans { get; init; } = "";
+
+        public string LastScan { get; init; } = "";
+        public string BlockAccesses { get; init; } = "";
+        public int SampleCount { get; init; }
+
+        /// <summary>The short form of the droppability answer. Deliberately phrased as an answer to a
+        /// question rather than as an instruction: no cell in this grid ever reads "drop it".</summary>
+        public string Droppability { get; init; } = "";
+
+        public string IndexDefinition { get; init; } = "";
+        public bool IsInvalid { get; init; }
+
+        /// <summary>Unscanned AND unblocked AND watched long enough - all three, so the amber never lands
+        /// on a constraint index or on one we have only just met.</summary>
+        public bool IsUnscanned { get; init; }
+    }
+
+    internal static IndexUsageRow IndexUsage(DarlingPgIndexUsageReader.PgIndexUsageRow row)
+    {
+        var blocked = row.IsPrimaryKey || row.SupportsConstraint || row.IsUnique || row.IsReplicaIdentity;
+        var unscanned = row.IsValid && !blocked && row.ScansInWindow == 0 && row.SampleCount >= 2;
+
+        var droppability = !row.IsValid
+            ? "INVALID - never used by the planner, still maintained by writes"
+            : row.IsPrimaryKey
+                ? "no - backs the PRIMARY KEY"
+                : blocked
+                    ? (row.IsReplicaIdentity ? "no - is the REPLICA IDENTITY" : "no - backs a constraint")
+                    : row.SampleCount < 2
+                        ? "too early to say - only one sample"
+                        : row.ScansInWindow > 0
+                            ? "in use this window"
+                            : row.IsPartial
+                                ? "candidate - but PARTIAL, check the predicate still matches"
+                                : row.IsExpression
+                                    ? "candidate - but EXPRESSION, check the expression still matches"
+                                    : "candidate - widen the window past your slowest job first";
+
+        return new IndexUsageRow
+        {
+            DatabaseName = row.DatabaseName ?? "",
+            TableName = row.TableName ?? "",
+            IndexName = row.IndexName ?? "",
+            IndexSize = Bytes(row.IndexBytes),
+            ScansInWindow = Count(row.ScansInWindow),
+            TotalScans = Count(row.TotalScans),
+            /* NULL means two different things - PostgreSQL 15 and below do not record it at all, and on
+               16+ it is an index never scanned since the reset - so the dash stands for "not recorded"
+               rather than being filled with a fabricated date. The MCP read spells out which. */
+            LastScan = Timestamp(row.LastScan),
+            BlockAccesses = Count(row.BlocksHit + row.BlocksRead),
+            SampleCount = row.SampleCount,
+            Droppability = droppability,
+            IndexDefinition = row.IndexDefinition ?? "",
+            IsInvalid = !row.IsValid,
+            IsUnscanned = unscanned,
+        };
+    }
 }

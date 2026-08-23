@@ -1680,6 +1680,60 @@ export const POSTGRES_TABS = [
       ]),
     ],
   },
+
+  /* Storage (#2541, #2542). Two reads, one question: where the space went and whether it is earning its
+     keep. Bloat is deliberately NOT on the Vacuum tab despite being what vacuum lag costs - that tab is the
+     cause chain read in causal order, and dropping the damage into the middle of it breaks the sequence
+     that makes those three panels one story.
+
+     Bloat is placed first because its number is an ESTIMATE and is the more dangerous of the two to act on:
+     the summary tile carries the suppression count so a reader meets the caveat before any percentage. */
+  {
+    id: "storage",
+    label: "Storage",
+    build: (server, ctx) => [
+      ...fanout("get_pg_table_bloat", { server, hours: ctx.hours, limit: 25 }, [
+        {
+          title: "Bloat Estimates",
+          subtitle: ctx.label + ", estimates only - the tables are never read",
+          viz: "stat",
+          stats: PG_BLOAT_STATS,
+          span: 2,
+          emptyText:
+            "No table of at least 1 MB was measured on this server. Below that floor bloat is not an actionable amount of space, so an empty panel here is the healthy answer rather than a missing read.",
+        },
+        {
+          title: "By Table",
+          subtitle: ctx.label + ", biggest estimated waste first; rows with no publishable estimate sort last",
+          viz: "table",
+          rowsKey: "tables",
+          columns: PG_BLOAT_COLUMNS,
+          emptyText:
+            "No table of at least 1 MB was measured on this server. Bloat under a megabyte is not worth a maintenance window, so the collector does not store it.",
+        },
+      ]),
+      ...fanout("get_pg_index_usage", { server, hours: ctx.hours, limit: 25 }, [
+        {
+          title: "Index Usage",
+          subtitle: ctx.label + ", candidates are not conclusions",
+          viz: "stat",
+          stats: PG_INDEX_USAGE_STATS,
+          span: 2,
+          emptyText:
+            "No index of at least 64 KB was recorded on this server. Below that floor an index costs effectively nothing to keep, so an empty panel here is the healthy answer rather than a missing read.",
+        },
+        {
+          title: "By Index",
+          subtitle: ctx.label + ", biggest unscanned first; invalid indexes on top",
+          viz: "table",
+          rowsKey: "indexes",
+          columns: PG_INDEX_USAGE_COLUMNS,
+          emptyText:
+            "No index of at least 64 KB was recorded on this server, so there is nothing here to judge. This collector runs daily and is gated off on read replicas, where scan counts are the replica's own rather than the writer's.",
+        },
+      ]),
+    ],
+  },
 ];
 
 /**
@@ -2580,6 +2634,32 @@ const PG_DATABASE_STATS = [
   { key: "statistics_were_reset_in_window", label: "Stats reset in window", format: "bool" },
 ];
 
+/* The suppression count is a first-class tile rather than a per-row detail, because the usual cause is one
+   instance-wide permissions gap: pg_stats is filtered by SELECT privilege and pg_monitor does not grant it,
+   so either every row is publishable or almost none are. Naming it here is what gets it fixed.
+   `estimated_bloat_*_over_trusted_rows` keeps the read's own name: it is a sum of ESTIMATES over the rows
+   whose estimates were fit to publish, and a shorter label would promise reclaimable bytes. */
+const PG_BLOAT_STATS = [
+  { key: "table_count", label: "Tables returned", format: "int" },
+  { key: "estimated_bloat_mb_over_trusted_rows", label: "Est. bloat (trusted rows)", format: "mb" },
+  { key: "trusted_estimate_count", label: "Estimates published", format: "int" },
+  { key: "suppressed_estimate_count", label: "Estimates suppressed", format: "int" },
+  { key: "pgstattuple_available_anywhere", label: "pgstattuple installed", format: "bool" },
+  { key: "limit_reached", label: "Limit reached", format: "bool" },
+];
+
+/* "unscanned_without_a_structural_blocker" is deliberately not shortened to "droppable" on the tile either:
+   the field name survived review for saying what it is, and a label that renamed it would undo that where a
+   reader actually looks. */
+const PG_INDEX_USAGE_STATS = [
+  { key: "index_count", label: "Indexes returned", format: "int" },
+  { key: "unscanned_without_a_structural_blocker", label: "Unscanned, nothing blocking a drop", format: "int" },
+  { key: "mb_held_by_those_indexes", label: "Held by those indexes", format: "mb" },
+  { key: "invalid_index_count", label: "Invalid indexes", format: "int" },
+  { key: "statistics_were_reset_in_window", label: "Stats reset in window", format: "bool" },
+  { key: "limit_reached", label: "Limit reached", format: "bool" },
+];
+
 const PG_IO_SUMMARY_STATS = [
   { key: "combination_count", label: "Combinations", format: "int" },
   { key: "total_reads", label: "Reads", format: "int" },
@@ -2752,6 +2832,78 @@ const PG_DATABASE_COLUMNS = [
   { key: "counters_were_reset", label: "Reset", format: "bool" },
   { key: "reset_note", label: "Reset Note", wrap: true },
   { key: "sample_count", label: "Samples", format: "int" },
+];
+
+/* bloat_pct_estimate and bloat_bytes_estimate are NULL on a suppressed row, which renders as an empty cell
+   rather than a zero - and that is the point. estimate_suppression_reason is the column that says why, so it
+   is wrapped and kept adjacent rather than pushed to the end of a wide grid. */
+const PG_BLOAT_COLUMNS = [
+  { key: "database", label: "Database" },
+  { key: "schema", label: "Schema" },
+  { key: "table", label: "Table" },
+  /* sevKey, not statusSev: the band is SERVER-computed (the browser never re-derives one) and it is what
+     gives this grid the cue the WPF grid gets from its row-style triggers. A suppressed row comes back
+     "Unknown" rather than a severity, so it renders neutral - colouring it would assert the very thing the
+     suppression denies. */
+  { key: "severity", label: "Severity", sevKey: "severity" },
+  { key: "heap_mb", label: "Heap", format: "mb" },
+  { key: "bloat_mb_estimate", label: "Bloat (est.)", format: "mb" },
+  { key: "bloat_pct_estimate", label: "Bloat % (est.)", format: "num2" },
+  { key: "estimate_suppressed", label: "Suppressed", format: "bool" },
+  { key: "estimate_suppression_reason", label: "Why Suppressed", wrap: true },
+  /* Measured, from the server's own counters - what a suppressed estimate degrades TO rather than to
+     nothing. */
+  { key: "dead_tuple_pct", label: "Dead Tuple %", format: "num2" },
+  { key: "dead_tuple_finding", label: "Dead Tuples", wrap: true },
+  { key: "bloat_finding", label: "Finding", wrap: true },
+  { key: "mods_since_analyze_pct_of_rows", label: "Modified Since Analyze %", format: "num1" },
+  { key: "last_analyzed", label: "Last Analyzed", format: "time" },
+  { key: "fillfactor", label: "Fill Factor", format: "int" },
+  { key: "fillfactor_note", label: "Fill Factor Note", wrap: true },
+  { key: "toast_bytes", label: "TOAST Bytes", format: "int" },
+  { key: "toast_note", label: "TOAST", wrap: true },
+  { key: "index_bytes", label: "Index Bytes", format: "int" },
+  { key: "heap_bytes_growth_in_window", label: "Heap Growth", format: "int" },
+  { key: "pgstattuple_available", label: "pgstattuple", format: "bool" },
+  { key: "exact_measurement_command", label: "Measure It Exactly", wrap: true },
+  { key: "sample_count", label: "Samples", format: "int" },
+];
+
+/* Both scan figures are shown. The lifetime count is what anyone querying the server directly would see, so
+   omitting it would make this grid look like it disagreed with psql; the windowed one is the answer to the
+   question actually being asked, and only stored history can produce it. */
+const PG_INDEX_USAGE_COLUMNS = [
+  { key: "database", label: "Database" },
+  { key: "schema", label: "Schema" },
+  { key: "table", label: "Table" },
+  { key: "index", label: "Index" },
+  /* Server-computed, same as the bloat grid: INVALID is Critical, an unscanned index with no structural
+     blocker is Warning, and an index we have not watched for two samples is Healthy rather than Warning -
+     too-early-to-say must not look like a finding. */
+  { key: "severity", label: "Severity", sevKey: "severity" },
+  { key: "index_mb", label: "Size", format: "mb" },
+  { key: "scans_in_window", label: "Scans in Window", format: "int" },
+  { key: "total_scans_since_stats_reset", label: "Lifetime Scans", format: "int" },
+  { key: "last_scan", label: "Last Scan", format: "time" },
+  { key: "last_scan_note", label: "Last Scan Note", wrap: true },
+  { key: "droppability_finding", label: "Can It Go?", wrap: true },
+  { key: "cost_finding", label: "What It Costs", wrap: true },
+  /* The droppability facts, individually, so the grid can be sorted and filtered on them rather than only
+     read as prose. supports_constraint is the one that most often makes a zero-scan index untouchable. */
+  { key: "is_valid", label: "Valid", format: "bool" },
+  { key: "is_primary_key", label: "Primary Key", format: "bool" },
+  { key: "is_unique", label: "Unique", format: "bool" },
+  { key: "supports_constraint", label: "Backs Constraint", format: "bool" },
+  { key: "is_replica_identity", label: "Replica Identity", format: "bool" },
+  { key: "is_partial", label: "Partial", format: "bool" },
+  { key: "is_expression", label: "Expression", format: "bool" },
+  { key: "index_method", label: "Method" },
+  { key: "tuples_read", label: "Tuples Read", format: "int" },
+  { key: "tuples_fetched", label: "Tuples Fetched", format: "int" },
+  { key: "blocks_hit", label: "Blocks Hit", format: "int" },
+  { key: "stats_were_reset_in_window", label: "Stats Reset", format: "bool" },
+  { key: "sample_count", label: "Samples", format: "int" },
+  { key: "index_definition", label: "Definition", wrap: true },
 ];
 
 const PG_SLOT_COLUMNS = [

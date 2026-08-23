@@ -622,6 +622,15 @@ public sealed class DarlingMcpHostService : BackgroundService
                    commit/rollback split. The one read whose reset handling is part of its contract: a
                    statistics reset is reported as a reset rather than surfacing as a negative rate. */
                 .WithGeminiCompatibleTools<DarlingMcpPgDatabaseTools>()
+                /* get_pg_index_usage — per-index scan counts with the catalog facts that decide whether an
+                   index can actually go. The half that is not in pg_stat_user_indexes is the point: a
+                   unique index backing a constraint enforces it without ever registering a scan, so advice
+                   derived from the counter alone tells somebody to drop their primary key. */
+                .WithGeminiCompatibleTools<DarlingMcpPgIndexUsageTools>()
+                /* get_pg_table_bloat — the damage the vacuum reads above measure the cause of. The only
+                   read here whose headline number is an ESTIMATE, and the one whose contract is that it
+                   suppresses that number rather than captioning it when its inputs cannot be trusted. */
+                .WithGeminiCompatibleTools<DarlingMcpPgTableBloatTools>()
                 .WithGeminiCompatibleTools<DarlingMcpMemoryGrantTools>()
                 .WithGeminiCompatibleTools<DarlingMcpPlanCacheSchedulerTools>()
                 .WithGeminiCompatibleTools<DarlingMcpJobTools>()

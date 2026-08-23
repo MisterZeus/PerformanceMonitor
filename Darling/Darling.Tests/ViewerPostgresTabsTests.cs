@@ -201,6 +201,7 @@ public sealed class ViewerPostgresTabsTests
             ["waits"] = "PgWaitsInnerTabIndex",
             ["io"] = "PgIoInnerTabIndex",
             ["replication"] = "PgReplicationInnerTabIndex",
+            ["storage"] = "PgStorageInnerTabIndex",
         };
 
         var missing = new List<string>();
@@ -474,14 +475,33 @@ public sealed class ViewerPostgresTabsTests
         var pgRegion = xaml[xaml.IndexOf("<TabItem x:Name=\"PgOverviewTab\"", StringComparison.Ordinal)..];
 
         /* 2 = act on this, 1 = read this. A flag with no entry fails the scan rather than being skipped:
-           an unranked highlight is one nobody decided the severity of. */
+           an unranked highlight is one nobody decided the severity of.
+
+           3 is a later addition and is NOT a severity: it is "this row carries no trustworthy number at
+           all", which has to outrank every severity because colouring such a row BY a severity asserts
+           exactly what the flag denies. Only estimate suppression has earned it (#2542). Ranking it 2
+           alongside IsHighBloat would leave their order unconstrained here, and the guarantee that a
+           suppressed estimate is never painted as a high one is the whole point. */
         var severity = new Dictionary<string, int>(StringComparer.Ordinal)
         {
             ["IsFault"] = 2,
             ["IsInvalidated"] = 2,
             ["AutovacuumDisabled"] = 2,
+            /* An INVALID index is act-on-this: the planner will never use it while writes still maintain
+               it, so it is the one index state where "unused" and "safe to remove" genuinely coincide. */
+            ["IsInvalid"] = 2,
             ["IsPermanentGap"] = 1,
             ["IsInactive"] = 1,
+            /* Read-this. An unscanned index is a CANDIDATE, never a conclusion, so it must never be
+               painted over an invalid one - the amber says "look", the red says "this is broken". */
+            ["IsUnscanned"] = 1,
+            /* High estimated bloat is act-on-this, but only ever on a row whose estimate was PUBLISHED. */
+            ["IsHighBloat"] = 2,
+            /* And a SUPPRESSED estimate outranks it, which is the one entry here that is not a severity at
+               all. The row has no trustworthy percentage; colouring it by one would assert exactly what the
+               suppression denies, so it is ranked highest to guarantee it is declared - and therefore
+               painted - last. */
+            ["EstimateSuppressed"] = 3,
         };
 
         var styles = Regex.Matches(pgRegion, "<Style.Triggers>(.*?)</Style.Triggers>", RegexOptions.Singleline);
