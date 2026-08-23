@@ -1552,6 +1552,34 @@ public static class DarlingCliCommands
             "MCP  ", mcpNowExposed, config.Mcp.Network?.Listen, config.Mcp.Network?.AllowFrom, null, mcpNowDegrade));
         output.WriteLine(DarlingNetworkConfigEditor.FormatExposureState(
             "Web  ", webNowExposed, config.Web.Network?.Listen, config.Web.Network?.AllowFrom, null, webNowDegrade));
+
+        /* #2562: whether the exposed dashboard is ENCRYPTED belongs in the exposure summary — this verb is
+           what an operator runs to answer "what is open", and "open on the LAN" reads very differently with
+           and without TLS. Only when exposed: TLS is meaningless on a loopback-only dashboard, and a line
+           saying "OFF" there would be a warning about nothing. The wizard does not PROMPT for a certificate
+           (web.network.tls is file-defined and restart-only, like the rest of the block); it reports it. */
+        if (webNowExposed)
+        {
+            var tls = DarlingWebTls.Describe(config.Web.Network?.Tls);
+            output.WriteLine(tls.Shape switch
+            {
+                DarlingWebTls.TlsShape.NotConfigured =>
+                    "         TLS: off — the access token and its session cookie cross the segment in the clear. "
+                    + "Set web.network.tls to serve HTTPS.",
+                DarlingWebTls.TlsShape.Invalid =>
+                    $"         TLS: MISCONFIGURED — {tls.Problem} The dashboard will bind loopback-only.",
+                /* The warning rides along: this verb is the one an operator runs to see what is open, and a
+                   stale PKCS#12 password beside a working PEM pair is exactly the "I thought the bundle was
+                   being served" state they came here to resolve. The service logs it at every start; nobody
+                   reading this summary should have to go find that line. */
+                DarlingWebTls.TlsShape.Pem =>
+                    $"         TLS: on (PEM pair, {config.Web.Network!.Tls!.CertPath})."
+                    + (tls.Warning is null ? string.Empty : $" NOTE: {tls.Warning}"),
+                _ => $"         TLS: on (PKCS#12, {config.Web.Network!.Tls!.PfxPath})."
+                     + (tls.Warning is null ? string.Empty : $" NOTE: {tls.Warning}"),
+            });
+        }
+
         output.WriteLine($"  Service: {await DescribeServiceStateAsync(cancellationToken)}");
         output.WriteLine();
 

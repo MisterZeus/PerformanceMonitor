@@ -433,9 +433,9 @@ credential already exist, provisioned on every service start:
 
 ### 3.1 Why it is off
 
-A browser surface has no TLS here and, on loopback, no token. Shipping it on by default would mean every
-install serves its monitoring data to anything that can open a socket on the box. So it is off, and turning it
-on is one command.
+On loopback the browser surface has no token, and TLS is opt-in rather than on. Shipping it on by default
+would mean every install serves its monitoring data to anything that can open a socket on the box. So it is
+off, and turning it on is one command.
 
 ### 3.2 Turn it on
 
@@ -703,9 +703,12 @@ Two gates, and the order matters:
 PostgreSQL all degrade the endpoint back to loopback and log a critical line saying which one — the endpoint
 never half-exposes.
 
-**There is no TLS.** The token and cookie travel in clear on the segment. The CIDR bounds *who can route to*
-the port; it does not protect the wire. On a segment you do not fully trust, put a TLS-terminating reverse
-proxy in front of the port. **Never expose this to the internet.**
+**TLS is opt-in, and without it the token and cookie travel in clear on the segment.** The CIDR bounds *who
+can route to* the port; it does not protect the wire, and an exposed dashboard with no certificate says so at
+every start. Point `web.network.tls` at a PKCS#12 bundle or a PEM pair (`Darling/README.md` has the shape), or
+put a TLS-terminating reverse proxy in front of the port. The certificate applies to the LAN listener only —
+loopback stays plain HTTP — and a missing or expired one keeps the dashboard loopback-only rather than
+falling back to cleartext. **Never expose this to the internet.**
 
 ---
 
@@ -915,8 +918,9 @@ Every one of these has cost somebody real time.
 
 These are known, current, and not bugs:
 
-- **No TLS on the MCP or web endpoints.** Tokens and cookies travel in clear on the segment. The named control
-  is a TLS-terminating reverse proxy. Both are trusted-LAN opt-ins.
+- **No TLS on the MCP endpoint**, and none on the web endpoint unless you configure `web.network.tls`. The
+  bearer token travels in clear on the segment in both cases otherwise; the named control is a
+  TLS-terminating reverse proxy. Both are trusted-LAN opt-ins.
 - **No client-side secret store for the viewer.** A remote seat's `darling.json` holds the store role password
   in cleartext; ACL it. Fine for the read-only `viewer` role, worth thinking about for `admin`.
 - **The web dashboard has no plan analysis and no live-server actions** — that is the WPF viewer's job — and
