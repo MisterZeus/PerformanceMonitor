@@ -457,6 +457,56 @@ public sealed class DarlingDeployStaleFileTests
     }
 
     /// <summary>
+    /// A UNC or root-relative path is refused THROUGH <c>Select-DarlingStaleFiles</c> and
+    /// <c>Write-DarlingInstallManifest</c>, not only when the predicate is asked about it directly.
+    ///
+    /// <para><b>This is the gap the case table could not see, and review found it.</b> The predicate's
+    /// absolute-path half only works on RAW text — normalization strips the leading separators that make a
+    /// path UNC or root-relative, so <c>\\fileserver\share\x.dll</c> arrives as the perfectly ordinary
+    /// <c>fileserver\share\x.dll</c>. Both of these functions used to normalize first and hand the
+    /// normalized value over, which left that half of the rule doing nothing at either site. It was safe
+    /// only because the readers upstream refuse an absolute path before it gets this far — an invariant
+    /// living in the CALLERS rather than in the functions, which is a guard with an expiry date nobody
+    /// wrote down.</para>
+    ///
+    /// <para>So this exercises the two functions, which is the thing
+    /// <see cref="PreservedPathCases"/> cannot do: that table proves the predicate correct when called with
+    /// raw text, and proves nothing about whether anyone calls it that way. A drive-qualified path was
+    /// never affected — the colon survives normalization — so the rows here are deliberately the two that
+    /// were.</para>
+    /// </summary>
+    [Fact]
+    public void TheDeployScript_RefusesARawUncPath_ThroughTheDiffAndTheManifestWriter()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-2529-rawcallers-");
+        try
+        {
+            var manifest = Path.Combine(root.FullName, ManifestFileName);
+
+            var probe = new StringBuilder();
+            probe.AppendLine(Functions());
+
+            /* Through the diff: neither absolute path is nominated, and the ordinary one still is — so a
+               function that simply selected nothing could not pass this. */
+            probe.AppendLine(@"$selected = Select-DarlingStaleFiles @('\\fileserver\share\x.dll', '\Windows\System32\kernel32.dll', 'b.dll') @('other.dll')");
+            probe.AppendLine("($selected -join '|')");
+
+            /* Through the writer: only the ordinary path is recorded. */
+            probe.AppendLine($"$manifest = '{manifest}'");
+            probe.AppendLine(@"(Write-DarlingInstallManifest $manifest @('a.dll', '\\fileserver\share\x.dll', '\Windows\System32\kernel32.dll') 'x.zip' ([datetime]::UtcNow)).Count");
+            probe.AppendLine("((Read-DarlingInstallManifest $manifest).Files -join '|')");
+
+            var answers = RunWindowsPowerShell(probe.ToString());
+
+            Assert.Equal(["b.dll", "1", "a.dll"], answers);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
     /// The previous build's manifest is read BEFORE the copy, and the post-copy block does not read it
     /// again.
     ///

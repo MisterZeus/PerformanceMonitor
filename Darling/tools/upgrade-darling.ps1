@@ -724,7 +724,14 @@ function Write-DarlingInstallManifest([string]$path, $relativePaths, [string]$so
         # run - and that folder walk happens right here, in Get-DarlingPayloadFiles. Filtering on the way
         # in means a path that must never be deleted cannot be written down, so it cannot be read back and
         # acted on by a later run of a later version of this script.
-        if (Test-DarlingManifestPathIsPreserved $normalized) { continue }
+        #
+        # Handed $relative and NOT $normalized. Review caught this one: the predicate's absolute-path half
+        # only works on raw text, because normalization has already stripped the leading separators that a
+        # UNC or root-relative path is recognised by. Passing the normalized value left that half doing
+        # nothing here - safe only because the readers upstream refuse an absolute path first, which is an
+        # invariant living in the CALLERS rather than in this function. A guard that holds only because of
+        # who happens to call it today is a guard with an expiry date nobody wrote down.
+        if (Test-DarlingManifestPathIsPreserved $relative) { continue }
         if (-not $seen.Add($normalized)) { continue }
         $files += $normalized
     }
@@ -807,7 +814,12 @@ function Select-DarlingStaleFiles($previousPaths, $currentPaths) {
         # file under a name an ordinal comparison calls absent, and removing it would delete what the copy
         # had just written.
         if ($shipped.Contains($normalized)) { continue }
-        if (Test-DarlingManifestPathIsPreserved $normalized) { continue }
+
+        # $path, not $normalized, for the reason spelled out in Write-DarlingInstallManifest: the
+        # predicate's absolute-path half can only see a UNC or root-relative path in RAW text, and
+        # normalization has already removed what makes it one. The membership test above is a different
+        # question and correctly uses the normalized form, which is why the two are not the same argument.
+        if (Test-DarlingManifestPathIsPreserved $path) { continue }
         if (-not $seen.Add($normalized)) { continue }
         $stale += $normalized
     }
