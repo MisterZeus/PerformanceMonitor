@@ -477,6 +477,17 @@ public sealed class DarlingWebHostService : BackgroundService
                         }
                         catch (Exception ex)
                         {
+                            /* Release whatever was already adopted. Adoption happens BEFORE the SAN check and
+                               the expiry logging, and both of those still run inside this try — the SAN reader
+                               re-materializes an extension from raw DER and can throw on a malformed one. A
+                               throw there lands here holding a certificate the listener will never use, and
+                               this degrade RETURNS TRUE (loopback-only started fine), so the method's outer
+                               catch and DisposeFailedStartAsync never see it. Without these two lines the
+                               "every bail path releases the key" claim on _serverCertificate is false. */
+                            _serverCertificate?.Dispose();
+                            _serverCertificate = null;
+                            serverCertificate = null;
+
                             _logger.LogCritical(
                                 "Web dashboard TLS certificate could not be loaded ({Message}) — refusing to expose; binding loopback-only.",
                                 ex.Message);

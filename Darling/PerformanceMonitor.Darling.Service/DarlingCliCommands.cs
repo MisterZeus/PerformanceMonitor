@@ -1568,9 +1568,15 @@ public static class DarlingCliCommands
                     + "Set web.network.tls to serve HTTPS.",
                 DarlingWebTls.TlsShape.Invalid =>
                     $"         TLS: MISCONFIGURED — {tls.Problem} The dashboard will bind loopback-only.",
+                /* The warning rides along: this verb is the one an operator runs to see what is open, and a
+                   stale PKCS#12 password beside a working PEM pair is exactly the "I thought the bundle was
+                   being served" state they came here to resolve. The service logs it at every start; nobody
+                   reading this summary should have to go find that line. */
                 DarlingWebTls.TlsShape.Pem =>
-                    $"         TLS: on (PEM pair, {config.Web.Network!.Tls!.CertPath}).",
-                _ => $"         TLS: on (PKCS#12, {config.Web.Network!.Tls!.PfxPath}).",
+                    $"         TLS: on (PEM pair, {config.Web.Network!.Tls!.CertPath})."
+                    + (tls.Warning is null ? string.Empty : $" NOTE: {tls.Warning}"),
+                _ => $"         TLS: on (PKCS#12, {config.Web.Network!.Tls!.PfxPath})."
+                     + (tls.Warning is null ? string.Empty : $" NOTE: {tls.Warning}"),
             });
         }
 

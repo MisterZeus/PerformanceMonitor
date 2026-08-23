@@ -479,6 +479,28 @@ public sealed class DarlingWebTlsTests
         Assert.DoesNotContain("Secure = true,", source, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void EveryTlsBailPath_ReleasesTheCertificate()
+    {
+        /* The adoption of the loaded certificate happens BEFORE the SAN check and the expiry logging, and
+           both of those run inside the same try. A throw there degrades to loopback-only and RETURNS TRUE, so
+           the method's outer catch and DisposeFailedStartAsync never run - the certificate would sit in the
+           field, unused, until the next full stop. The invariant the class doc claims is that every bail path
+           releases the key, so pin that the catch actually does it. */
+        var source = ReadSource(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs"));
+
+        var catchAt = source.IndexOf(
+            "\"Web dashboard TLS certificate could not be loaded ({Message})", StringComparison.Ordinal);
+        Assert.True(catchAt > 0, "the TLS load catch is gone — this pin needs rewriting");
+
+        /* The release must come BEFORE the log line in that catch, which is the whole point of the ordering. */
+        var window = source[..catchAt];
+        var release = window.LastIndexOf("_serverCertificate?.Dispose();", StringComparison.Ordinal);
+        var adoption = window.LastIndexOf("_serverCertificate = loaded;", StringComparison.Ordinal);
+        Assert.True(release > adoption, "the TLS load catch no longer disposes the already-adopted certificate");
+    }
+
     /* ---- helpers ---- */
 
     private static X509Certificate2 SelfSigned()

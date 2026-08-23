@@ -401,8 +401,12 @@ internal static class DarlingWebTls
         var chain = new X509Certificate2Collection();
         foreach (var candidate in bundle)
         {
+            /* Self-issued is decided on the RAW encoded names, matching FindLeaf above and for the same
+               reason: X.500 name formatting is not canonical, so two encodings of the same DN can render
+               differently (different string types, different attribute ordering) and still be one name.
+               Getting it wrong here sends a root down the wire that buys nothing. */
             if (string.Equals(candidate.Thumbprint, leaf.Thumbprint, StringComparison.OrdinalIgnoreCase)
-                || string.Equals(candidate.SubjectName.Name, candidate.IssuerName.Name, StringComparison.Ordinal))
+                || candidate.SubjectName.RawData.AsSpan().SequenceEqual(candidate.IssuerName.RawData))
             {
                 /* Not the caller's to release: the leaf is returned separately and lives on. */
                 if (!ReferenceEquals(candidate, leaf))
