@@ -473,14 +473,25 @@ function Join-DarlingInstallPath([string]$installRoot, [string]$relativePath) {
 # Everything here is a string test on a relative path, with no filesystem access at all, so it is the same
 # answer on any machine and can be run against a table of cases rather than reasoned about.
 function Test-DarlingManifestPathIsPreserved([string]$relativePath) {
-    $path = ConvertTo-DarlingManifestPath $relativePath
-    if ([string]::IsNullOrWhiteSpace($path)) { return $true }
+    if ([string]::IsNullOrWhiteSpace($relativePath)) { return $true }
 
     # A manifest path is RELATIVE and stays inside the install root. Rooted, drive-qualified or
     # colon-carrying means it did not come from a payload this script recorded, and one statement before a
-    # recursive-free delete is not where to work out where it did come from.
-    if ($path.Contains(':')) { return $true }
-    if ([IO.Path]::IsPathRooted($path)) { return $true }
+    # delete is not where to work out where it did come from.
+    #
+    # Asked of the RAW input, BEFORE normalization, and the order is the whole point. Normalizing strips
+    # leading separators, so asking afterwards can never fire: '\\server\share\x.dll' would already have
+    # become 'server\share\x.dll', a perfectly ordinary-looking relative path, and the answer would be a
+    # confident no to a question nobody asked. A check that cannot fire is a comment wearing a guard's
+    # clothes. Refusing it here means an absolute path in a manifest is REPORTED rather than quietly
+    # reinterpreted as a subdirectory of the install root that might happen to exist.
+    $raw = $relativePath.Trim()
+    if ($raw.Contains(':')) { return $true }
+    if ($raw.StartsWith('\') -or $raw.StartsWith('/')) { return $true }
+    if ([IO.Path]::IsPathRooted($raw)) { return $true }
+
+    $path = ConvertTo-DarlingManifestPath $raw
+    if ([string]::IsNullOrWhiteSpace($path)) { return $true }
 
     $segments = @($path.Split('\') | Where-Object { $_ })
     if ($segments.Count -eq 0) { return $true }
