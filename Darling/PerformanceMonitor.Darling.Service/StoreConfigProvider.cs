@@ -605,10 +605,11 @@ FROM config_monitored_servers", connection);
     /// are the ONLY two darling.json per-server keys this method deliberately does not compare. Neither is
     /// read from the store (see <c>ReadRegisteredServersForComparisonAsync</c>) and neither is compared here,
     /// so no blob, no <c>file:</c>/<c>env:</c> reference and no plaintext can reach a log line through this
-    /// path. The
-    /// engine-gated fields use the STORE's engine, because the store is what the service connects with — if
-    /// the two disagree about the engine, that disagreement is reported on its own line and the store's
-    /// answer is the one in force.</para>
+    /// path.</para>
+    ///
+    /// <para>The engine-gated fields read the STORE's engine, because the store is what the service connects
+    /// with — if the two disagree about the engine, that disagreement is reported on its own line and the
+    /// store's answer is the one in force.</para>
     /// </summary>
     internal static IReadOnlyList<SettingDrift> CompareServerSettings(MonitoredServer file, MonitoredServer store)
     {
