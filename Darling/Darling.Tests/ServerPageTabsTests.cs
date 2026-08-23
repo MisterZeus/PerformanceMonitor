@@ -350,6 +350,8 @@ public sealed class ServerPageTabsTests
             ["get_pg_wraparound_risk"] = "pg_wraparound_stats",
             ["get_pg_xmin_horizon"] = "pg_xmin_horizon",
             ["get_pg_database_stats"] = "pg_database_stats",
+            ["get_pg_index_usage"] = "pg_index_usage_stats",
+            ["get_pg_table_bloat"] = "pg_table_bloat_stats",
         };
 
         var served = DarlingWebEndpoints.BuildReadDispatch().Keys

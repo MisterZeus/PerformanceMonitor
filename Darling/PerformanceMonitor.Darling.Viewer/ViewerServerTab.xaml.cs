@@ -86,6 +86,7 @@ public partial class ViewerServerTab : UserControl
     internal const int PgWaitsInnerTabIndex = 22;
     internal const int PgIoInnerTabIndex = 23;
     internal const int PgReplicationInnerTabIndex = 24;
+    internal const int PgStorageInnerTabIndex = 25;
 
     private readonly ViewerDataService _dataService;
     private readonly DarlingServer _server;
@@ -447,6 +448,9 @@ public partial class ViewerServerTab : UserControl
                     break;
                 case PgReplicationInnerTabIndex:
                     await LoadPgReplicationAsync();
+                    break;
+                case PgStorageInnerTabIndex:
+                    await LoadPgStorageAsync();
                     break;
 
                 case OverviewInnerTabIndex:

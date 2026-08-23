@@ -262,10 +262,19 @@ difference a cumulative counter, so the first read after startup legitimately sh
 | `pg_blocking` | 1 min | 1 min | 1 min (a sample, not a counter) |
 | `pg_database_stats` | 1 min | 1 min | 2 min |
 | `pg_autovacuum_stats` | 60 min | **60 min** | 2 h (growing/flat needs two) |
+| `pg_table_bloat_stats` | 60 min | **60 min** | 2 h (growing/flat needs two) |
+| `pg_index_usage_stats` | 24 h | **24 h** | 48 h (a scan count is a difference) |
 
-`pg_autovacuum_stats` is the one that surprises people: an hour before the first row, two before
-"dead tuples growing" can be answered. That cadence is deliberate — a PostgreSQL connection is bound to
-one database for life, so per-database collection costs one connection per database per cycle.
+The three per-database collectors are the ones that surprise people. `pg_autovacuum_stats` and
+`pg_table_bloat_stats` take an hour before the first row and two before "growing or flat" can be answered;
+`pg_index_usage_stats` takes a **day**, and two before a windowed scan count exists at all. Those cadences
+are deliberate — a PostgreSQL connection is bound to one database for life, so per-database collection
+costs one connection per database per cycle, and index usage is a structural question that an hourly
+sample would re-record 24 times a day for nothing.
+
+`pg_table_bloat_stats` shares `pg_autovacuum_stats`' hour on purpose rather than by copying: it measures
+the DAMAGE whose CAUSE that one measures, and "vacuum fell behind at 14:00 and bloat grew" is only a
+sentence the data can support if both are sampled on the same grain.
 
 ## 8. Read it
 
@@ -282,6 +291,8 @@ Through MCP, one tool per collector:
 | `get_pg_io_stats` | I/O by (backend type, object, context) — who, what, and why |
 | `get_pg_blocking` | blocking chains that were SAMPLED, with the root attributed |
 | `get_pg_database_stats` | temp-file spills, cache hit ratio, deadlocks, commit/rollback split |
+| `get_pg_index_usage` | which indexes nothing scans — **and whether each one can actually be dropped** |
+| `get_pg_table_bloat` | how much space the vacuum lag above has cost, as an **estimate** with its own error stated |
 
 **Proof, and the trap:** on a healthy target most of these are *supposed* to be boring. Do not read
 "nothing alarming" as "not collecting" — check `collection_log` (step 6) for that. Distinguish:
@@ -297,7 +308,39 @@ Two results that look like bugs and are not:
   write data files, the storage layer does, so those columns are NULL — which is why the tool reports
   trackedness instead of letting a NULL read as a zero.
 - `get_pg_replication_slots` empty **on a reader** is per-instance, not a cluster all-clear. Slots live on
-  the writer. Same for autovacuum state.
+  the writer. Same for autovacuum state, index usage and bloat — all three are writer-only collectors.
+- `get_pg_table_bloat` reporting most of its rows with a **suppressed** estimate is almost always a
+  permissions gap rather than a missing ANALYZE, and it is the one step in this runbook that `GRANT
+  pg_monitor` alone does not satisfy. See the note below.
+
+### The one grant `pg_monitor` does not cover
+
+`pg_monitor` is enough for every collector here except the bloat estimate, and the way it fails is worth
+knowing because it does not look like a failure. `pg_stats` is filtered by `has_column_privilege(...,
+'select')`, and `pg_monitor` confers **no** SELECT on user tables — so the monitoring role sees **zero**
+rows in `pg_stats` and the estimator, fed nothing, returns confident large numbers. Measured against a
+`pg_monitor`-only role on a live PostgreSQL 16 target: 88.59% reported for a table whose true bloat is
+0.50%, 95.03% for one that is really 74.82%, 22.57% for one that is really 0.46%.
+
+Darling does not publish those numbers — `estimate_unavailable` is set on every such row and the read
+suppresses the figure rather than captioning it — but the result is a bloat surface that reports nothing
+useful. The fix is one grant:
+
+```sql
+-- PostgreSQL 14 and newer
+GRANT pg_read_all_data TO darling_monitor;
+
+-- PostgreSQL 13: the role does not exist, so grant it per schema
+GRANT USAGE ON SCHEMA public TO darling_monitor;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO darling_monitor;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO darling_monitor;
+```
+
+Verified on the live rig: with `pg_read_all_data` added, a `pg_monitor` role's estimates became
+byte-identical to a superuser's. This is a genuine widening of what the monitoring role can read, so it is
+a decision to take deliberately rather than a step to run — every other collector works without it, and a
+fleet that does not want it simply gets measured sizes and dead-tuple counts from this surface instead of
+an estimate.
 - `get_pg_database_stats` reporting `stats_reset_count` above zero is the tool working, not a fault. The
   counters it reads are cumulative since the last `pg_stat_reset()`, so a reset zeroes them; the window
   totals become LOWER BOUNDS and the tool says so rather than letting the reset surface as a negative

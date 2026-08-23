@@ -183,5 +183,30 @@ public static class CollectorScheduleDefaults
            loses the minute that would have named the cause. 30 days matches the other per-minute rate
            collectors — the question this answers is "did this start on Tuesday", not a quarterly trend. */
         ["pg_database_stats"] = new(1, 30),
+
+        /* DAILY, and the cadence is inherited from index_object_stats — the SQL Server collector that
+           answers the same question — rather than from the PostgreSQL fan-out sibling. "Has anything
+           scanned this index" is a structural question about a schema, not a rate: an hourly sample would
+           record the same catalog facts 24 times a day and cost 24x the fan-out connections to do it. The
+           counters are cumulative, so a daily sample loses no total; it only coarsens WHEN a scan happened,
+           and nobody drops an index on the strength of which hour it was last used.
+
+           90 days of retention, and this is the number that actually matters. The retention window IS the
+           evidence: an index can only be called unused for as long as we have been watching it, so the
+           window has to outlast the slowest query that might legitimately need it. 30 days cannot clear a
+           monthly report; 90 covers monthly and quarterly jobs. It still cannot clear an ANNUAL one, which
+           is why the read reports the observed window rather than asserting an index is unused. */
+        ["pg_index_usage_stats"] = new(1440, 90),
+
+        /* Hourly, matching pg_autovacuum_stats deliberately rather than by copying: this collector measures
+           the DAMAGE whose CAUSE that one measures, and correlating the two requires a common grain — at
+           different cadences "vacuum fell behind at 14:00 and bloat grew" stops being a sentence the data
+           can support. It is also the second per-database fan-out, so sharing the cadence means one
+           connection-budget decision instead of two.
+
+           90 days matches pg_autovacuum_stats and database_size_stats for the same reason: the useful
+           reading of bloat is a trend — is this table's waste growing, holding, or being reclaimed — and a
+           spot percentage on its own is what gets someone to run VACUUM FULL on a Tuesday. */
+        ["pg_table_bloat_stats"] = new(60, 90),
     };
 }
