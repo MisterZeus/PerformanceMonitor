@@ -816,7 +816,7 @@ public sealed class DarlingDeployStaleFileTests
             if (!exited)
             {
                 try { process.Kill(entireProcessTree: true); }
-                catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+                catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or System.ComponentModel.Win32Exception)
                 {
                     /* Already gone between the timeout and the kill. Nothing to do. */
                 }
