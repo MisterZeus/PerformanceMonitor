@@ -631,6 +631,12 @@ public sealed class DarlingMcpHostService : BackgroundService
                    read here whose headline number is an ESTIMATE, and the one whose contract is that it
                    suppresses that number rather than captioning it when its inputs cannot be trusted. */
                 .WithGeminiCompatibleTools<DarlingMcpPgTableBloatTools>()
+                /* get_pg_session_states — the session side of the xmin horizon, and the one read here whose
+                   job includes REFUSING a causal claim. get_pg_xmin_horizon says a session is holding the
+                   horizon; this says which one, and — measured on a live instance — says when an
+                   idle-in-transaction session that looks identical is holding nothing at all, because a
+                   READ COMMITTED transaction that only read has already released its snapshot. */
+                .WithGeminiCompatibleTools<DarlingMcpPgSessionStatesTools>()
                 .WithGeminiCompatibleTools<DarlingMcpMemoryGrantTools>()
                 .WithGeminiCompatibleTools<DarlingMcpPlanCacheSchedulerTools>()
                 .WithGeminiCompatibleTools<DarlingMcpJobTools>()

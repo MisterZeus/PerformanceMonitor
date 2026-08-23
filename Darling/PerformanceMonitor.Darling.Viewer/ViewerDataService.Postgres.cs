@@ -301,4 +301,10 @@ public sealed partial class ViewerDataService
     public Task<List<DarlingPgIndexUsageReader.PgIndexUsageRow>> GetPgIndexUsageAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int limit = 50, CancellationToken cancellationToken = default) =>
         DarlingPgIndexUsageReader.GetPgIndexUsageAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+
+    /// <summary>Vacuum tab, panel 4 - the sessions holding a transaction open, and which of them actually
+    /// pins the xmin horizon the panels above it measure.</summary>
+    public Task<List<DarlingPgSessionStatesReader.PgSessionStateRow>> GetPgSessionStatesAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int limit = 50, CancellationToken cancellationToken = default) =>
+        DarlingPgSessionStatesReader.GetPgSessionStatesAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
 }

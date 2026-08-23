@@ -94,6 +94,18 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "get_pg_index_usage",
         "get_pg_table_bloat",
 
+        /* get_pg_session_states (#2540) - which sessions are holding a transaction open and which of them
+           actually pins the xmin horizon. Same architectural reason as every entry above: Lite has no
+           PostgreSQL target, so there is no Lite twin for this to be missing from.
+
+           Worth naming the near-twin explicitly, because Lite ships get_active_queries and the two sound
+           alike. They are not the same read. That one is a SQL Server DMV snapshot of what is EXECUTING;
+           this one is a stored history of what is NOT executing but has a transaction open, which is the
+           condition SQL Server has no equivalent of - no SQL Server session pins a cluster-wide cleanup
+           horizon by sitting idle inside a transaction. Porting the name across would put T-SQL on a
+           PostgreSQL path, which is the #2213 class of defect. */
+        "get_pg_session_states",
+
         /* #2068: the store self-metrics read (get_store_metrics) over collect.store_metrics — the central
            Postgres store measuring ITSELF (hypertable sizes/compression, payload dims, whole-store growth)
            for capacity forecasting. Darling-ONLY by architecture, not a "not ported yet" item: Lite is a
