@@ -3799,10 +3799,22 @@
             </Grid>
         </TabItem>
 
+        <!-- Vacuum (#2530, #2540). FOUR panels now, still one causal chain, still read top to bottom: a
+             session holds a transaction open, the transaction holds the xmin horizon, the horizon starves
+             vacuum, and vacuum falling behind ends in wraparound.
+
+             Session states is placed FIRST because it is the link UPSTREAM of what used to be panel 1. The
+             horizon grid names the CLASS of holder; only this grid names the session, and the fix is always
+             in whatever opened that transaction. It is also the only panel that can say a long
+             idle-in-transaction session pins NOTHING, which is the correction the rest of the tab cannot
+             make and the reason it has to be met before the vacuum backlog below it. -->
         <TabItem x:Name="PgVacuumTab" Header="Vacuum" Visibility="Collapsed">
             <Grid Margin="8">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
@@ -3816,10 +3828,75 @@
                 <TextBlock Grid.Row="0" x:Name="PgVacuumNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
-                <TextBlock Grid.Row="1" Text="1. What holds the xmin horizon — vacuum cannot reclaim anything newer than this" FontWeight="SemiBold" Margin="0,0,0,2"/>
-                <TextBlock Grid.Row="2" x:Name="PgXminNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                <TextBlock Grid.Row="1" Text="1. Which session is holding a transaction open — and whether it pins anything at all" FontWeight="SemiBold" Margin="0,0,0,2"/>
+                <TextBlock Grid.Row="2" x:Name="PgSessionStatesNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                <DataGrid Grid.Row="3" x:Name="PgXminHorizonGrid" Style="{StaticResource DarkGrid}"
+                <DataGrid Grid.Row="3" x:Name="PgSessionStatesGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.RowStyle>
+                        <Style TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
+                            <!-- LEAST severe first, so the LAST match wins. The three are not exclusive and
+                                 they are not degrees of one thing: amber is a session idle in transaction
+                                 that pins NOTHING (a held connection and its locks, costing vacuum zero),
+                                 red is a sustained xmin holder (the thing that actually starves vacuum),
+                                 and grey outranks both because a redacted row carries no trustworthy state
+                                 at all — painting it by a severity would assert exactly what the redaction
+                                 denies. -->
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsLongIdleTransaction}" Value="True">
+                                    <Setter Property="Background" Value="#33FFB86B"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding IsSustainedHorizonHolder}" Value="True">
+                                    <Setter Property="Background" Value="#33FF6B6B"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding StateUnknown}" Value="True">
+                                    <Setter Property="Background" Value="#22808080"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </DataGrid.RowStyle>
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="PID" Binding="{Binding Pid}" ElementStyle="{StaticResource NumericCell}" Width="80"/>
+                        <DataGridTextColumn Header="Backend" Binding="{Binding BackendId}" Width="120"/>
+                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="130"/>
+                        <DataGridTextColumn Header="User" Binding="{Binding Username}" Width="110"/>
+                        <DataGridTextColumn Header="Application" Binding="{Binding ApplicationName}" Width="160"/>
+                        <DataGridTextColumn Header="Client" Binding="{Binding ClientAddr}" Width="120"/>
+                        <DataGridTextColumn Header="Backend Type" Binding="{Binding BackendType}" Width="120"/>
+                        <DataGridTextColumn Header="State" Binding="{Binding LastState}" Width="130"/>
+                        <!-- Immediately after the state, because it is the column that decides whether the
+                             state above it means anything: "pins nothing" here and the long idle duration
+                             two columns along is a forgotten commit, not a vacuum problem. -->
+                        <DataGridTextColumn Header="Pinned Horizon (peak)" Binding="{Binding PeakHorizonAge}" Width="160"/>
+                        <DataGridTextColumn Header="Held Horizon In" Binding="{Binding HorizonHoldShare}" Width="140"/>
+                        <DataGridTextColumn Header="Idle In Xact" Binding="{Binding IdleInTransactionShare}" Width="140"/>
+                        <DataGridTextColumn Header="Peak Xact" Binding="{Binding PeakXactDuration}" Width="110"/>
+                        <DataGridTextColumn Header="Peak State" Binding="{Binding PeakStateDuration}" Width="110"/>
+                        <DataGridTextColumn Header="Peak Query" Binding="{Binding PeakQueryDuration}" Width="110"/>
+                        <DataGridTextColumn Header="Backend Age" Binding="{Binding BackendAge}" Width="110"/>
+                        <DataGridTextColumn Header="Peak xmin Age" Binding="{Binding PeakXminAge}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                        <DataGridTextColumn Header="Peak XID Age" Binding="{Binding PeakXidAge}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                        <DataGridTextColumn Header="Last Wait" Binding="{Binding LastWait}" Width="150"/>
+                        <DataGridTextColumn Header="Command" Binding="{Binding LastCommandTag}" Width="110"/>
+                        <DataGridTextColumn Header="Query ID" Binding="{Binding LastQueryId}" Width="140"/>
+                        <DataGridTextColumn Header="Samples" Binding="{Binding SampleCount}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                        <DataGridTextColumn Header="First Seen" Binding="{Binding FirstSeenAt}" Width="140"/>
+                        <DataGridTextColumn Header="Last Seen" Binding="{Binding LastSeenAt}" Width="140"/>
+                        <DataGridTextColumn Header="On The Instance" Binding="{Binding InstanceContext}" Width="220"/>
+                        <DataGridTemplateColumn Header="Caveats" Width="*">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding Caveats}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Caveats}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <TextBlock Grid.Row="4" Text="2. What holds the xmin horizon — vacuum cannot reclaim anything newer than this" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                <TextBlock Grid.Row="5" x:Name="PgXminNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="6" x:Name="PgXminHorizonGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Cause" Binding="{Binding Source}" Width="200"/>
@@ -3839,10 +3916,10 @@
                     </DataGrid.Columns>
                 </DataGrid>
 
-                <TextBlock Grid.Row="4" Text="2. Autovacuum backlog — ranked by how far past each table's OWN threshold it is, not by raw dead tuples" FontWeight="SemiBold" Margin="0,10,0,2"/>
-                <TextBlock Grid.Row="5" x:Name="PgAutovacuumNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                <TextBlock Grid.Row="7" Text="3. Autovacuum backlog — ranked by how far past each table's OWN threshold it is, not by raw dead tuples" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                <TextBlock Grid.Row="8" x:Name="PgAutovacuumNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                <DataGrid Grid.Row="6" x:Name="PgAutovacuumGrid" Style="{StaticResource DarkGrid}"
+                <DataGrid Grid.Row="9" x:Name="PgAutovacuumGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.RowStyle>
                         <Style TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
@@ -3878,10 +3955,10 @@
                     </DataGrid.Columns>
                 </DataGrid>
 
-                <TextBlock Grid.Row="7" Text="3. Freeze headroom — how much transaction-ID space is left before the emergency vacuum, and before a shutdown" FontWeight="SemiBold" Margin="0,10,0,2"/>
-                <TextBlock Grid.Row="8" x:Name="PgWraparoundNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                <TextBlock Grid.Row="10" Text="4. Freeze headroom — how much transaction-ID space is left before the emergency vacuum, and before a shutdown" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                <TextBlock Grid.Row="11" x:Name="PgWraparoundNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                <DataGrid Grid.Row="9" x:Name="PgWraparoundGrid" Style="{StaticResource DarkGrid}"
+                <DataGrid Grid.Row="12" x:Name="PgWraparoundGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="180"/>

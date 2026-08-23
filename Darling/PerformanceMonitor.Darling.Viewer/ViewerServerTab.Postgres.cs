@@ -19,7 +19,7 @@ using PerformanceMonitor.Darling.Storage;
 namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>
-/// The six PostgreSQL inner tabs (#2530) — which tab set a server gets, what each tab loads, and the
+/// The seven PostgreSQL inner tabs (#2530) — which tab set a server gets, what each tab loads, and the
 /// projections that turn stored rows into something a grid may show.
 ///
 /// <para><b>Why the projections exist rather than binding the reader records directly.</b> Every one of
@@ -212,19 +212,45 @@ public partial class ViewerServerTab
     }
 
     /// <summary>
-    /// Vacuum — the xmin horizon, the autovacuum backlog and the freeze headroom, in that causal order.
-    /// One load for all three: they are one story, and reading them a tab apart is how each of them ends up
-    /// looking survivable.
+    /// Vacuum — the sessions holding a transaction open, the xmin horizon, the autovacuum backlog and the
+    /// freeze headroom, in that causal order. One load for all four: they are one story, and reading them a
+    /// tab apart is how each of them ends up looking survivable.
+    ///
+    /// <para>Session states leads because it is the only panel that can name the SESSION behind a pinned
+    /// horizon, and the only one that can say a long idle-in-transaction session pins nothing at all.</para>
     /// </summary>
     private async Task LoadPgVacuumAsync()
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
+        var sessionsTask = _dataService.GetPgSessionStatesAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
         var xminTask = _dataService.GetPgXminHorizonAsync(_server.ServerId, startUtc, endUtc);
         var autovacuumTask = _dataService.GetPgAutovacuumAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
         var wraparoundTask = _dataService.GetPgWraparoundAsync(_server.ServerId, startUtc, endUtc);
 
-        await Task.WhenAll(xminTask, autovacuumTask, wraparoundTask);
+        await Task.WhenAll(sessionsTask, xminTask, autovacuumTask, wraparoundTask);
+
+        PgSessionStatesGrid.ItemsSource = sessionsTask.Result.Select(PgDisplay.SessionState).ToList();
+
+        /* The healthy-empty sentence has to carry BOTH halves. Zero rows here is a real all-clear — the
+           collector stores nothing when every transaction is short — and it is an all-clear about a SAMPLE,
+           so a transaction that opened and closed between two captures left no trace to find. Saying only
+           the first half would overstate it; saying only the second would read as broken collection. */
+        PgSessionStatesNote.Text = PgCollectorIsGatedOff("pg_session_states")
+            ? PanelNote("pg_session_states", 0, string.Empty)
+            : sessionsTask.Result.Count == 0
+                ? "No session held a transaction open past the collector's floor in this window. Zero rows "
+                  + "is the HEALTHY answer here rather than a missing read — the collector stores nothing "
+                  + "when every transaction is short. It is also a SAMPLE taken once per collection cycle, "
+                  + "not an event log: PostgreSQL records nothing about session state unless something "
+                  + "asks, so a transaction that opened and closed between two captures is genuinely "
+                  + "invisible here."
+                : "Duration is NOT evidence that a session is starving vacuum — read the Pinned Horizon "
+                  + "column, where \"" + PgDisplay.PinsNothingText + "\" means the session held neither a "
+                  + "snapshot nor a transaction id in any sample and terminating it would not reclaim one "
+                  + "dead row. This is a SAMPLE at the collection interval, so a transaction that opened "
+                  + "and closed between two captures never appears, and a grey row is one PostgreSQL "
+                  + "redacted because the monitoring login lacks pg_monitor.";
 
         PgXminHorizonGrid.ItemsSource = xminTask.Result.Select(PgDisplay.Xmin).ToList();
         PgXminNote.Text = PanelNote("pg_xmin_horizon", xminTask.Result.Count,

@@ -658,7 +658,8 @@ SELECT
     EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'servers' AND column_name = 'engine_kind'),
     EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_database_stats'),
     EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_index_usage_stats'),
-    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_table_bloat_stats')";
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_table_bloat_stats'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_session_states')";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
     /// (<see cref="StorageVersion.SchemaVersion"/>). The connect-time gate blocks a store below this.</summary>
@@ -679,7 +680,7 @@ SELECT
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
-                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22), reader.GetBoolean(23), reader.GetBoolean(24), reader.GetBoolean(25), reader.GetBoolean(26), reader.GetBoolean(27), reader.GetBoolean(28), reader.GetBoolean(29), reader.GetBoolean(30), reader.GetBoolean(31), reader.GetBoolean(32), reader.GetBoolean(33), reader.GetBoolean(34), reader.GetBoolean(35), reader.GetBoolean(36), reader.GetBoolean(37), reader.GetBoolean(38), reader.GetBoolean(39), reader.GetBoolean(40), reader.GetBoolean(41), reader.GetBoolean(42), reader.GetBoolean(43), reader.GetBoolean(44), reader.GetBoolean(45), reader.GetBoolean(46), reader.GetBoolean(47), reader.GetBoolean(48), reader.GetBoolean(49), reader.GetBoolean(50), reader.GetBoolean(51), reader.GetBoolean(52), reader.GetBoolean(53), reader.GetBoolean(54), reader.GetBoolean(55), reader.GetBoolean(56), reader.GetBoolean(57), reader.GetBoolean(58), reader.GetBoolean(59), reader.GetBoolean(60));
+                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22), reader.GetBoolean(23), reader.GetBoolean(24), reader.GetBoolean(25), reader.GetBoolean(26), reader.GetBoolean(27), reader.GetBoolean(28), reader.GetBoolean(29), reader.GetBoolean(30), reader.GetBoolean(31), reader.GetBoolean(32), reader.GetBoolean(33), reader.GetBoolean(34), reader.GetBoolean(35), reader.GetBoolean(36), reader.GetBoolean(37), reader.GetBoolean(38), reader.GetBoolean(39), reader.GetBoolean(40), reader.GetBoolean(41), reader.GetBoolean(42), reader.GetBoolean(43), reader.GetBoolean(44), reader.GetBoolean(45), reader.GetBoolean(46), reader.GetBoolean(47), reader.GetBoolean(48), reader.GetBoolean(49), reader.GetBoolean(50), reader.GetBoolean(51), reader.GetBoolean(52), reader.GetBoolean(53), reader.GetBoolean(54), reader.GetBoolean(55), reader.GetBoolean(56), reader.GetBoolean(57), reader.GetBoolean(58), reader.GetBoolean(59), reader.GetBoolean(60), reader.GetBoolean(61));
             }
 
             return null;
@@ -704,7 +705,7 @@ SELECT
     /// is unit-tested without a live store; any schema bump past the newest arm trips the pinning test that keeps
     /// this in step with <see cref="StorageVersion.SchemaVersion"/>.
     /// </summary>
-    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false, bool hasCollectorState = false, bool hasPlanCorrection = false, bool hasPvsStats = false, bool hasPvsPressureKnobs = false, bool hasDatabaseStateAlert = false, bool hasServerTagColour = false, bool hasQueryStatsHostObject = false, bool hasFindingDrillDown = false, bool hasStoreMetrics = false, bool hasPlanDimGzip = false, bool hasSelfAlertKnobs = false, bool hasJobMetricsColumns = false, bool hasJobCadenceKnob = false, bool hasBackfillSwitch = false, bool hasCollectorMemoryKnobs = false, bool hasDatabaseStateEdgeMemory = false, bool hasIncidentOccurrences = false, bool hasPlanXmlCompressionKnob = false, bool hasMonitoredServerEngine = false, bool hasPgBlockingEdges = false, bool hasQueryStorePlanMap = false, bool hasPgStatementText = false, bool hasQueryStoreText = false, bool hasPlanContentRetentionKnob = false, bool hasQueryStoreHealth = false, bool hasQueryStoreTextHash = false, bool hasComposeTimeoutKnob = false, bool hasFileGrowthAlert = false, bool hasCollectionLogFanoutRollup = false, bool hasTempDbMaxSize = false, bool hasServerEngineKind = false, bool hasPgDatabaseStats = false, bool hasPgIndexUsageStats = false, bool hasPgTableBloatStats = false)
+    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false, bool hasCollectorState = false, bool hasPlanCorrection = false, bool hasPvsStats = false, bool hasPvsPressureKnobs = false, bool hasDatabaseStateAlert = false, bool hasServerTagColour = false, bool hasQueryStatsHostObject = false, bool hasFindingDrillDown = false, bool hasStoreMetrics = false, bool hasPlanDimGzip = false, bool hasSelfAlertKnobs = false, bool hasJobMetricsColumns = false, bool hasJobCadenceKnob = false, bool hasBackfillSwitch = false, bool hasCollectorMemoryKnobs = false, bool hasDatabaseStateEdgeMemory = false, bool hasIncidentOccurrences = false, bool hasPlanXmlCompressionKnob = false, bool hasMonitoredServerEngine = false, bool hasPgBlockingEdges = false, bool hasQueryStorePlanMap = false, bool hasPgStatementText = false, bool hasQueryStoreText = false, bool hasPlanContentRetentionKnob = false, bool hasQueryStoreHealth = false, bool hasQueryStoreTextHash = false, bool hasComposeTimeoutKnob = false, bool hasFileGrowthAlert = false, bool hasCollectionLogFanoutRollup = false, bool hasTempDbMaxSize = false, bool hasServerEngineKind = false, bool hasPgDatabaseStats = false, bool hasPgIndexUsageStats = false, bool hasPgTableBloatStats = false, bool hasPgSessionStates = false)
     {
         /* V71 (the PostgreSQL blocking-edges rung): a table-existence sentinel and now the newest-first arm.
            A collector table would ordinarily get no arm at all — see the V63-V69 note below — but the TOP
@@ -777,51 +778,60 @@ SELECT
            store still at 80 has no ceiling recorded anywhere in its history, so every tempdb percentage in it
            is the old distance-to-next-autogrow measurement, and the operator should know that before reading
            one. */
-        /* #2530: newest first. The arm below STAYS — a store migrated to exactly 81 must map to 81 rather
-           than falling through. The column is named only in the probe line, not in this prose, per the V71
-           finding: the coverage ratchet strips information_schema lines but cannot strip a comment.
+        /* #2540: newest first, and the arms below STAY — a store migrated to exactly 85 must map to 85
+           rather than falling through. The table is named only in the probe line, not in this prose, per
+           the V71 finding: the coverage ratchet strips information_schema lines but cannot strip a comment.
+
+           A collector-table rung would ordinarily get no arm at all — see the V63-V69 note below — and this
+           one is here for the standing invariant: it is the TOP rung, RequiredStoreSchemaVersion is
+           StorageVersion.SchemaVersion, and a fully-migrated store must map to EXACTLY that or the version
+           banner reports a mismatch against a store that is current. Nothing in the viewer reads the table;
+           the read that does is on the MCP surface.
+
+           The three comment blocks that used to stack here were moved down onto the arms they describe
+           (#2530 → V82, #2539 → V83, #2542 → V85). They had drifted upward as each new rung inserted its
+           own block above them, which is how a comment ends up explaining an arm two rungs away from the
+           one it was written for. Keep the block with its arm. */
+        if (hasPgSessionStates)
+        {
+            return 86;
+        }
+
+        /* #2542: below the top arm now, and still not redundant — a store stopped between the V84 and V85
+           rungs is a real state during an interrupted migration, and without its own arm it would report 84
+           while carrying V85's table. */
+        if (hasPgTableBloatStats)
+        {
+            return 85;
+        }
+
+        /* #2541: the index-usage rung. Below V85, above V83, for the reason every arm here is ordered
+           newest-first — a V86 store also has V84's table, so testing V84 first would report every current
+           store as two rungs behind and raise an upgrade banner against a store that is fine. */
+        if (hasPgIndexUsageStats)
+        {
+            return 84;
+        }
+
+        /* #2539: the arm below STAYS — a store migrated to exactly 82 must map to 82 rather than falling
+           through. The table is named only in the probe line, not in this prose, per the V71 finding.
+
+           A collector-table rung would ordinarily get no arm at all; this one was the TOP rung when it
+           landed, which is why it has one. Nothing in the viewer reads the table; the read that does is on
+           the MCP surface. */
+        if (hasPgDatabaseStats)
+        {
+            return 83;
+        }
+
+        /* #2530: the arm below STAYS — a store migrated to exactly 81 must map to 81 rather than falling
+           through. The column is named only in the probe line, not in this prose, per the V71 finding.
 
            This rung's gate is worth having for what it tells the OPERATOR, not only for the standing
            RequiredStoreSchemaVersion invariant: a store below it records nothing that says a target is
            PostgreSQL, so every PostgreSQL server in it is indistinguishable from a SQL Server that has
            never connected — and every surface that branches on engine kind is therefore reading a fact
            that store cannot supply. */
-        /* #2539: newest first. The arm below STAYS — a store migrated to exactly 82 must map to 82 rather
-           than falling through. The table is named only in the probe line, not in this prose, per the V71
-           finding: the coverage ratchet strips information_schema lines but cannot strip a comment.
-
-           A collector-table rung would ordinarily get no arm at all — see the V63-V69 note below — and this
-           one is here for the standing invariant only: it is the TOP rung, RequiredStoreSchemaVersion is
-           StorageVersion.SchemaVersion, and a fully-migrated store has to map to EXACTLY that or the version
-           banner reports a mismatch against a store that is current. Nothing in the viewer reads the table;
-           the read that does is on the MCP surface. */
-        /* #2542: newest first, and the arm below STAYS — a store migrated to exactly 84 must map to 84
-           rather than falling through. The table is named only in the probe line, not in this prose, per
-           the V71 finding: the coverage ratchet strips information_schema lines but cannot strip a comment.
-
-           Two collector-table rungs landed together (#2541 and #2542), and only this one strictly needs an
-           arm — it is the TOP rung, RequiredStoreSchemaVersion is StorageVersion.SchemaVersion, and a
-           fully-migrated store must map to EXACTLY that. The V84 arm below it is not redundant though: a
-           store stopped between the two rungs is a real state during an interrupted migration, and without
-           its own arm it would report 83 while carrying V84's table. */
-        if (hasPgTableBloatStats)
-        {
-            return 85;
-        }
-
-        /* #2541: the index-usage rung. Below the top arm, above V83, for the reason every arm here is
-           ordered newest-first — a V85 store also has V84's table, so testing V84 first would report every
-           current store as one rung behind and raise an upgrade banner against a store that is fine. */
-        if (hasPgIndexUsageStats)
-        {
-            return 84;
-        }
-
-        if (hasPgDatabaseStats)
-        {
-            return 83;
-        }
-
         if (hasServerEngineKind)
         {
             return 82;

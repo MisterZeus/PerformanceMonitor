@@ -208,5 +208,24 @@ public static class CollectorScheduleDefaults
            reading of bloat is a trend — is this table's waste growing, holding, or being reclaimed — and a
            spot percentage on its own is what gets someone to run VACUUM FULL on a Tuesday. */
         ["pg_table_bloat_stats"] = new(60, 90),
+
+        /* One minute, matching pg_blocking, and for the same reason rather than by copying it: both read
+           pg_stat_activity, both are SAMPLES of a view that records nothing on its own, and the cadence IS
+           the resolution — a transaction shorter than the interval is invisible no matter what else is
+           tuned. This one is the cheaper of the two: it makes no pg_blocking_pids() call, takes no
+           lock-manager ShareLock, and fans out to no databases, so a minute costs a single indexed scan of
+           an in-memory view per cycle.
+
+           A minute cannot see a ten-second idle-in-transaction reliably even though ten seconds is the
+           storage floor, and that is accepted rather than papered over. What this collector is for is the
+           CHRONIC holder — the session that has been parked for minutes or hours — which is also the only
+           kind that can pin the xmin horizon long enough to starve vacuum. Sampling faster would buy
+           recall on episodes that by definition cannot cause the harm.
+
+           30 days matches pg_blocking. The question is "how often does this application park a transaction,
+           and is it getting worse" — a month covers a release cycle, which is the unit at which someone can
+           actually act on the answer. Longer would mean keeping per-session rows, which are the widest and
+           most numerous thing here, well past the point anyone would correlate them to a deploy. */
+        ["pg_session_states"] = new(1, 30),
     };
 }

@@ -174,6 +174,9 @@ public static class CollectorEngineCapability
                                      + "droppability facts",
             ["pg_table_bloat_stats"] = "the statistics-based per-table bloat estimate and its dead-tuple "
                                      + "counts",
+            ["pg_session_states"] = "the pg_stat_activity session states behind a pinned xmin horizon - "
+                                  + "who is idle in transaction, for how long, and whether they hold an "
+                                  + "xid or a snapshot",
         };
 
     /// <summary>

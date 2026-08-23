@@ -14,6 +14,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -495,6 +496,15 @@ public sealed class ViewerPostgresTabsTests
             /* Read-this. An unscanned index is a CANDIDATE, never a conclusion, so it must never be
                painted over an invalid one - the amber says "look", the red says "this is broken". */
             ["IsUnscanned"] = 1,
+            /* Read-this, and NOT a weaker version of the red below it (#2540). A session idle in
+               transaction that pins NOTHING holds a connection and its locks and costs VACUUM exactly
+               zero, so it must never be painted over a session that IS pinning the horizon: that would
+               show the harmless shape in the colour reserved for the harmful one. */
+            ["IsLongIdleTransaction"] = 1,
+            /* Act-on-this: a SUSTAINED xmin holder is the thing actually starving vacuum across the whole
+               cluster. Sustained, not any sighting - every write transaction is momentarily the oldest
+               holder, and the projection is what draws that line. */
+            ["IsSustainedHorizonHolder"] = 2,
             /* High estimated bloat is act-on-this, but only ever on a row whose estimate was PUBLISHED. */
             ["IsHighBloat"] = 2,
             /* And a SUPPRESSED estimate outranks it, which is the one entry here that is not a severity at
@@ -502,6 +512,12 @@ public sealed class ViewerPostgresTabsTests
                suppression denies, so it is ranked highest to guarantee it is declared - and therefore
                painted - last. */
             ["EstimateSuppressed"] = 3,
+            /* The second row-state to earn 3, and for the same reason rather than by analogy (#2540): a
+               session whose state columns PostgreSQL redacted - because the monitoring login lacks
+               pg_monitor - carries no trustworthy observation at all. Its duration, its state and its
+               idle-in-transaction count all came back NULL, so painting it either amber or red would be an
+               artefact of a missing GRANT dressed as a finding about the workload. */
+            ["StateUnknown"] = 3,
         };
 
         var styles = Regex.Matches(pgRegion, "<Style.Triggers>(.*?)</Style.Triggers>", RegexOptions.Singleline);
@@ -536,6 +552,133 @@ public sealed class ViewerPostgresTabsTests
         Assert.True(problems.Count == 0,
             "PostgreSQL row highlight(s) declared in the wrong order:\n  " + string.Join("\n  ", problems));
     }
+
+    // ── Session states: the sentinel, and the two surfaces that must agree about it ──────────────
+
+    /// <summary>
+    /// <c>peak_horizon_age</c> of <c>-1</c> reaches the grid as WORDS, never as a number and never as the
+    /// em dash the rest of this projection uses.
+    ///
+    /// <para>This is the one place the class's own sentinel rule is deliberately broken, and the break is
+    /// the feature. Everywhere else <c>-1</c> means "not measured" and the dash says so. Here it means the
+    /// session held neither a snapshot nor a transaction id in ANY sample — a measured finding, and the
+    /// finding that separates a session starving vacuum from one costing it nothing. A dash would file it
+    /// under missing data; a <c>-1</c> would read as a small age beside a long idle duration. Both readings
+    /// end with somebody terminating a harmless backend.</para>
+    /// </summary>
+    [Fact]
+    public void ASessionThatPinnedNothing_SaysSoInWords_NotWithANumberOrADash()
+    {
+        var pinnedNothing = PgDisplay.SessionState(SessionRow(peakHorizonAge: -1));
+
+        Assert.Equal(PgDisplay.PinsNothingText, pinnedNothing.PeakHorizonAge);
+        Assert.NotEqual(PgDisplay.NotApplicableText, pinnedNothing.PeakHorizonAge);
+        Assert.DoesNotContain("-1", pinnedNothing.PeakHorizonAge, StringComparison.Ordinal);
+
+        /* And a real age still renders as one, labelled in the unit it is actually in — transactions, not
+           time. A guard that turned every horizon age into prose would be worse than the defect. */
+        var pinned = PgDisplay.SessionState(SessionRow(peakHorizonAge: 4_200_000));
+        Assert.Contains("4,200,000", pinned.PeakHorizonAge, StringComparison.Ordinal);
+        Assert.Contains("transactions", pinned.PeakHorizonAge, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The viewer's three row flags agree with the MCP surface's severity band on the same row.
+    ///
+    /// <para><b>Why this pin has to exist at all.</b> The viewer does not reference the service project, so
+    /// <c>PgDisplay</c> cannot call <c>DarlingMcpPgSessionStatesTools.SessionSeverity</c> and holds its own
+    /// copy of both thresholds. That is exactly the shape #2542 refused for the bloat estimate — two
+    /// matching literals in two projects is how two surfaces come to disagree, silently, about whether a
+    /// session is starving somebody's vacuum. <c>Darling.Tests</c> is the one assembly that references
+    /// both, so the agreement is asserted here rather than assumed: move either threshold on either side
+    /// and this goes red.</para>
+    /// </summary>
+    [Theory]
+    /* A sustained holder: the critical band, and the only one that gets the red. */
+    [InlineData(10, 9, 10, 0L, 5_000_000L, false, "Critical")]
+    /* Idle in transaction, long, pinning NOTHING: the warning band and the amber. The correction this
+       whole feature exists to make. */
+    [InlineData(10, 0, 10, 600_000L, -1L, false, "Warning")]
+    /* The same shape under the attention threshold: Healthy, no paint. */
+    [InlineData(10, 0, 10, 30_000L, -1L, false, "Healthy")]
+    /* A passing sighting — one capture out of ten — is normal write traffic, and lands on Healthy for that
+       reason rather than by accident: every write transaction is briefly the oldest xmin holder, so a band
+       of its own would paint the whole instance and teach people to ignore the column. The sample counts
+       are on the row for anyone who wants to see the difference between one sighting and ninety-eight.
+
+       Note it reaches the SAME band as the row above it from a completely different direction — one is a
+       short idle transaction, the other a brief holder — which is why both cases are here: a bug that
+       routed either of them to Warning or Critical would still pass a single-case test. */
+    [InlineData(10, 1, 0, 1_000L, 5_000_000L, false, "Healthy")]
+    /* THE CASE THAT WAS MISSING, and its absence hid a real cross-surface bug (found in review): a PASSING
+       holder — 3 of 10, below the sustained threshold — that is ALSO idle in transaction past the attention
+       floor, with a real horizon age because it genuinely pinned. No other row here combines
+       holderSamples > 0 with peakHorizonAge >= 0 AND a long idle, so nothing exercised the path where the
+       MCP band said Warning and the viewer flag fired not at all.
+
+       Warning is the right answer and the VIEWER was the side that was wrong. is_horizon_holder means
+       OLDEST on the instance rather than HOLDS, so several genuinely long idle transactions each take turns
+       being oldest, none of them clears the sustained threshold, and gating the amber on "pinned nothing"
+       painted every one of them Healthy — the dangerous direction. */
+    [InlineData(10, 3, 10, 600_000L, 40_000L, false, "Warning")]
+    /* Redacted: its own band above every severity, and neither of the other two flags may fire. */
+    [InlineData(10, 9, 10, 600_000L, -1L, true, "Unknown")]
+    public void TheViewerFlags_AgreeWithTheMcpSeverityBand(
+        int sampleCount, int holderSamples, int idleSamples, long peakStateMs, long peakHorizonAge,
+        bool redacted, string expectedBand)
+    {
+        var row = SessionRow(
+            sampleCount: sampleCount, holderSamples: holderSamples, idleSamples: idleSamples,
+            peakStateMs: peakStateMs, peakHorizonAge: peakHorizonAge, redacted: redacted);
+
+        Assert.Equal(expectedBand, DarlingMcpPgSessionStatesTools.SessionSeverity(row));
+
+        var display = PgDisplay.SessionState(row);
+
+        Assert.Equal(expectedBand == "Critical", display.IsSustainedHorizonHolder);
+        Assert.Equal(expectedBand == "Warning", display.IsLongIdleTransaction);
+        Assert.Equal(expectedBand == "Unknown", display.StateUnknown);
+
+        /* At most one flag is ever set, so the trigger ORDER decides nothing about which colour a row
+           takes — it only guarantees the outcome if that ever stops being true. */
+        var lit = new[] { display.IsSustainedHorizonHolder, display.IsLongIdleTransaction, display.StateUnknown }
+            .Count(f => f);
+        Assert.True(lit <= 1, $"{lit} row flags fired for band '{expectedBand}'; the bands are exclusive.");
+    }
+
+    /// <summary>The two thresholds the viewer copies are the same numbers the MCP surface decides on.
+    /// Asserted directly as well as behaviourally above, because a drift caught at the constant names the
+    /// defect, while a drift caught only through a fixture names a row.</summary>
+    [Fact]
+    public void TheCopiedSessionThresholds_AreTheOnesTheReadUses()
+    {
+        Assert.Equal(
+            DarlingMcpPgSessionStatesTools.SustainedHolderSampleShare,
+            PgDisplay.SustainedHolderSampleShare,
+            precision: 10);
+        Assert.Equal(
+            DarlingMcpPgSessionStatesTools.IdleWithoutHorizonAttentionMs,
+            PgDisplay.IdleWithoutHorizonAttentionMs);
+    }
+
+    /// <summary>A session-state row with everything but the fields under test held at a harmless
+    /// default.</summary>
+    private static DarlingPgSessionStatesReader.PgSessionStateRow SessionRow(
+        int sampleCount = 10, int holderSamples = 0, int idleSamples = 0, long peakStateMs = 0,
+        long peakHorizonAge = -1, bool redacted = false) =>
+        new(
+            BackendId: 1, Pid: 4242, DatabaseName: "appdb", Username: "app", ApplicationName: "orders-api",
+            ClientAddr: "10.0.0.7", BackendType: "client backend", LastState: "idle in transaction",
+            LastWaitEventType: "Client", LastWaitEvent: "ClientRead", LastCommandTag: "UPDATE",
+            LastQueryId: 987654321, FirstSeenAt: new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Unspecified),
+            LastSeenAt: new DateTime(2026, 1, 1, 1, 0, 0, DateTimeKind.Unspecified),
+            SampleCount: sampleCount, IdleInTransactionSamples: idleSamples,
+            HorizonHolderSamples: holderSamples, PeakStateDurationMs: peakStateMs,
+            PeakXactDurationMs: peakStateMs, PeakQueryDurationMs: -1,
+            PeakBackendDurationMs: peakStateMs + 1_000, PeakHorizonAge: peakHorizonAge,
+            PeakXminAge: peakHorizonAge, PeakXidAge: -1, StateWasRedacted: redacted, TotalSessions: 212,
+            ActiveSessions: 8, IdleInTransactionSessions: 3, ReportableSessions: 3,
+            CaptureWasTruncated: false);
 
     /// <summary>A percentage of nothing is not 0%. Dividing by a zero denominator has no answer, and "0%"
     /// is a claim about a ratio that was never computable.</summary>

@@ -13,7 +13,7 @@
  * There are TWO, and serverTabsFor(card) picks between them from the fleet card's server-derived `is_postgres`
  * (#2530). SERVER_TABS is the SQL Server registry and also the default for a card that makes no engine claim —
  * the name is kept for that second job, because "no claim" has always rendered these tabs and still should.
- * POSTGRES_TABS is the six-tab PostgreSQL registry; its own header says why six is the answer and not twelve.
+ * POSTGRES_TABS is the seven-tab PostgreSQL registry; its own header says why seven is the answer and not twelve.
  *
  * Every entry is `{ id, label, note?, build(server, ctx) }` and `build` returns an array of nodes, almost all of
  * them PANEL DESCRIPTORS run through the unmodified renderPanel (the #1563 seam): a `read` naming an MCP tool
@@ -34,8 +34,9 @@
  *      pointing at the desktop viewer. A reader told "open the desktop viewer for plan analysis" is better
  *      served than one given a web page that looks like plan analysis and is not.
  *
- * R4 (XSS): every value reaches the DOM through renderPanel/util.el's text path. The two custom cell renderers
- * here (query text, XML) build a <pre> through el() and never touch innerHTML.
+ * R4 (XSS): every value reaches the DOM through renderPanel/util.el's text path. The custom cell renderers here
+ * (query text, XML) build a <pre> through el(), the sentinel renderers build a text node, and none of them
+ * touches innerHTML.
  */
 
 import { el, readTool, mount, truncate, loadingStrip, errorStrip, emptyStrip, disclosure, noticeStrip, fmtMs } from "../util.js";
@@ -48,6 +49,17 @@ import { renderLineChart, SERIES_COLORS } from "../charts.js";
 function codeDisclosure(text) {
   if (text == null || text === "") return document.createTextNode("—");
   return disclosure(text, el("pre", { class: "code" }, [text]), { max: 100 });
+}
+
+/**
+ * A cell over a column whose store writes -1 for "there was none of this".
+ *
+ * Every numeric formatter in util.js would print that sentinel as a negative number — `fmtMs(-1)` is "-1 ms",
+ * `fmtInt(-1)` is "-1" — and a negative duration or a negative age beside real ones reads as a small value
+ * rather than as an absence. The dash is the same answer the WPF grids give the same sentinel.
+ */
+function sentinelCell(value, formatter) {
+  return document.createTextNode(value == null || Number(value) < 0 ? "—" : formatter(value));
 }
 
 /** XML cell: the same disclosure over a captured payload (blocked-process report, deadlock graph). The desktop
@@ -1312,7 +1324,7 @@ export const SERVER_TABS = [
 /* ─────────────────────────── the PostgreSQL tabs ─────────────────────────── */
 
 /**
- * The PostgreSQL registry (#2530). SIX tabs against the SQL Server registry's twelve, and the difference is the
+ * The PostgreSQL registry (#2530). SEVEN tabs against the SQL Server registry's twelve, and the difference is the
  * design rather than a shortfall: parity was explicitly not the constraint. Bloat, wraparound, the xmin horizon
  * and autovacuum have no SQL Server analogue and are what actually pages a PostgreSQL DBA; tempdb, Query Store,
  * trace flags, plan cache and the system_health ring buffer have no PostgreSQL analogue, and rendering them at a
@@ -1515,13 +1527,43 @@ export const POSTGRES_TABS = [
     id: "vacuum",
     label: "Vacuum",
     note:
-      "Three reads, one tab, on purpose. An old xmin horizon starves vacuum of anything it is allowed to " +
-      "reclaim; starved vacuum falls behind on freezing; freezing falling behind is what ends in wraparound. " +
-      "Read alone each panel looks survivable — a holder here, a backlog there, plenty of XIDs left — and " +
-      "together they are one escalating story, in the order they are shown. Splitting them across three tabs " +
-      "would hide the only thing about them worth seeing.",
+      "Four reads, one tab, on purpose. A session holds a transaction open; that transaction holds the xmin " +
+      "horizon; an old horizon starves vacuum of anything it is allowed to reclaim; starved vacuum falls " +
+      "behind on freezing; freezing falling behind is what ends in wraparound. Read alone each panel looks " +
+      "survivable — one long session here, a holder there, a backlog, plenty of XIDs left — and together " +
+      "they are one escalating story, in the order they are shown. Only the first panel names the SESSION, " +
+      "which is where the fix has to be made, and only it says whether that session pins anything at all: an " +
+      "open transaction holding no snapshot and no transaction id costs vacuum nothing, however long it has " +
+      "been idle.",
     build: (server, ctx) => [
-      /* Ordered by CAUSE, not by severity: horizon, then backlog, then headroom. */
+      /* Ordered by CAUSE, not by severity: session, then horizon, then backlog, then headroom.
+
+         Session states leads because it is the link UPSTREAM of the horizon panel that used to open this
+         tab. get_pg_xmin_horizon names the CLASS of holder (a session, a slot, standby feedback, a prepared
+         transaction); this names WHICH session, and the remedy is always in whatever opened the
+         transaction. It is also the only panel that can withhold the causal claim: a long
+         idle-in-transaction session that pins nothing is the shape everybody misreads, and meeting it here
+         is what stops the backlog two panels down being blamed on it. */
+      ...fanout("get_pg_session_states", { server, hours: ctx.hours, limit: 25 }, [
+        {
+          title: "Sessions Holding a Transaction Open",
+          subtitle: ctx.label + ", a sample at the collection interval rather than an event log",
+          viz: "stat",
+          stats: PG_SESSION_STATE_STATS,
+          span: 2,
+          emptyText:
+            "No session held a transaction open past the collector's floor in this window — the healthy state, and a real all-clear rather than missing data. It is an all-clear about a SAMPLE, though: a transaction that opened and closed between two captures left no trace here.",
+        },
+        {
+          title: "By Session",
+          subtitle: ctx.label + ", horizon holders first, then the longest transaction",
+          viz: "table",
+          rowsKey: "sessions",
+          columns: PG_SESSION_STATE_COLUMNS,
+          emptyText:
+            "No session held a transaction open past the collector's floor. Zero rows is the healthy answer — the collector stores nothing when every transaction is short — and it is a sample, so a transaction that opened and closed between two captures is invisible.",
+        },
+      ]),
       ...fanout("get_pg_xmin_horizon", { server, hours: ctx.hours }, [
         {
           title: "What Holds the Horizon",
@@ -2648,6 +2690,25 @@ const PG_BLOAT_STATS = [
   { key: "limit_reached", label: "Limit reached", format: "bool" },
 ];
 
+/* The capture tiles lead, and they are not decoration on this read: it is an EXCEPTION surface sampled once
+   per collection cycle, so an empty grid is either "every transaction was short" or "nobody looked", and
+   only the denominator separates them.
+
+   `idle_in_transaction_pinning_nothing` is a first-class tile rather than a per-row detail because it is the
+   correction this whole read exists to make: those sessions look exactly like the harmful ones and cost
+   VACUUM nothing, and a reader who meets that count before the grid does not spend the grid looking for
+   something to kill. `redacted_row_count` is here for the same reason `suppressed_estimate_count` is on the
+   bloat tile - the usual cause is one missing GRANT on the whole instance. */
+const PG_SESSION_STATE_STATS = [
+  { key: "captures_in_window", label: "Captures", format: "int" },
+  { key: "captures_with_sessions", label: "With reportable sessions", format: "int" },
+  { key: "session_count", label: "Sessions returned", format: "int" },
+  { key: "horizon_holder_count", label: "Pinned the xmin horizon", format: "int" },
+  { key: "idle_in_transaction_pinning_nothing", label: "Idle in xact, pinning NOTHING", format: "int" },
+  { key: "redacted_row_count", label: "Redacted rows", format: "int" },
+  { key: "limit_reached", label: "Limit reached", format: "bool" },
+];
+
 /* "unscanned_without_a_structural_blocker" is deliberately not shortened to "droppable" on the tile either:
    the field name survived review for saying what it is, and a label that renamed it would undo that where a
    reader actually looks. */
@@ -2904,6 +2965,96 @@ const PG_INDEX_USAGE_COLUMNS = [
   { key: "stats_were_reset_in_window", label: "Stats Reset", format: "bool" },
   { key: "sample_count", label: "Samples", format: "int" },
   { key: "index_definition", label: "Definition", wrap: true },
+];
+
+/* peak_horizon_age is rendered rather than formatted, and that is the one non-negotiable cell on this grid:
+   -1 means the session pinned NOTHING - no snapshot and no transaction id in any sample - and it is a
+   MEASURED finding rather than a missing value. `format: "int"` would print "-1", which reads as a small age
+   next to a long duration and is precisely the misreading that gets a harmless backend killed. The WPF grid
+   renders the same sentinel as the same words for the same reason. */
+const PG_SESSION_STATE_COLUMNS = [
+  { key: "pid", label: "PID", format: "int" },
+  /* The collector's synthetic (backend_start, pid) identity. Shown because a pid alone is not one - pids are
+     reused, and this is the id that matches the same backend on the blocking grid. */
+  { key: "backend_id", label: "Backend", mono: true },
+  /* sevKey, not statusSev, and the same shape the bloat and index grids use: the band is SERVER-computed
+     (R1 - the browser never re-derives one) and it names one of the four house words the shared sev-*
+     CSS defines. The read returned a private lower-case vocabulary in its first draft, which would have
+     attached sev-critical / sev-info / sev-none - classes that match no rule, so the badge would have
+     rendered UNSTYLED rather than failing. That is the kind of defect that ships, so the fix went into
+     the read rather than being worked around here. */
+  { key: "severity", label: "Severity", sevKey: "severity" },
+  { key: "database", label: "Database" },
+  { key: "username", label: "User" },
+  { key: "application_name", label: "Application" },
+  { key: "client_addr", label: "Client" },
+  { key: "backend_type", label: "Backend Type" },
+  { key: "last_state", label: "State" },
+  {
+    key: "peak_horizon_age",
+    label: "Pinned Horizon (peak)",
+    render: (row) =>
+      document.createTextNode(
+        row.peak_horizon_age == null
+          ? "—"
+          : Number(row.peak_horizon_age) < 0
+            ? "pins nothing"
+            : Number(row.peak_horizon_age).toLocaleString() + " transactions",
+      ),
+  },
+  { key: "pinned_the_horizon", label: "Pinned Anything", format: "bool" },
+  /* The sample counts, not a flag: a session that was the oldest holder once in a hundred captures was
+     momentarily at the front of a queue every write transaction passes through, and one that held it in
+     ninety-eight is why vacuum reclaims nothing. Those are opposite findings. */
+  { key: "horizon_holder_samples", label: "Holder Samples", format: "int" },
+  { key: "idle_in_transaction_samples", label: "Idle-In-Xact Samples", format: "int" },
+  { key: "sample_count", label: "Samples", format: "int" },
+  /* PEAKS, not averages - averaging a hundred samples of a transaction that grew monotonically reports
+     about half of what happened.
+
+     The read's own pre-formatted strings are used for the two it ships, rather than `format: "ms"` over the
+     raw milliseconds: those columns carry the -1 sentinel, and the read already renders it as "not
+     measured". The third has no string twin, so it goes through sentinelCell for the same reason. */
+  { key: "peak_xact_duration", label: "Peak Xact" },
+  { key: "peak_state_duration", label: "Peak State" },
+  /* Backend age against transaction age: a connection created ten minutes ago that has been idle in
+     transaction for all ten is a pool handing out a session nobody finished with, while a three-day-old
+     worker holding one for ten minutes is a code path that forgot to commit. Same duration, different bug. */
+  { key: "backend_age", label: "Backend Age" },
+  {
+    key: "peak_query_duration_ms",
+    label: "Peak Query",
+    render: (row) => sentinelCell(row.peak_query_duration_ms, fmtMs),
+  },
+  /* -1 means the session held no snapshot / no transaction id, which is an absence rather than a small age. */
+  {
+    key: "peak_xmin_age",
+    label: "Peak xmin Age",
+    render: (row) => sentinelCell(row.peak_xmin_age, (v) => Number(v).toLocaleString()),
+  },
+  {
+    key: "peak_xid_age",
+    label: "Peak XID Age",
+    render: (row) => sentinelCell(row.peak_xid_age, (v) => Number(v).toLocaleString()),
+  },
+  { key: "last_wait_event_type", label: "Wait Type" },
+  { key: "last_wait_event", label: "Wait Event" },
+  /* The leading SQL keyword, whitelisted at collection - NOT a truncation of the statement. No raw query
+     text is stored anywhere: pg_stat_activity.query carries literal parameter values. */
+  { key: "last_command_tag", label: "Command" },
+  { key: "last_query_id", label: "Query ID", mono: true },
+  { key: "query_id_note", label: "Query ID Note", wrap: true },
+  { key: "finding", label: "Finding", wrap: true },
+  /* Instance context from this backend's most recent sample: two idle-in-transaction sessions out of six
+     connections is a different server from two out of four thousand. */
+  { key: "idle_in_transaction_on_instance", label: "Idle In Xact (instance)", format: "int" },
+  { key: "active_sessions_on_instance", label: "Active (instance)", format: "int" },
+  { key: "sessions_on_instance", label: "Sessions (instance)", format: "int" },
+  { key: "reportable_sessions_on_instance", label: "Reportable (instance)", format: "int" },
+  { key: "state_was_redacted", label: "Redacted", format: "bool" },
+  { key: "capture_was_truncated", label: "Capture Truncated", format: "bool" },
+  { key: "first_seen_at", label: "First Seen", format: "time" },
+  { key: "last_seen_at", label: "Last Seen", format: "time" },
 ];
 
 const PG_SLOT_COLUMNS = [

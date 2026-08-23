@@ -45,7 +45,7 @@ internal sealed record ViewerPostgresTab(
 /// first nine PostgreSQL collectors spent three releases MCP-only precisely because no check could see that the
 /// graphical surface had fallen behind the data. This list is what such a check reads, and
 /// <c>ViewerPostgresTabsTests</c> derives the other side of it from <see cref="CollectorCatalog"/> — so a
-/// TWELFTH PostgreSQL collector turns the pin red naming itself, rather than quietly shipping invisible.</para>
+/// THIRTEENTH PostgreSQL collector turns the pin red naming itself, rather than quietly shipping invisible.</para>
 ///
 /// <para><b>Seven tabs against SQL Server's nineteen is the design.</b> Parity was never the constraint;
 /// the missing tabs (tempdb, Query Store, trace flags, plan cache, <c>system_health</c>, Always On) have no
@@ -105,10 +105,27 @@ internal static class ViewerPostgresTabs
             ViewerServerTab.PgVacuumInnerTabIndex,
             "vacuum",
             "Vacuum",
-            new[] { "pg_xmin_horizon", "pg_autovacuum_stats", "pg_wraparound_stats" },
-            /* One tab, three panels, in causal order. Read separately each of the three looks survivable. */
-            "One story in three panels: something holds the xmin horizon, the horizon starves vacuum, and "
-            + "vacuum falling behind ends in wraparound. Read on their own each of these looks survivable."),
+            new[] { "pg_session_states", "pg_xmin_horizon", "pg_autovacuum_stats", "pg_wraparound_stats" },
+            /* One tab, four panels, in causal order. Read separately each of the four looks survivable.
+
+               Session states is FIRST rather than on a tab of its own because it is the link UPSTREAM of
+               what was previously the first panel, and the order here is the causal one. pg_xmin_horizon
+               names the CLASS of thing holding the horizon — a session, a slot, standby feedback, a
+               prepared transaction — and #2540 is the panel that names WHICH session, which is where the
+               fix has to be made: the horizon panel can tell an operator the problem is a backend, and
+               only this one can tell them which application opened it.
+
+               It also carries the correction the rest of the tab cannot make. A long idle-in-transaction
+               session is the shape everybody recognises and it is NOT automatically a cause: measured on a
+               live instance, a READ COMMITTED transaction that only read, and one whose UPDATE matched no
+               rows, both sat idle in transaction indefinitely holding neither a snapshot nor a transaction
+               id. Those sessions starve vacuum of nothing, and a tab that opened with a vacuum backlog
+               would have an operator killing them. */
+            "One story in four panels: a session holds a transaction open, that transaction holds the xmin "
+            + "horizon, the horizon starves vacuum, and vacuum falling behind ends in wraparound. Read on "
+            + "their own each of these looks survivable. Only the first panel can name the session, and "
+            + "only it says whether that session pins anything at all — an open transaction that holds no "
+            + "snapshot and no transaction id costs vacuum nothing, however long it has been idle."),
 
         new ViewerPostgresTab(
             ViewerServerTab.PgWaitsInnerTabIndex,

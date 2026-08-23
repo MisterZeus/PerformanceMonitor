@@ -31,7 +31,7 @@ namespace Darling.Tests;
 /// stale list of its own.</para>
 ///
 /// <para><b>Two registries since #2530.</b> <c>SERVER_TABS</c> is the SQL Server set and the default for a
-/// server whose engine the store makes no claim about; <c>POSTGRES_TABS</c> is the six-tab PostgreSQL set, and
+/// server whose engine the store makes no claim about; <c>POSTGRES_TABS</c> is the seven-tab PostgreSQL set, and
 /// <c>serverTabsFor(card)</c> is the only thing that chooses. Several pins below scan ONE registry's region of
 /// the file rather than the whole file, because the two sets have different rules — a <c>get_pg_*</c> read is
 /// correct in one and a defect in the other — and a whole-file scan cannot tell them apart.</para>
@@ -352,6 +352,12 @@ public sealed class ServerPageTabsTests
             ["get_pg_database_stats"] = "pg_database_stats",
             ["get_pg_index_usage"] = "pg_index_usage_stats",
             ["get_pg_table_bloat"] = "pg_table_bloat_stats",
+            /* Not Aurora-only — pg_session_states reads pg_stat_activity, which every PostgreSQL has — so
+               it contributes nothing to the auroraOnly set below. It is mapped anyway because the
+               staleness assertion above covers EVERY served get_pg_* read: an unmapped one would be
+               skipped by the check rather than caught by it, which is the failure this map is here to
+               prevent. */
+            ["get_pg_session_states"] = "pg_session_states",
         };
 
         var served = DarlingWebEndpoints.BuildReadDispatch().Keys
