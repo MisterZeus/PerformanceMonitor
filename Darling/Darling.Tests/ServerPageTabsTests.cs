@@ -350,6 +350,8 @@ public sealed class ServerPageTabsTests
             ["get_pg_wraparound_risk"] = "pg_wraparound_stats",
             ["get_pg_xmin_horizon"] = "pg_xmin_horizon",
             ["get_pg_database_stats"] = "pg_database_stats",
+            ["get_pg_index_usage"] = "pg_index_usage_stats",
+            ["get_pg_table_bloat"] = "pg_table_bloat_stats",
         };
 
         var served = DarlingWebEndpoints.BuildReadDispatch().Keys
@@ -512,7 +514,7 @@ public sealed class ServerPageTabsTests
         /* Ids are unique WITHIN a registry — two tabs sharing one id makes the second unreachable and the bar's
            active state lie. ACROSS registries they may and do collide (overview, activity, waits, io), which is
            deliberate: those are the deep links that survive a server turning out to be the other engine. */
-        foreach (var (registry, expected) in new[] { ("SERVER_TABS", 12), ("POSTGRES_TABS", 6) })
+        foreach (var (registry, expected) in new[] { ("SERVER_TABS", 12), ("POSTGRES_TABS", 7) })
         {
             var ids = TabIdsIn(RegistryRegion(ServerTabsJs, registry));
             /* An exact count, not a floor. A floor would have let the prose in the CHANGELOG, the commit and

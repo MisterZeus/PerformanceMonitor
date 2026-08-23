@@ -95,11 +95,12 @@ public partial class ViewerServerTab
         PgEngineBanner.Text = $"{_server.DisplayName} runs {engine ?? "PostgreSQL"}.";
 
         /* Looked up by ID, never by position: the registry's order is the STRIP order and is free to change,
-           while these three assignments are about which tab gets which framing. Indexing All[0..2] would
+           while these four assignments are about which tab gets which framing. Indexing All[0..2] would
            have silently put the Vacuum note above the Activity grids the first time someone reordered. */
         PgOverviewNote.Text = ViewerPostgresTabs.NoteFor("overview");
         PgActivityNote.Text = ViewerPostgresTabs.NoteFor("activity");
         PgVacuumNote.Text = ViewerPostgresTabs.NoteFor("vacuum");
+        PgStorageNote.Text = ViewerPostgresTabs.NoteFor("storage");
     }
 
     // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -282,5 +283,60 @@ public partial class ViewerServerTab
         PgReplicationNote.Text = PanelNote("pg_replication_slots", rows.Count,
             "This server has no replication slots, so nothing is retaining WAL or pinning an xmin on their "
             + "account. Zero rows is the healthy answer here, not a missing read.");
+    }
+
+    /// <summary>
+    /// Storage - the per-table bloat estimate and per-index usage. Both reads fire together: they are one
+    /// tab answering one question (where the space went, and whether it is earning its keep), so moving
+    /// between the two grids needs no second round trip.
+    /// </summary>
+    private async Task LoadPgStorageAsync()
+    {
+        var (startUtc, endUtc) = GetWindowUtc();
+
+        var bloatTask = _dataService.GetPgTableBloatAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+        var indexTask = _dataService.GetPgIndexUsageAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+
+        await Task.WhenAll(bloatTask, indexTask);
+
+        var bloat = bloatTask.Result;
+        var indexes = indexTask.Result;
+
+        var bloatRows = bloat.Select(PgDisplay.TableBloat).ToList();
+        PgTableBloatGrid.ItemsSource = bloatRows;
+
+        /* The suppression count is stated ON THE PANEL rather than left to the per-row Confidence column,
+           because the usual cause is a single instance-wide permissions gap: every row is suppressed for
+           the same reason, and saying it once above the grid is what gets it fixed. Counted from the
+           PROJECTED rows so the sentence and the grid cannot disagree about which rows were suppressed. */
+        var suppressed = bloatRows.Count(r => r.EstimateSuppressed);
+
+        PgTableBloatNote.Text = PgCollectorIsGatedOff("pg_table_bloat_stats")
+            ? PanelNote("pg_table_bloat_stats", 0, string.Empty)
+            : bloatRows.Count == 0
+                ? "No table of at least 1 MB was measured on this server in this window. Below that floor "
+                  + "bloat is not an actionable amount of space, so zero rows here is the healthy answer "
+                  + "rather than a missing read."
+                : suppressed == 0
+                    ? "Bloat figures are ESTIMATES computed from column-width statistics - the table itself "
+                      + "is never read. Confirm one with pgstattuple before rewriting anything."
+                    : $"Bloat figures are ESTIMATES computed from column-width statistics. {suppressed} of "
+                      + $"{bloatRows.Count} row(s) have NO publishable estimate and show a dash rather than "
+                      + "a number - see the Confidence column. If most of them say 'no column statistics', "
+                      + "the monitoring login cannot SELECT these tables: pg_stats is filtered by SELECT "
+                      + "privilege and pg_monitor does not grant it, so granting pg_read_all_data "
+                      + "(PostgreSQL 14+) fixes the whole instance at once.";
+
+        PgIndexUsageGrid.ItemsSource = indexes.Select(PgDisplay.IndexUsage).ToList();
+        PgIndexUsageNote.Text = PgCollectorIsGatedOff("pg_index_usage_stats")
+            ? PanelNote("pg_index_usage_stats", 0, string.Empty)
+            : indexes.Count == 0
+                ? "No index of at least 64 KB was recorded on this server in this window. Below that floor "
+                  + "an index costs effectively nothing to keep, so zero rows here is the healthy answer "
+                  + "rather than a missing read."
+                : "Scans are cumulative since each database's statistics were last reset. An index with no "
+                  + "scans is a CANDIDATE, never a conclusion: check the Can It Go? column, and widen the "
+                  + "window past the slowest scheduled job you have before acting - a monthly report looks "
+                  + "exactly like a dead index over seven days.";
     }
 }

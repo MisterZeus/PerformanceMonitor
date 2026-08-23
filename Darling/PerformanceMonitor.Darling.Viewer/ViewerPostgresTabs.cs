@@ -36,18 +36,18 @@ internal sealed record ViewerPostgresTab(
 
 /// <summary>
 /// The PostgreSQL inner-tab registry — the viewer's half of #2530, and the direct counterpart of the web
-/// dashboard's <c>POSTGRES_TABS</c> in <c>server-tabs.js</c> (#2547). Same six tabs, same ids, same
+/// dashboard's <c>POSTGRES_TABS</c> in <c>server-tabs.js</c> (#2547). Same seven tabs, same ids, same
 /// grouping, so the two front ends do not teach an operator two different shapes for one engine.
 ///
 /// <para><b>Why a registry rather than "read the XAML".</b> The SQL Server surface has nineteen inner tabs
 /// declared in XAML and dispatched by integer index, and nothing there is machine-readable enough to ask
 /// "does every PostgreSQL collector reach a screen?". That question is the whole point of this issue: the
-/// nine PostgreSQL collectors spent three releases MCP-only precisely because no check could see that the
+/// first nine PostgreSQL collectors spent three releases MCP-only precisely because no check could see that the
 /// graphical surface had fallen behind the data. This list is what such a check reads, and
 /// <c>ViewerPostgresTabsTests</c> derives the other side of it from <see cref="CollectorCatalog"/> — so a
-/// TENTH PostgreSQL collector turns the pin red naming itself, rather than quietly shipping invisible.</para>
+/// TWELFTH PostgreSQL collector turns the pin red naming itself, rather than quietly shipping invisible.</para>
 ///
-/// <para><b>Six tabs against SQL Server's nineteen is the design.</b> Parity was never the constraint;
+/// <para><b>Seven tabs against SQL Server's nineteen is the design.</b> Parity was never the constraint;
 /// the missing tabs (tempdb, Query Store, trace flags, plan cache, <c>system_health</c>, Always On) have no
 /// PostgreSQL analogue to fill, and the signals that DO matter here — wraparound headroom, the xmin
 /// horizon, vacuum backlog, WAL retention — have no SQL Server analogue either. A PostgreSQL surface built
@@ -66,8 +66,8 @@ internal sealed record ViewerPostgresTab(
 internal static class ViewerPostgresTabs
 {
     /// <summary>
-    /// The six tabs, in strip order. Indices continue the SQL Server run rather than displacing it: for a
-    /// PostgreSQL server every SQL Server <c>TabItem</c> is collapsed and these six are shown, so both sets
+    /// The seven tabs, in strip order. Indices continue the SQL Server run rather than displacing it: for a
+    /// PostgreSQL server every SQL Server <c>TabItem</c> is collapsed and these seven are shown, so both sets
     /// keep their fixed indices and <c>ViewerServerTab</c>'s existing index constants — which drill-down
     /// navigation keys on — are untouched by this feature.
     /// </summary>
@@ -78,11 +78,12 @@ internal static class ViewerPostgresTabs
             "overview",
             "Overview",
             Array.Empty<string>(),
-            /* No collector of its own: it reports on all nine, from collection_log joined to the catalog.
+            /* No collector of its own: it reports on every one of them, from collection_log joined to the
+               catalog.
                That join is the point — a collector gated off for this engine writes NO collection_log row
                at all (pre-dispatch filtering, deliberately, so a permanent gap does not manufacture ~2,880
                fake SUCCESS rows a day), so a grid built from the log alone would show a PostgreSQL
-               operator eight rows and never mention the ninth. Derived from the catalog, the missing one
+               operator one row short and never mention the missing collector. Derived from the catalog, it
                appears with the reason it is missing. */
             "Every PostgreSQL collector for this server: when it last ran, what it returned, and — for a "
             + "collector this engine cannot run at all — why it never will."),
@@ -129,6 +130,26 @@ internal static class ViewerPostgresTabs
             "Replication",
             new[] { "pg_replication_slots" },
             null),
+
+        new ViewerPostgresTab(
+            ViewerServerTab.PgStorageInnerTabIndex,
+            "storage",
+            "Storage",
+            new[] { "pg_table_bloat_stats", "pg_index_usage_stats" },
+            /* One tab, because both panels answer the same question — where is the space going and is it
+               earning its keep — and the two remedies compete for the same maintenance window. Bloat is
+               deliberately NOT on the Vacuum tab despite being what vacuum lag costs: that tab is the
+               CAUSE chain read in causal order, and dropping the damage into the middle of it would break
+               the sequence that makes those three panels one story. The bloat panel's own note points back
+               at it instead.
+
+               Bloat sits above index usage because it is the more urgent of the two and the more
+               dangerous to act on: a bloat percentage is an ESTIMATE and the panel has to say so before
+               anyone reads a number off it. */
+            "Where the space went, and whether it is earning its keep. The bloat figures are ESTIMATES "
+            + "computed from column-width statistics — the table itself is never read — so confirm one with "
+            + "pgstattuple before rewriting anything. An index nothing scans is a candidate, never a "
+            + "conclusion: check the constraint and validity columns beside it first."),
     };
 
     /// <summary>The first PostgreSQL tab's index — what a PostgreSQL server's tab strip selects, since

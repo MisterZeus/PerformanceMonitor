@@ -76,6 +76,8 @@ public static class CollectorCatalog
         PgIoStatsCollector.Instance,
         PgBlockingCollector.Instance,
         PgDatabaseStatsCollector.Instance,
+        PgIndexUsageStatsCollector.Instance,
+        PgTableBloatStatsCollector.Instance,
     };
 
     /// <summary>Name → definition, for the by-name target-gate lookup. Built once from <see cref="All"/>.</summary>

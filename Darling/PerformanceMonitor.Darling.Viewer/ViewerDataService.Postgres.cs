@@ -22,7 +22,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// The viewer's PostgreSQL reader layer (#2530) — what the six PostgreSQL inner tabs
 /// (<see cref="ViewerPostgresTabs"/>) read, and the projections that make stored rows renderable.
 ///
-/// <para><b>The queries are not here, deliberately.</b> All nine PostgreSQL reads run the SAME SQL the MCP
+/// <para><b>The queries are not here, deliberately.</b> Every PostgreSQL read runs the SAME SQL the MCP
 /// surface runs, from <c>DarlingPg*Reader</c> in <c>PerformanceMonitor.Darling.Storage</c> — moved there
 /// from the service's MCP folder by this change so both front ends can reach them. Copying them into the
 /// viewer would have meant a second copy of, among others, a 200-line recursive blocking walk whose revisit
@@ -289,4 +289,16 @@ public sealed partial class ViewerDataService
     public Task<List<DarlingPgDatabaseReader.PgDatabaseRow>> GetPgDatabaseStatsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int limit = 50, CancellationToken cancellationToken = default) =>
         DarlingPgDatabaseReader.GetPgDatabaseStatsAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+
+    /// <summary>Storage tab, panel 1 - the per-table bloat ESTIMATE with its measured sizes and the trust
+    /// signals that decide whether the estimate may be rendered at all.</summary>
+    public Task<List<DarlingPgTableBloatReader.PgTableBloatRow>> GetPgTableBloatAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int limit = 50, CancellationToken cancellationToken = default) =>
+        DarlingPgTableBloatReader.GetPgTableBloatAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+
+    /// <summary>Storage tab, panel 2 - per-index scan counts with the catalog facts that decide whether an
+    /// unscanned index can actually go.</summary>
+    public Task<List<DarlingPgIndexUsageReader.PgIndexUsageRow>> GetPgIndexUsageAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int limit = 50, CancellationToken cancellationToken = default) =>
+        DarlingPgIndexUsageReader.GetPgIndexUsageAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
 }

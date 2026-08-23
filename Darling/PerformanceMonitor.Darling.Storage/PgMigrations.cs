@@ -140,6 +140,8 @@ public static class PgMigrations
         new Migration(81, "tempdb-max-size", V81Sql),
         new Migration(82, "server-engine-kind", V82Sql),
         new Migration(83, "pg-database-stats", V83Sql),
+        new Migration(84, "pg-index-usage-stats", V84Sql),
+        new Migration(85, "pg-table-bloat-stats", V85Sql),
     };
 
     /// <summary>
@@ -1768,6 +1770,112 @@ CREATE TABLE IF NOT EXISTS collect.pg_database_stats (
 
 CREATE INDEX IF NOT EXISTS idx_pg_database_stats_time
     ON collect.pg_database_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V84 — <c>collect.pg_index_usage_stats</c> (#2541), the per-index scan counts, sizes and
+    /// droppability facts behind <c>get_pg_index_usage</c>.
+    ///
+    /// <para>Most of the width is the second half of the question. <c>index_scans</c> answers "does anything
+    /// use this"; <c>is_unique</c>, <c>is_primary_key</c>, <c>supports_constraint</c>,
+    /// <c>is_replica_identity</c>, <c>is_partial</c>, <c>is_expression</c>, <c>is_valid</c> and
+    /// <c>index_definition</c> answer "and can it therefore go", which is a different question with a much
+    /// worse failure mode. They are stored rather than looked up on demand because the MCP has no ad-hoc
+    /// path back to a monitored server: whatever is not captured here cannot be recovered later.</para>
+    ///
+    /// <para><c>last_scan</c> is nullable and NOT defaulted, because NULL is a real answer with two
+    /// meanings the read distinguishes — PostgreSQL 15 and below do not record it at all, and on 16+ it is
+    /// NULL for an index never scanned since the counters were reset. <c>stats_reset</c> is nullable for the
+    /// ordinary reason: it is NULL until a database's statistics are first reset, which is the common state
+    /// and means the counters run back to the beginning rather than that the value is unknown.</para>
+    /// </summary>
+    private const string V84Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_index_usage_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    schema_name text,
+    table_name text,
+    index_name text,
+    index_scans bigint,
+    tuples_read bigint,
+    tuples_fetched bigint,
+    blocks_read bigint,
+    blocks_hit bigint,
+    index_bytes bigint,
+    table_bytes bigint,
+    is_unique boolean,
+    is_primary_key boolean,
+    is_valid boolean,
+    is_ready boolean,
+    is_replica_identity boolean,
+    is_partial boolean,
+    is_expression boolean,
+    supports_constraint boolean,
+    index_method text,
+    column_count integer,
+    index_definition text,
+    last_scan timestamp,
+    stats_reset timestamp
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_index_usage_stats_time
+    ON collect.pg_index_usage_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V85 — <c>collect.pg_table_bloat_stats</c> (#2542), the statistics-based per-table bloat estimate and
+    /// the counter-based dead-tuple pair beside it.
+    ///
+    /// <para><b>Three tiers of certainty share this table, and the column names carry the difference</b>
+    /// rather than leaving it to a doc. <c>heap_bytes</c> / <c>toast_bytes</c> / <c>index_bytes</c> are
+    /// MEASURED — <c>pg_relation_size</c> asks the filesystem. <c>live_tuples</c> / <c>dead_tuples</c> are
+    /// the server's own maintained counters. <c>bloat_bytes_estimate</c> and <c>bloat_pct_estimate</c> are
+    /// ARITHMETIC over column-width statistics, and are suffixed <c>_estimate</c> in the store so the
+    /// qualifier cannot be lost between here and a screen.</para>
+    ///
+    /// <para><b><c>estimate_unavailable</c> is load-bearing, not advisory.</b> It is TRUE when the estimate
+    /// has no basis — most commonly because the monitoring login lacks SELECT on the table, so
+    /// <c>pg_stats</c> filtered every row out. Measured against a <c>pg_monitor</c>-only role on a live
+    /// target, the estimator did not fail in that state: it reported 88.59% bloat for a table whose true
+    /// figure is 0.50%. A reader that renders the percentage while ignoring this flag ships an argument for
+    /// rewriting every table on the instance.</para>
+    ///
+    /// <para><c>estimated_tuple_bytes</c>, <c>estimated_heap_pages</c>, <c>fillfactor</c>,
+    /// <c>alignment_bytes</c> and <c>mods_since_analyze</c> are the estimator's own inputs, stored so the
+    /// number can be argued with rather than only believed — and <c>mods_since_analyze</c> specifically
+    /// because stale width statistics are the failure that produced an 81-percentage-point error in
+    /// testing, and modifications are the only way those statistics can go stale.</para>
+    /// </summary>
+    private const string V85Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_table_bloat_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    schema_name text,
+    table_name text,
+    heap_bytes bigint,
+    heap_pages bigint,
+    toast_bytes bigint,
+    index_bytes bigint,
+    live_tuples bigint,
+    dead_tuples bigint,
+    mods_since_analyze bigint,
+    last_analyzed timestamp,
+    estimated_tuple_bytes double precision,
+    estimated_heap_pages bigint,
+    fillfactor integer,
+    bloat_bytes_estimate bigint,
+    bloat_pct_estimate numeric(5,2),
+    estimate_unavailable boolean,
+    alignment_bytes integer,
+    pgstattuple_available boolean
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_table_bloat_stats_time
+    ON collect.pg_table_bloat_stats(server_id, collection_time);";
 
     /// <summary>
     /// V81 — tempdb's growth CEILING on <c>tempdb_stats</c> (#2515). <c>dm_db_file_space_usage</c>, which is

@@ -501,12 +501,15 @@ page carries one of **two** tab sets, chosen from the engine the store recorded 
 
 - **SQL Server — twelve sub-tabs.** Overview, Wait Stats, CPU, Memory, Blocking, File I/O, Queries,
   Configuration, Config Changes, Activity, System Events, Collection Health.
-- **PostgreSQL — six.** Overview, Activity, Vacuum, Waits, I/O, Replication. Six is the design and not a
-  shortfall: it is where all nine `get_pg_*` reads live, and the SQL Server tabs it does not have (tempdb,
-  Query Store, trace flags, plan cache, the `system_health` ring buffer) have no PostgreSQL analogue to fill
-  them. Vacuum is deliberately one tab rather than three — an old xmin horizon starves vacuum, starved vacuum
-  falls behind on freezing, and freezing falling behind is what ends in wraparound; read separately each looks
-  survivable, and together they are one escalating story.
+- **PostgreSQL — seven.** Overview, Activity, Vacuum, Waits, I/O, Replication, Storage. Seven is the design
+  and not a shortfall: it is where every `get_pg_*` read lives, and the SQL Server tabs it does not have
+  (tempdb, Query Store, trace flags, plan cache, the `system_health` ring buffer) have no PostgreSQL analogue
+  to fill them. Vacuum is deliberately one tab rather than three — an old xmin horizon starves vacuum, starved
+  vacuum falls behind on freezing, and freezing falling behind is what ends in wraparound; read separately each
+  looks survivable, and together they are one escalating story. **Storage** is separate from Vacuum for the
+  same reason in reverse: table bloat is what vacuum lag COSTS, and dropping the damage into the middle of a
+  three-panel causal sequence would break the sequence — so bloat sits beside index usage instead, where both
+  panels answer one question (where the space went and whether it is earning its keep).
 - **A server whose engine the store has not recorded gets the SQL Server set**, which is what it always got.
   A NULL `engine_kind` means "no connect has stamped it", which is not a claim of either engine, and only a
   positive PostgreSQL claim moves a server off the default. A server that has never connected will therefore
@@ -527,13 +530,13 @@ its avg CPU and avg duration over the window plus a grid of its per-collection s
 are exactly the queries the table shows** — the picker indexes into the rows rendered directly above it, rather
 than reading a second, wider list that could offer a query the table does not.
 
-**The nine PostgreSQL capture paths are now on BOTH surfaces.**
+**Every PostgreSQL capture path is now on BOTH surfaces.**
 [#2530](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2530) landed the web tabs first and the
-WPF viewer second, and the desktop set is deliberately the same six with the same names and the same
-grouping — Overview, Activity, Vacuum, Waits, I/O, Replication — so the two front ends do not teach one engine
-two shapes. The desktop panels are grids rather than charts, and the desktop Overview is the per-collector
-collection report (which of the nine ran, when, with what result, and for one that cannot run here, why),
-which is the answer a PostgreSQL operator wants first and the one the web splits across tiles.
+WPF viewer second, and the desktop set is deliberately the same seven with the same names and the same
+grouping — Overview, Activity, Vacuum, Waits, I/O, Replication, Storage — so the two front ends do not teach
+one engine two shapes. The desktop panels are grids rather than charts, and the desktop Overview is the
+per-collector collection report (which of them ran, when, with what result, and for one that cannot run here,
+why), which is the answer a PostgreSQL operator wants first and the one the web splits across tiles.
 
 Where the desktop set genuinely differs: the per-server **database filter is hidden** at a PostgreSQL target,
 because it drives the SQL Server database-scoped reads and nothing else — offering to filter views that never
@@ -542,11 +545,27 @@ grid whether or not the grid has rows: `pg_blocking` is a periodic sample, not a
 means something different in a window of 60 captures than in a window of 4, and an absent capture and a
 capture that found nothing are the same absence of rows in the stored edge list.
 
-**Two of the nine PostgreSQL capture paths are Amazon Aurora-only**, so on a stock PostgreSQL target two
+**Two of the PostgreSQL capture paths are Amazon Aurora-only**, so on a stock PostgreSQL target two
 panels are permanently empty — and neither is a fault. `get_pg_wait_stats` reads `aurora_stat_system_waits()`
 and `get_pg_top_queries` reads `aurora_stat_statements()`; core PostgreSQL has an equivalent of neither, in any
 version. Both answer `not_collected` there, naming the server, the engine and the collector and saying the gap
 is permanent, rather than going blank — and both tabs carry a note saying so before you click.
+
+**Three of them are writer-only**, which is a different kind of gap and needs a different response: on a read
+replica `pg_autovacuum_stats`, `pg_index_usage_stats` and `pg_table_bloat_stats` do not run at all. The reason
+is not availability but truth — a replica keeps its OWN statistics, so on it an index the primary's workload
+scans a million times an hour reads as never scanned. Those collectors gate off rather than collect a
+confidently wrong answer, and the Overview grid says so per collector. Ask the writer.
+
+**The bloat figure on the Storage tab is an ESTIMATE and the surface says so in three places** — the tab note,
+the panel note and the column heading. It is arithmetic over PostgreSQL's column-width statistics and never
+reads the table, which is what makes hourly collection affordable; measured against `pgstattuple` it was
+within about 2 percentage points where the statistics were current, and 81 percentage points out where they
+were not. Rows whose statistics cannot be trusted show a **dash rather than a number**. If most rows show a
+dash and the reason column says "no column statistics", that is a permissions gap rather than a broken
+collector: `pg_stats` is filtered by SELECT privilege and `pg_monitor` does not confer it, so the monitoring
+role needs `pg_read_all_data` (PostgreSQL 14+) before this panel can say anything. The measured sizes and the
+dead-tuple percentage beside it are unaffected — those come from the server's own counters.
 
 **Waits** is the only tab that is *wholly* Aurora-only. Activity's other half, the blocking panels, is
 collected at every PostgreSQL target including standbys, where a recovery conflict is blocking that happens

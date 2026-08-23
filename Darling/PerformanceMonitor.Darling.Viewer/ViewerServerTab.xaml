@@ -4014,6 +4014,89 @@
                 </DataGrid>
             </Grid>
         </TabItem>
+
+        <!-- Storage (#2541, #2542). Two grids, bloat above index usage: the bloat number is an ESTIMATE
+             and the more dangerous of the two to act on, so it is read first and its note says so before
+             any percentage is visible. -->
+        <TabItem x:Name="PgStorageTab" Header="Storage" Visibility="Collapsed">
+            <Grid Margin="8">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" x:Name="PgStorageNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <TextBlock Grid.Row="1" x:Name="PgTableBloatNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="2" x:Name="PgTableBloatGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.RowStyle>
+                        <Style TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
+                            <!-- A SUPPRESSED estimate is painted last and therefore wins, because it is not
+                                 a severity at all: the row has no trustworthy percentage, and colouring it
+                                 by one would be the exact mistake this whole surface exists to avoid. -->
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsHighBloat}" Value="True">
+                                    <Setter Property="Background" Value="#33FF6B6B"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding EstimateSuppressed}" Value="True">
+                                    <Setter Property="Background" Value="#22808080"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </DataGrid.RowStyle>
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="130"/>
+                        <DataGridTextColumn Header="Schema" Binding="{Binding SchemaName}" Width="110"/>
+                        <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="180"/>
+                        <DataGridTextColumn Header="Heap" Binding="{Binding HeapSize}" Width="100"/>
+                        <DataGridTextColumn Header="Bloat (est.)" Binding="{Binding BloatEstimate}" Width="120"/>
+                        <DataGridTextColumn Header="Bloat % (est.)" Binding="{Binding BloatPctEstimate}" Width="120"/>
+                        <DataGridTextColumn Header="Dead Tuples" Binding="{Binding DeadTuplePct}" Width="120"/>
+                        <DataGridTextColumn Header="TOAST" Binding="{Binding ToastSize}" Width="100"/>
+                        <DataGridTextColumn Header="Indexes" Binding="{Binding IndexSize}" Width="100"/>
+                        <DataGridTextColumn Header="Heap Growth" Binding="{Binding HeapGrowth}" Width="120"/>
+                        <DataGridTextColumn Header="Confidence" Binding="{Binding Confidence}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+                <TextBlock Grid.Row="3" x:Name="PgIndexUsageNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="4" x:Name="PgIndexUsageGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.RowStyle>
+                        <Style TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
+                            <!-- LEAST severe first, so the LAST match wins. An index can be both unscanned
+                                 and invalid; invalid is the stronger statement and must not be painted over
+                                 by the softer amber. -->
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsUnscanned}" Value="True">
+                                    <Setter Property="Background" Value="#33FFB86B"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding IsInvalid}" Value="True">
+                                    <Setter Property="Background" Value="#33FF6B6B"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </DataGrid.RowStyle>
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="130"/>
+                        <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="160"/>
+                        <DataGridTextColumn Header="Index" Binding="{Binding IndexName}" Width="200"/>
+                        <DataGridTextColumn Header="Size" Binding="{Binding IndexSize}" Width="100"/>
+                        <DataGridTextColumn Header="Scans in Window" Binding="{Binding ScansInWindow}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Lifetime Scans" Binding="{Binding TotalScans}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Last Scan" Binding="{Binding LastScan}" Width="140"/>
+                        <DataGridTextColumn Header="Blocks" Binding="{Binding BlockAccesses}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <DataGridTextColumn Header="Samples" Binding="{Binding SampleCount}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                        <DataGridTextColumn Header="Can It Go?" Binding="{Binding Droppability}" Width="220"/>
+                        <DataGridTextColumn Header="Definition" Binding="{Binding IndexDefinition}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </Grid>
+        </TabItem>
     </TabControl>
     </Grid>
 </UserControl>
