@@ -131,6 +131,11 @@ public sealed class DarlingMcpPgSessionStatesTools
     /// <summary>
     /// Severity band, server-computed so the browser and the WPF row styles paint the same thing from the
     /// same decision rather than each re-deriving it.
+    /// <para>The four words are the HOUSE vocabulary — <c>Healthy</c>, <c>Warning</c>, <c>Critical</c>,
+    /// <c>Unknown</c>, capitalised — the same set <c>IndexSeverity</c> and <c>BloatSeverity</c> return, and
+    /// the only set the shared <c>sev-*</c> CSS defines. A private vocabulary here would be worse than
+    /// wrong: <c>sev-info</c> and <c>sev-none</c> match no rule, so the badge would render unstyled rather
+    /// than failing, which is the kind of defect that ships.</para>
     /// </summary>
     internal static string SessionSeverity(DarlingPgSessionStatesReader.PgSessionStateRow r)
     {
@@ -139,7 +144,7 @@ public sealed class DarlingMcpPgSessionStatesTools
             /* Its own band, above every severity, for the same reason pg_table_bloat_stats gives
                estimate_unavailable one: this row carries no trustworthy state at all, and painting it as
                healthy or as critical would both be inventions. */
-            return "unknown";
+            return "Unknown";
         }
 
         var sustained = r.SampleCount > 0
@@ -147,15 +152,19 @@ public sealed class DarlingMcpPgSessionStatesTools
 
         if (r.HorizonHolderSamples > 0 && sustained)
         {
-            return "critical";
+            return "Critical";
         }
 
         if (r.IdleInTransactionSamples > 0 && r.PeakStateDurationMs >= IdleWithoutHorizonAttentionMs)
         {
-            return "warning";
+            return "Warning";
         }
 
-        return r.HorizonHolderSamples > 0 ? "info" : "none";
+        /* A passing sighting collapses into Healthy rather than getting a band of its own. Every write
+           transaction is briefly the oldest xmin holder, so a distinct band there would paint ordinary
+           traffic and teach people to ignore the column. The sample counts are on the row for anyone who
+           wants to see the difference. */
+        return "Healthy";
     }
 
     internal static string FormatDuration(long milliseconds)

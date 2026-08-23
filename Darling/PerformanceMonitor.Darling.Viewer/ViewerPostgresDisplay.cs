@@ -782,4 +782,205 @@ internal static class PgDisplay
             IsUnscanned = unscanned,
         };
     }
+
+    // ── Session states ───────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The share of the samples that saw a session in which it must have been the oldest xmin holder
+    /// before the grid paints it as one.
+    ///
+    /// <para>Half, and it is a COPY of <c>DarlingMcpPgSessionStatesTools.SustainedHolderSampleShare</c>
+    /// rather than a reference to it: the viewer does not reference the service project, so the constant
+    /// cannot be reached from here. The duplication is deliberate and pinned —
+    /// <c>ViewerPostgresTabsTests</c> asserts this projection's flags agree with the MCP's own severity
+    /// band on the same row, in the one assembly that references both — because the alternative is two
+    /// surfaces quietly disagreeing about whether a session is starving vacuum.</para>
+    ///
+    /// <para>The threshold itself is the argument from the read: every write transaction is momentarily
+    /// the oldest holder, so a single sighting proves only that the instance does writes. Sustained
+    /// holding is the finding.</para>
+    /// </summary>
+    internal const double SustainedHolderSampleShare = 0.5;
+
+    /// <summary>
+    /// How long a session must have sat idle in transaction, while pinning NOTHING, before the grid says
+    /// anything about it. Five minutes, the copy of
+    /// <c>DarlingMcpPgSessionStatesTools.IdleWithoutHorizonAttentionMs</c> — see above for why it is a copy.
+    /// <para>It costs vacuum nothing, so the amber is not the vacuum argument: at five minutes it is holding
+    /// a connection and whatever locks the transaction already took, which is a forgotten commit.</para>
+    /// </summary>
+    internal const long IdleWithoutHorizonAttentionMs = 5 * 60 * 1000;
+
+    /// <summary>What the horizon-age cell shows for the <c>-1</c> sentinel. WORDS, not the em dash the rest
+    /// of this class uses for a missing measurement, and that difference is the entire feature: -1 here is a
+    /// positive finding — this session pinned nothing — and the dash would file it under "not measured",
+    /// which is the reading that gets a harmless session killed.</summary>
+    internal const string PinsNothingText = "pins nothing";
+
+    internal sealed class SessionStateRow
+    {
+        public int Pid { get; init; }
+
+        /// <summary>The collector's synthetic (backend_start, pid) identity, shown because a pid alone is
+        /// not one: pids are reused, and this is the id that matches the same backend on the blocking
+        /// grid.</summary>
+        public long BackendId { get; init; }
+
+        public string DatabaseName { get; init; } = "";
+        public string Username { get; init; } = "";
+        public string ApplicationName { get; init; } = "";
+        public string ClientAddr { get; init; } = "";
+        public string BackendType { get; init; } = "";
+        public string LastState { get; init; } = "";
+        public string LastWait { get; init; } = "";
+
+        /// <summary>The leading SQL keyword, whitelisted at collection. Not a truncation of the statement:
+        /// pg_stat_activity.query carries literal parameter values, so no raw text is stored anywhere.</summary>
+        public string LastCommandTag { get; init; } = "";
+
+        /// <summary>The normalised statement identity, to join against the Activity tab's query grid. Blank
+        /// rather than 0 when absent — PostgreSQL 13 has no such column, and on 14+ it is NULL whenever
+        /// compute_query_id is off, neither of which is a query whose id happens to be zero.</summary>
+        public string LastQueryId { get; init; } = "";
+
+        /// <summary><b>The column this panel exists for.</b> An age in transactions, and the words in
+        /// <see cref="PinsNothingText"/> when the session held neither a snapshot nor a transaction id in
+        /// any sample.</summary>
+        public string PeakHorizonAge { get; init; } = "";
+
+        public string PeakXminAge { get; init; } = "";
+        public string PeakXidAge { get; init; } = "";
+        public string PeakXactDuration { get; init; } = "";
+        public string PeakStateDuration { get; init; } = "";
+        public string PeakQueryDuration { get; init; } = "";
+
+        /// <summary>How often this session was the oldest holder, as a fraction of the samples that saw it —
+        /// never a bare count. One sighting in a hundred is normal write traffic; ninety-eight in a hundred
+        /// is the reason vacuum reclaims nothing, and a count alone cannot tell them apart.</summary>
+        public string HorizonHoldShare { get; init; } = "";
+
+        public string IdleInTransactionShare { get; init; } = "";
+        public int SampleCount { get; init; }
+        public string FirstSeenAt { get; init; } = "";
+        public string LastSeenAt { get; init; } = "";
+
+        /// <summary>What the rest of the instance looked like in this backend's most recent sample. Two
+        /// idle-in-transaction sessions out of six connections is a different server from two out of four
+        /// thousand, and the row cannot be read without it.</summary>
+        public string InstanceContext { get; init; } = "";
+
+        /// <summary>Every qualifier on the row in one column — redaction, and a capture that hit the
+        /// collector's per-capture cap so the stored set is a worst-first sample of a larger one.</summary>
+        public string Caveats { get; init; } = "";
+
+        /// <summary>Sustained holder: the red. Only ever true for a session seen holding the oldest xmin
+        /// across at least <see cref="SustainedHolderSampleShare"/> of the samples that saw it, so a passing
+        /// sighting — which every write transaction produces — is not painted as a cause.</summary>
+        public bool IsSustainedHorizonHolder { get; init; }
+
+        /// <summary>Idle in transaction past the attention threshold and pinning NOTHING: the amber. A
+        /// different finding from the red rather than a weaker one — it costs vacuum nothing and costs a
+        /// connection and its locks, so the two must never share a colour.</summary>
+        public bool IsIdleWithoutHorizon { get; init; }
+
+        /// <summary>The row's state columns came back NULL because the monitoring login lacks pg_monitor.
+        /// Not a severity: nothing on this row is a trustworthy observation about the database, and painting
+        /// it either healthy or critical would invent one.</summary>
+        public bool StateUnknown { get; init; }
+    }
+
+    /// <summary>
+    /// Projects one session-state row for the grid.
+    ///
+    /// <para><b><c>PeakHorizonAge</c> of <c>-1</c> renders as words, not as the dash.</b> Everywhere else in
+    /// this class the <c>-1</c> sentinel means "not measured" and the em dash says so. Here it means the
+    /// opposite of missing: the session held neither a snapshot nor a transaction id in any sample, which
+    /// was MEASURED, and it is the finding that separates a session starving vacuum from one costing it
+    /// nothing. Rendering it as a dash — or worse, as a number — is how a monitoring tool talks somebody
+    /// into killing a harmless backend.</para>
+    ///
+    /// <para><b>The three flags are re-derived here rather than read off a severity string</b>, because the
+    /// XAML row triggers bind to booleans and the MCP's band is a word. They are pinned against that band in
+    /// the tests so the two surfaces cannot drift apart.</para>
+    /// </summary>
+    internal static SessionStateRow SessionState(DarlingPgSessionStatesReader.PgSessionStateRow r)
+    {
+        /* Redaction is asked FIRST and suppresses both other flags, for the same reason the read's finding
+           does: with the state columns NULL, the inputs to every judgement below are missing, and a flag
+           derived from them would report an absent GRANT as an observation about the workload. */
+        var unknown = r.StateWasRedacted;
+
+        var sustained = !unknown
+            && r.SampleCount > 0
+            && r.HorizonHolderSamples >= Math.Max(1, (int)Math.Ceiling(r.SampleCount * SustainedHolderSampleShare));
+
+        var idleWithoutHorizon = !unknown
+            && r.IdleInTransactionSamples > 0
+            && r.PeakHorizonAge < 0
+            && r.PeakStateDurationMs >= IdleWithoutHorizonAttentionMs;
+
+        var caveats = new List<string>();
+        if (r.StateWasRedacted)
+        {
+            caveats.Add("state columns REDACTED — the monitoring login lacks pg_monitor here");
+        }
+
+        if (r.CaptureWasTruncated)
+        {
+            caveats.Add("a capture hit the per-capture row cap, so this is a worst-first sample of more");
+        }
+
+        /* wait_event_type and wait_event are two halves of one name ("Lock: transactionid") and are worth
+           little apart: the type alone is a category, the event alone repeats across categories. */
+        var wait = string.Join(": ", new[] { r.LastWaitEventType, r.LastWaitEvent }
+            .Where(part => !string.IsNullOrWhiteSpace(part)));
+
+        return new SessionStateRow
+        {
+            Pid = r.Pid,
+            BackendId = r.BackendId,
+            DatabaseName = r.DatabaseName ?? "",
+            Username = r.Username ?? "",
+            ApplicationName = r.ApplicationName ?? "",
+            ClientAddr = r.ClientAddr ?? "",
+            BackendType = r.BackendType ?? "",
+            LastState = r.LastState ?? "",
+            LastWait = wait,
+            LastCommandTag = r.LastCommandTag ?? "",
+            LastQueryId = r.LastQueryId is { } queryId
+                ? queryId.ToString("N0", CultureInfo.CurrentCulture)
+                : string.Empty,
+            PeakHorizonAge = r.PeakHorizonAge < 0
+                ? PinsNothingText
+                : string.Create(CultureInfo.CurrentCulture, $"{r.PeakHorizonAge:N0} transactions"),
+            /* These two keep the ordinary dash. They are the components of the horizon age above, and an
+               absent one is the narrower statement "this session held no snapshot" / "no transaction id" —
+               which the horizon column has already said in words. */
+            PeakXminAge = Count(r.PeakXminAge),
+            PeakXidAge = Count(r.PeakXidAge),
+            /* PEAKS, not averages. The finding is how far this went, and averaging a hundred samples of a
+               transaction that grew monotonically reports about half of what actually happened. */
+            PeakXactDuration = Milliseconds(r.PeakXactDurationMs),
+            PeakStateDuration = Milliseconds(r.PeakStateDurationMs),
+            PeakQueryDuration = Milliseconds(r.PeakQueryDurationMs),
+            HorizonHoldShare = r.SampleCount <= 0
+                ? NotApplicableText
+                : string.Create(CultureInfo.CurrentCulture,
+                    $"{r.HorizonHolderSamples:N0} of {r.SampleCount:N0} samples"),
+            IdleInTransactionShare = r.SampleCount <= 0
+                ? NotApplicableText
+                : string.Create(CultureInfo.CurrentCulture,
+                    $"{r.IdleInTransactionSamples:N0} of {r.SampleCount:N0} samples"),
+            SampleCount = r.SampleCount,
+            FirstSeenAt = Timestamp(r.FirstSeenAt),
+            LastSeenAt = Timestamp(r.LastSeenAt),
+            InstanceContext = string.Create(CultureInfo.CurrentCulture,
+                $"{r.IdleInTransactionSessions:N0} idle in xact / {r.ActiveSessions:N0} active / "
+                + $"{r.TotalSessions:N0} sessions; {r.ReportableSessions:N0} reportable"),
+            Caveats = string.Join("; ", caveats),
+            IsSustainedHorizonHolder = sustained,
+            IsIdleWithoutHorizon = idleWithoutHorizon,
+            StateUnknown = unknown,
+        };
+    }
 }

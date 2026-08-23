@@ -233,7 +233,7 @@ public class DarlingPgSessionStatesReaderTests
 
         Assert.Contains("PINS THE XMIN HORIZON", finding, StringComparison.Ordinal);
         Assert.Contains("get_pg_xmin_horizon", finding, StringComparison.Ordinal);
-        Assert.Equal("critical", DarlingMcpPgSessionStatesTools.SessionSeverity(
+        Assert.Equal("Critical", DarlingMcpPgSessionStatesTools.SessionSeverity(
             Row(sampleCount: 10, horizonHolderSamples: 9, idleInTransactionSamples: 10, peakHorizonAge: 40_000)));
     }
 
@@ -250,7 +250,7 @@ public class DarlingPgSessionStatesReaderTests
 
         Assert.Contains("passing sighting", finding, StringComparison.Ordinal);
         Assert.DoesNotContain("PINS THE XMIN HORIZON", finding, StringComparison.Ordinal);
-        Assert.NotEqual("critical", DarlingMcpPgSessionStatesTools.SessionSeverity(row));
+        Assert.NotEqual("Critical", DarlingMcpPgSessionStatesTools.SessionSeverity(row));
     }
 
     /// <summary>
@@ -277,7 +277,7 @@ public class DarlingPgSessionStatesReaderTests
            connection and its locks, which is a different argument the finding has to make on its own terms
            rather than borrowing the vacuum one. */
         Assert.Contains("forgotten commit", finding, StringComparison.Ordinal);
-        Assert.Equal("warning", DarlingMcpPgSessionStatesTools.SessionSeverity(row));
+        Assert.Equal("Warning", DarlingMcpPgSessionStatesTools.SessionSeverity(row));
     }
 
     /// <summary>
@@ -291,7 +291,7 @@ public class DarlingPgSessionStatesReaderTests
             sampleCount: 2, horizonHolderSamples: 0, idleInTransactionSamples: 2,
             peakHorizonAge: -1, peakStateDurationMs: 15_000);
 
-        Assert.Equal("none", DarlingMcpPgSessionStatesTools.SessionSeverity(row));
+        Assert.Equal("Healthy", DarlingMcpPgSessionStatesTools.SessionSeverity(row));
         Assert.DoesNotContain("forgotten commit",
             DarlingMcpPgSessionStatesTools.HorizonFinding(row), StringComparison.Ordinal);
     }
@@ -318,9 +318,9 @@ public class DarlingPgSessionStatesReaderTests
         Assert.Contains("pg_monitor", finding, StringComparison.Ordinal);
         Assert.DoesNotContain("PINS THE XMIN HORIZON", finding, StringComparison.Ordinal);
 
-        Assert.Equal("unknown", DarlingMcpPgSessionStatesTools.SessionSeverity(row));
-        Assert.NotEqual("critical", DarlingMcpPgSessionStatesTools.SessionSeverity(row));
-        Assert.NotEqual("none", DarlingMcpPgSessionStatesTools.SessionSeverity(row));
+        Assert.Equal("Unknown", DarlingMcpPgSessionStatesTools.SessionSeverity(row));
+        Assert.NotEqual("Critical", DarlingMcpPgSessionStatesTools.SessionSeverity(row));
+        Assert.NotEqual("Healthy", DarlingMcpPgSessionStatesTools.SessionSeverity(row));
     }
 
     /// <summary>
