@@ -666,10 +666,29 @@ public sealed class DarlingDeployRollbackRetentionTests
             });
             Assert.NotNull(process);
 
-            var stdout = process!.StandardOutput.ReadToEnd();
-            var stderr = process.StandardError.ReadToEnd();
-            process.WaitForExit(60_000);
+            /* BOTH streams drained CONCURRENTLY. Reading stdout to the end and then stderr is the classic
+               redirect deadlock: a probe that writes enough to stderr to fill the OS pipe buffer blocks the
+               child, which never closes stdout, which blocks this thread forever — and WaitForExit's
+               timeout sits behind the block, so it never fires. The result is a CI job that HANGS rather
+               than fails. Raised in review on #2529 against the sibling file, which carries the same
+               idiom; fixed in both, because the same defect twice is a category. */
+            var stdoutTask = process!.StandardOutput.ReadToEndAsync();
+            var stderrTask = process.StandardError.ReadToEndAsync();
 
+            var exited = process.WaitForExit(60_000);
+            if (!exited)
+            {
+                try { process.Kill(entireProcessTree: true); }
+                catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+                {
+                    /* Already gone between the timeout and the kill. Nothing to do. */
+                }
+            }
+
+            var stdout = stdoutTask.GetAwaiter().GetResult();
+            var stderr = stderrTask.GetAwaiter().GetResult();
+
+            Assert.True(exited, $"powershell.exe did not exit within 60 seconds running the extracted functions. Output so far:\n{stdout}\n{stderr}");
             Assert.True(string.IsNullOrWhiteSpace(stderr), $"powershell.exe reported an error running the extracted functions:\n{stderr}");
 
             var lines = new List<string>();

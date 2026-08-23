@@ -698,10 +698,31 @@ public sealed class DarlingDeployStaleFileTests
             });
             Assert.NotNull(process);
 
-            var stdout = process!.StandardOutput.ReadToEnd();
-            var stderr = process.StandardError.ReadToEnd();
-            process.WaitForExit(60_000);
+            /* BOTH streams drained CONCURRENTLY, and that is not style. Reading stdout to the end and then
+               stderr is the classic redirect deadlock: a probe that writes enough to stderr to fill the OS
+               pipe buffer blocks the child, which never closes stdout, which blocks this thread forever —
+               and WaitForExit's timeout is behind the block, so it never gets to fire. The result is a CI
+               job that HANGS rather than fails, which is the worse of the two by a distance. The probes in
+               this file are the larger and more failure-prone ones, so the case is not hypothetical here.
+               Raised in review on this PR (#2529); DarlingDeployRollbackRetentionTests carried the same
+               shape and was fixed with it. */
+            var stdoutTask = process!.StandardOutput.ReadToEndAsync();
+            var stderrTask = process.StandardError.ReadToEndAsync();
 
+            var exited = process.WaitForExit(60_000);
+            if (!exited)
+            {
+                try { process.Kill(entireProcessTree: true); }
+                catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+                {
+                    /* Already gone between the timeout and the kill. Nothing to do. */
+                }
+            }
+
+            var stdout = stdoutTask.GetAwaiter().GetResult();
+            var stderr = stderrTask.GetAwaiter().GetResult();
+
+            Assert.True(exited, $"powershell.exe did not exit within 60 seconds running the extracted functions. Output so far:\n{stdout}\n{stderr}");
             Assert.True(string.IsNullOrWhiteSpace(stderr), $"powershell.exe reported an error running the extracted functions:\n{stderr}");
 
             var lines = new List<string>();
