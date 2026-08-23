@@ -242,6 +242,15 @@ public sealed class McpQueryTools
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_store")
+                    /* #2546: the sentence below GUESSES ("may not be enabled"), and it had to, because the
+                       read had no way to find out. The store has known all along — query_store_health
+                       records actual_state per database every hour for exactly this purpose. Asking it turns
+                       a hedge into a fact plus the ALTER DATABASE that fixes it, and it answers for the
+                       database this read was scoped to rather than for the server's most flattering one. */
+                    ?? await McpRuntimePrecondition.QueryStoreStatusAsync(dataService, resolved.ServerId, resolved.ServerName, database_name)
+                    /* And the collector's own last run, for the case Query Store is on and the collector is
+                       the thing that cannot read it. */
+                    ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_store")
                     ?? McpHelpers.Status("unavailable", "No Query Store data available. Query Store may not be enabled on target databases.");
             }
 
