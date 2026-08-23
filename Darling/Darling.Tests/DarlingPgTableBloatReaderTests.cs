@@ -343,4 +343,75 @@ public class DarlingPgTableBloatReaderTests
             DarlingMcpPgTableBloatTools.BloatFinding(5m, 100_000, true, "public.widget"),
             StringComparison.Ordinal);
     }
+
+    // ── One rule, two surfaces ───────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The MCP read and the WPF grid reach the SAME decision on every row, because they make the same
+    /// call rather than each carrying a copy of the rule.
+    ///
+    /// <para>This is the invariant, not the instance. The first draft had the threshold written as a
+    /// literal in both projects: matching, correct, and free to drift apart at the next edit — silently,
+    /// and in the direction where one surface publishes a figure the other had already withheld. Asserting
+    /// the two agree on a handful of examples would not have caught that either, since both copies were
+    /// right on the day. What makes this hold is that the rule moved to
+    /// <see cref="DarlingPgTableBloatReader.EstimateIsUnpublishable"/>, which both now call.</para>
+    ///
+    /// <para>The cases sweep BOTH sides of the churn threshold and every flag combination, so a change to
+    /// the rule that moved only one consumer would be caught wherever it moved it.</para>
+    /// </summary>
+    [Fact]
+    public void TheMcpReadAndTheViewerGridSuppressExactlyTheSameRows()
+    {
+        var cases = new[]
+        {
+            Row(),
+            Row(liveTuples: 150_000, modsSinceAnalyze: 300_000),
+            Row(liveTuples: 100_000, modsSinceAnalyze: 19_999),
+            Row(liveTuples: 100_000, modsSinceAnalyze: 20_001),
+            Row(estimateUnavailable: true),
+            Row(liveTuples: -1),
+            Row(liveTuples: 0, modsSinceAnalyze: 5_000),
+            Row(liveTuples: -1, modsSinceAnalyze: 999_999, estimateUnavailable: true),
+        };
+
+        foreach (var row in cases)
+        {
+            var mcpSuppressed = DarlingMcpPgTableBloatTools.EstimateSuppressionReason(row) != null;
+            var shared = DarlingPgTableBloatReader.EstimateIsUnpublishable(row);
+
+            Assert.Equal(shared, mcpSuppressed);
+
+            /* And the grid renders the dash exactly when the rule says to. PgDisplay lives in the viewer
+               project, which Darling.Tests also references, so the real projection is what is checked here
+               rather than a re-implementation of it. */
+            var projected = PerformanceMonitor.Darling.Viewer.PgDisplay.TableBloat(row);
+            Assert.Equal(shared, projected.EstimateSuppressed);
+
+            if (shared)
+            {
+                Assert.Equal(PerformanceMonitor.Darling.Viewer.PgDisplay.NotApplicableText, projected.BloatPctEstimate);
+                Assert.Equal(PerformanceMonitor.Darling.Viewer.PgDisplay.NotApplicableText, projected.BloatEstimate);
+                /* A suppressed row can never be painted as a high-bloat one: that colour asserts exactly
+                   what the suppression denies. */
+                Assert.False(projected.IsHighBloat);
+            }
+
+            /* The measured fallback survives suppression in every case — that is what makes a permissions
+               gap degrade the answer instead of removing it. */
+            Assert.NotEmpty(DarlingMcpPgTableBloatTools.DeadTupleFinding(row.LiveTuples, row.DeadTuples));
+        }
+    }
+
+    /// <summary>
+    /// The threshold the tool re-exports is the one the shared rule uses. A second literal here would be
+    /// the drift this whole arrangement exists to prevent.
+    /// </summary>
+    [Fact]
+    public void TheToolsThresholdIsTheSharedOne()
+    {
+        Assert.Equal(
+            DarlingPgTableBloatReader.StaleStatisticsChurnRatio,
+            DarlingMcpPgTableBloatTools.StaleStatisticsChurnRatio);
+    }
 }

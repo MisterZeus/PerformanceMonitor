@@ -217,6 +217,52 @@ public static class DarlingPgTableBloatReader
 
     public sealed record PgTableBloatProbe(long RowsInWindow, long SnapshotsInWindow, long RowsEver);
 
+    /// <summary>
+    /// Modifications since the last <c>ANALYZE</c>, as a fraction of the table's live row count, above
+    /// which the estimate is not fit to publish.
+    /// <para>0.2 - a fifth of the table rewritten since the column widths were measured. Taken from the
+    /// measurement that motivated the guard rather than chosen: two byte-identical 8,998-page tables with a
+    /// true bloat of 10.93% estimated 92.64% and 11.01%, differing only in whether <c>ANALYZE</c> had run
+    /// after a widening UPDATE. The stale one had modified 200% of its rows since its last analyze and the
+    /// fresh one 0%, so anywhere between the two separates them; a fifth is chosen low because the failure
+    /// is asymmetric - a needlessly cautious estimate costs a second look, an over-trusted one costs a
+    /// table rewrite.</para>
+    /// </summary>
+    public const double StaleStatisticsChurnRatio = 0.2;
+
+    /// <summary>
+    /// Whether this row's bloat estimate may be shown at all — the ONE copy of that rule.
+    ///
+    /// <para>It lives here, beside the reader, rather than in either consumer, because BOTH consume it: the
+    /// MCP tool nulls the estimate fields and the WPF grid renders a dash, and those two surfaces must not
+    /// be able to disagree about whether a number is publishable. Two matching literals in two projects is
+    /// how that disagreement arrives — silently, and in the direction that publishes a figure one surface
+    /// had already decided was untrustworthy.</para>
+    ///
+    /// <para>The three states, each measured rather than supposed:</para>
+    /// <list type="number">
+    /// <item><c>estimate_unavailable</c> — no column statistics. Usually PERMISSIONS rather than a missing
+    /// <c>ANALYZE</c>: <c>pg_stats</c> is filtered by SELECT privilege and <c>pg_monitor</c> does not confer
+    /// it, and in that state the estimator does not fail — measured on a live target, it reported 88.59% for
+    /// a table whose true bloat is 0.50%.</item>
+    /// <item><c>live_tuples &lt; 0</c> — PostgreSQL 14+'s explicit "never analyzed" marker, preserved by the
+    /// reader rather than floored to zero precisely so this check has something to key on.</item>
+    /// <item>Stale widths — see <see cref="StaleStatisticsChurnRatio"/>. The 81-percentage-point case, and
+    /// the only one of the three the <c>estimate_unavailable</c> flag does NOT catch.</item>
+    /// </list>
+    /// </summary>
+    public static bool EstimateIsUnpublishable(PgTableBloatRow row)
+    {
+        if (row is null)
+        {
+            throw new ArgumentNullException(nameof(row));
+        }
+
+        return row.EstimateUnavailable
+            || row.LiveTuples < 0
+            || (row.LiveTuples > 0 && row.ModsSinceAnalyze > row.LiveTuples * StaleStatisticsChurnRatio);
+    }
+
     public static async Task<PgTableBloatProbe> ProbePgTableBloatAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
         CancellationToken cancellationToken = default)

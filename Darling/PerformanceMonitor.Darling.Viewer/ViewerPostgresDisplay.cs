@@ -668,15 +668,17 @@ internal static class PgDisplay
     }
 
     /// <summary>
-    /// Projects one bloat row for the grid. The suppression decision is re-derived here rather than read
-    /// off a flag the reader set, because the viewer and the MCP surface must not be able to disagree about
-    /// whether a number is publishable - and the rule is one comparison, not a duplicated policy.
+    /// Projects one bloat row for the grid.
+    ///
+    /// <para>The suppression decision comes from <see cref="DarlingPgTableBloatReader.EstimateIsUnpublishable"/>
+    /// - the SAME call the MCP read makes - rather than from a second copy of the rule here. Two matching
+    /// literals in two projects is exactly how the two surfaces would come to disagree about whether a
+    /// number is publishable, silently and in the direction that shows a figure the other surface had
+    /// already withheld.</para>
     /// </summary>
     internal static TableBloatRow TableBloat(DarlingPgTableBloatReader.PgTableBloatRow row)
     {
-        var suppressed = row.EstimateUnavailable
-                      || row.LiveTuples < 0
-                      || (row.LiveTuples > 0 && row.ModsSinceAnalyze > row.LiveTuples * 0.2);
+        var suppressed = DarlingPgTableBloatReader.EstimateIsUnpublishable(row);
 
         var confidence = row.EstimateUnavailable
             ? "no column statistics - check the monitoring login can SELECT this table"

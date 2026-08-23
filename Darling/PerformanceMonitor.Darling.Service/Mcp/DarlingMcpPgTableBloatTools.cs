@@ -33,26 +33,30 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpPgTableBloatTools
 {
     /// <summary>
-    /// Modifications since the last ANALYZE, as a multiple of the table's live row count, above which the
-    /// estimate is reported as untrustworthy.
-    /// <para>0.2 — a fifth of the table rewritten since the widths were measured. Set from the measurement
-    /// that motivated the whole guard: two byte-identical 8,998-page tables with a true bloat of 10.93%
-    /// estimated 92.64% and 11.01%, differing only in whether <c>ANALYZE</c> had run after a widening
-    /// UPDATE. The stale one had modified 200% of its rows since its last analyze and the fresh one 0%, so
-    /// anywhere between the two would separate them; a fifth is chosen low because the failure is
-    /// asymmetric — a needlessly cautious estimate costs a second look, an over-trusted one costs a table
-    /// rewrite.</para>
+    /// The threshold, re-exported from the ONE place the rule lives so this tool's tests can pin it without
+    /// reaching across projects. <see cref="DarlingPgTableBloatReader.StaleStatisticsChurnRatio"/> carries
+    /// the measurement it was set from.
     /// </summary>
-    internal const double StaleStatisticsChurnRatio = 0.2;
+    internal const double StaleStatisticsChurnRatio = DarlingPgTableBloatReader.StaleStatisticsChurnRatio;
 
     /// <summary>
-    /// Whether the estimate may be shown at all, and why not when it may not.
-    /// <para>Returns null when the estimate is fit to publish. Any non-null return is a REASON, and the
-    /// caller nulls the estimate fields rather than rendering them with the reason attached — a footnote
-    /// under a large red percentage is not a safeguard.</para>
+    /// The REASON the estimate may not be shown, or null when it is fit to publish.
+    ///
+    /// <para>The decision itself is <see cref="DarlingPgTableBloatReader.EstimateIsUnpublishable"/> — shared
+    /// with the WPF grid, so the two surfaces cannot disagree about whether a number is publishable. What
+    /// lives here is only the prose, because a grid cell has room for three words and this has room to say
+    /// what to actually do about it.</para>
+    ///
+    /// <para>Any non-null return means the caller nulls the estimate fields rather than rendering them with
+    /// the reason attached — a footnote under a large red percentage is not a safeguard.</para>
     /// </summary>
     internal static string? EstimateSuppressionReason(DarlingPgTableBloatReader.PgTableBloatRow r)
     {
+        if (!DarlingPgTableBloatReader.EstimateIsUnpublishable(r))
+        {
+            return null;
+        }
+
         if (r.EstimateUnavailable)
         {
             return "SUPPRESSED: the estimate has no basis for this table. Either the table has never been "
@@ -71,9 +75,10 @@ public sealed class DarlingMcpPgTableBloatTools
                  + "compare the page count against. Run ANALYZE on the table and re-read.";
         }
 
-        if (r.LiveTuples > 0 && r.ModsSinceAnalyze > r.LiveTuples * StaleStatisticsChurnRatio)
         {
-            var pct = Math.Round((double)r.ModsSinceAnalyze / r.LiveTuples * 100, 1);
+            var pct = r.LiveTuples > 0
+                ? Math.Round((double)r.ModsSinceAnalyze / r.LiveTuples * 100, 1)
+                : 0;
             return "SUPPRESSED: the column-width statistics this estimate depends on are STALE - "
                  + pct.ToString("0.#", CultureInfo.InvariantCulture) + "% of this table's rows have been "
                  + "modified since it was last analyzed. This is the estimator's worst failure mode and it "
@@ -81,8 +86,6 @@ public sealed class DarlingMcpPgTableBloatTools
                  + "was 92.64% against a true 10.93%, an error of 81 percentage points, with nothing in the "
                  + "arithmetic to show it. Run ANALYZE on the table and re-read.";
         }
-
-        return null;
     }
 
     /// <summary>
