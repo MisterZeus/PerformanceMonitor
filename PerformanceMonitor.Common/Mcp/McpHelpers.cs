@@ -246,6 +246,11 @@ internal static class McpHelpers
     /// <item><c>empty</c> — a true negative: we looked and there is genuinely nothing (all clear).</item>
     /// <item><c>not_collected</c> — the input names something this server does not collect.</item>
     /// <item><c>unavailable</c> — it existed but is not retrievable now (evicted, purged, or not collected yet).</item>
+    /// <item><c>precondition</c> — a setup step on the monitored server is unsatisfied, and the message says
+    /// which one and how to satisfy it (#2546). Distinct from <c>not_collected</c>, which is permanent, and
+    /// from <c>unavailable</c>, which sends the reader to collection health where they will find a collector
+    /// that is running and doing its best. Re-derived on every read, so a precondition satisfied a minute ago
+    /// stops being reported on the next call.</item>
     /// </list>
     /// </param>
     /// <param name="message">The human-readable explanation (kept intact from the prior bare-string text).</param>

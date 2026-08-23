@@ -58,6 +58,15 @@ public sealed class DarlingMcpPgStatementTools
                    two rather than repeating the ones that can no longer reach this line. */
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.ServerName, "pg_statement_stats")
+                    /* #2546: the sentence below tells the reader to go and CHECK whether pg_stat_statements
+                       is installed in the connected database. The collector has already checked — a 42P01
+                       against a database where the extension was never created classifies as a non-fatal
+                       skip and stores the CREATE EXTENSION to run. Asking for it here is the whole reason
+                       the precondition vocabulary exists on the PostgreSQL side (#2545): the extension is
+                       mutable at runtime, so nothing decided at connect time could report it and then stop
+                       reporting it when somebody acts on the advice. */
+                    ?? await DarlingRuntimePrecondition.StatusAsync(
+                        postgres, resolved.ServerId, resolved.ServerName, "pg_statement_stats")
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No PostgreSQL query statistics for this server and window. On Aurora, check that "
