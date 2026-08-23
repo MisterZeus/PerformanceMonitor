@@ -33,6 +33,11 @@ public sealed class McpBlockingTools
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "deadlocks")
+                    /* #2546: capability first (permanent), then the runtime precondition (fixable), then the
+                       read's own miss. A deadlock capture the collector cannot read returns zero rows
+                       forever, which is byte-identical to a server that simply did not deadlock — the one
+                       answer nobody should be given without being told. */
+                    ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.ServerName, "deadlocks")
                     ?? McpHelpers.Status("empty", "No deadlocks found in the specified time range.");
             }
 
@@ -211,6 +216,9 @@ public sealed class McpBlockingTools
             if (withXml.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "blocked_process_report")
+                    /* #2546: same order and same reason as get_deadlocks — a blocked-process capture the
+                       collector cannot read is indistinguishable here from a server that never blocked. */
+                    ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.ServerName, "blocked_process_report")
                     ?? McpHelpers.Status("empty", "No blocked process report XML available in the specified time range.");
             }
 

@@ -87,6 +87,15 @@ public sealed class McpMissMessageParityPinTests
            read by name, so the instructions are the only place it can be told which family answers on
            this engine. */
         "a PostgreSQL target collects none of the SQL Server signals at all, and the `get_pg_*` reads are the ones that answer there",
+
+        /* The FOURTH word (#2546). The precondition MESSAGES themselves are built by
+           CollectorRuntimePrecondition and are byte-identical by construction; what lives twice, and
+           therefore belongs here, is the paragraph teaching a caller that this one is the one they can act
+           on — and specifically that it is re-derived per read, so doing what it asks is enough. An agent
+           told to restart the monitoring service instead would be back at the defect the word exists to
+           close. */
+        "`precondition` is the one that IS worth acting on: this server could have that data, the collector is running, and a setup step on the monitored server is in the way",
+        "It is re-derived on EVERY read rather than decided when the connection was made, so once somebody does the thing it asked for the next call answers with data",
     };
 
     [Theory]
@@ -109,7 +118,7 @@ public sealed class McpMissMessageParityPinTests
     [Fact]
     public void ThePinCoversTheSentencesThisChangeMadeShared()
     {
-        Assert.True(SharedMissFragments().Count() >= 9,
+        Assert.True(SharedMissFragments().Count() >= 11,
             "the shared-sentence pin lost entries; a sentence that stops being pinned can drift between the SKUs unnoticed");
     }
 

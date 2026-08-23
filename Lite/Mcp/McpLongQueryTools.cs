@@ -40,6 +40,11 @@ public sealed class McpLongQueryTools
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "long_query_completions")
+                    /* #2546: this collector is opt-in, so the fall-through below already sends the reader to
+                       the schedule — which is the wrong place when the collector IS enabled and its session
+                       is missing. The precondition answer names that state instead of quietly blaming a knob
+                       that is already switched on. */
+                    ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.ServerName, "long_query_completions")
                     ?? McpHelpers.Status("empty", "No long-running query completions found in the specified time range. The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data.");
             }
 
