@@ -22,6 +22,14 @@ public class DarlingPgTableBloatReaderTests
 {
     private static string Sql => DarlingPgTableBloatReader.PgTableBloatSql;
 
+    /// <summary>
+    /// The shipped SQL aligns its join columns, so a fragment typed with single spaces will not be found in
+    /// it. Assertions about STRUCTURE run against this; assertions about exact rendering keep using
+    /// <see cref="Sql"/>.
+    /// </summary>
+    private static string Squeezed =>
+        System.Text.RegularExpressions.Regex.Replace(DarlingPgTableBloatReader.PgTableBloatSql, @"\s+", " ");
+
     private static string ProbeSql => DarlingPgTableBloatReader.PgTableBloatProbeSql;
 
     // ── Scoping ──────────────────────────────────────────────────────────────────────────────────
@@ -44,11 +52,11 @@ public class DarlingPgTableBloatReaderTests
     [Fact]
     public void KeysTheSeriesOnDatabaseSchemaAndTable()
     {
-        Assert.Contains("DISTINCT ON (database_name, schema_name, table_name)", Sql, StringComparison.Ordinal);
+        Assert.Contains("DISTINCT ON (database_name, schema_name, table_name)", Squeezed, StringComparison.Ordinal);
 
         foreach (var column in new[] { "database_name", "schema_name", "table_name" })
         {
-            Assert.Contains($"e.{column} IS NOT DISTINCT FROM l.{column}", Sql, StringComparison.Ordinal);
+            Assert.Contains($"e.{column} IS NOT DISTINCT FROM l.{column}", Squeezed, StringComparison.Ordinal);
         }
     }
 
@@ -79,8 +87,8 @@ public class DarlingPgTableBloatReaderTests
     [Fact]
     public void CarriesTheTrendOnTheMeasuredSizeToo()
     {
-        Assert.Contains("heap_bytes AS first_heap_bytes", Sql, StringComparison.Ordinal);
-        Assert.Contains("bloat_bytes_estimate AS first_bloat_bytes_estimate", Sql, StringComparison.Ordinal);
+        Assert.Contains("heap_bytes AS first_heap_bytes", Squeezed, StringComparison.Ordinal);
+        Assert.Contains("bloat_bytes_estimate AS first_bloat_bytes_estimate", Squeezed, StringComparison.Ordinal);
         Assert.Contains("e.first_seen_at", Sql, StringComparison.Ordinal);
         Assert.Contains("s.sample_count", Sql, StringComparison.Ordinal);
     }

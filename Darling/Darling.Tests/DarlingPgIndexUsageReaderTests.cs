@@ -23,6 +23,14 @@ public class DarlingPgIndexUsageReaderTests
 {
     private static string Sql => DarlingPgIndexUsageReader.PgIndexUsageSql;
 
+    /// <summary>
+    /// The shipped SQL aligns its select list and its join columns into columns, so a fragment typed with
+    /// single spaces will not be found in it. Assertions about STRUCTURE run against this; assertions about
+    /// exact rendering keep using <see cref="Sql"/>.
+    /// </summary>
+    private static string Squeezed =>
+        Regex.Replace(DarlingPgIndexUsageReader.PgIndexUsageSql, @"\s+", " ");
+
     private static string ProbeSql => DarlingPgIndexUsageReader.PgIndexUsageProbeSql;
 
     // ── Scoping ──────────────────────────────────────────────────────────────────────────────────
@@ -55,15 +63,15 @@ public class DarlingPgIndexUsageReaderTests
     {
         Assert.Contains(
             "DISTINCT ON (database_name, schema_name, table_name, index_name)",
-            Sql,
+            Squeezed,
             StringComparison.Ordinal);
 
         /* IS NOT DISTINCT FROM on every join column, because database_name is nullable in the store and
            an ordinary = would silently drop those rows rather than matching them. */
         foreach (var column in new[] { "database_name", "schema_name", "table_name", "index_name" })
         {
-            Assert.Contains($"e.{column} IS NOT DISTINCT FROM l.{column}", Sql, StringComparison.Ordinal);
-            Assert.Contains($"s.{column} IS NOT DISTINCT FROM l.{column}", Sql, StringComparison.Ordinal);
+            Assert.Contains($"e.{column} IS NOT DISTINCT FROM l.{column}", Squeezed, StringComparison.Ordinal);
+            Assert.Contains($"s.{column} IS NOT DISTINCT FROM l.{column}", Squeezed, StringComparison.Ordinal);
         }
     }
 
@@ -78,7 +86,7 @@ public class DarlingPgIndexUsageReaderTests
     [Fact]
     public void ClampsTheWindowedScanCountAtZero()
     {
-        Assert.Contains("GREATEST(l.index_scans - e.first_scans, 0)", Sql, StringComparison.Ordinal);
+        Assert.Contains("GREATEST(l.index_scans - e.first_scans, 0)", Squeezed, StringComparison.Ordinal);
 
         /* The bare subtraction must not appear anywhere: it is the reverted form, and it is what produced
            the -8900. */
@@ -100,7 +108,7 @@ public class DarlingPgIndexUsageReaderTests
     {
         Assert.Contains(
             "l.stats_reset IS DISTINCT FROM e.first_stats_reset",
-            Sql,
+            Squeezed,
             StringComparison.Ordinal);
 
         /* Pinned OUT by name. This is the form that misses a first-ever reset. */
@@ -108,7 +116,7 @@ public class DarlingPgIndexUsageReaderTests
 
         /* And the timestamp has to be carried from the EARLIEST sample for the comparison to mean
            anything. */
-        Assert.Contains("stats_reset AS first_stats_reset", Sql, StringComparison.Ordinal);
+        Assert.Contains("stats_reset AS first_stats_reset", Squeezed, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -120,8 +128,8 @@ public class DarlingPgIndexUsageReaderTests
     [Fact]
     public void ReportsBothTheLifetimeAndTheWindowedScanCount()
     {
-        Assert.Contains("l.index_scans                                        AS total_scans", Sql, StringComparison.Ordinal);
-        Assert.Contains("AS scans_in_window", Sql, StringComparison.Ordinal);
+        Assert.Contains("l.index_scans AS total_scans", Squeezed, StringComparison.Ordinal);
+        Assert.Contains("AS scans_in_window", Squeezed, StringComparison.Ordinal);
     }
 
     // ── Ordering ─────────────────────────────────────────────────────────────────────────────────
@@ -179,7 +187,7 @@ public class DarlingPgIndexUsageReaderTests
     {
         Assert.Contains("e.first_seen_at", Sql, StringComparison.Ordinal);
         Assert.Contains("s.sample_count", Sql, StringComparison.Ordinal);
-        Assert.Contains("count(*) AS sample_count", Sql, StringComparison.Ordinal);
+        Assert.Contains("count(*) AS sample_count", Squeezed, StringComparison.Ordinal);
     }
 
     // ── The honest-empty denominator ─────────────────────────────────────────────────────────────
