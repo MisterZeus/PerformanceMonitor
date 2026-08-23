@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Linq;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -143,7 +144,8 @@ public class DarlingPgTableBloatReaderTests
         long deadTuples = 500,
         long modsSinceAnalyze = 0,
         bool estimateUnavailable = false,
-        bool pgstattupleAvailable = true) =>
+        bool pgstattupleAvailable = true,
+        decimal bloatPct = 75.14m) =>
         new(
             DatabaseName: "appdb",
             SchemaName: "public",
@@ -161,7 +163,7 @@ public class DarlingPgTableBloatReaderTests
             EstimatedHeapPages: 1_715,
             FillFactor: 100,
             BloatBytesEstimate: 42_467_328,
-            BloatPctEstimate: 75.14m,
+            BloatPctEstimate: bloatPct,
             EstimateUnavailable: estimateUnavailable,
             AlignmentBytes: 8,
             PgstattupleAvailable: pgstattupleAvailable,
@@ -413,5 +415,120 @@ public class DarlingPgTableBloatReaderTests
         Assert.Equal(
             DarlingPgTableBloatReader.StaleStatisticsChurnRatio,
             DarlingMcpPgTableBloatTools.StaleStatisticsChurnRatio);
+    }
+
+    // ── The zero-live-tuples gap (review finding) ────────────────────────────────────────────────
+
+    /// <summary>
+    /// A table analyzed while EMPTY and then written to must not publish an estimate. <c>live_tuples = 0</c>
+    /// is a real state distinct from the <c>-1</c> never-analyzed sentinel — it is what a table analyzed
+    /// just after a TRUNCATE or bulk delete records — and the first draft's <c>&gt; 0</c> guard
+    /// short-circuited the whole staleness clause there, so a row anchored to a stale zero row count
+    /// published with no suppression signal at all.
+    ///
+    /// <para>That is the false-confidence failure the function exists to prevent, reached through the one
+    /// input value the guard did not cover, and it lands in exactly the "autovacuum has fallen behind"
+    /// shape this feature is built for. Proven red by construction: with <c>&gt; 0</c> this case returns
+    /// null.</para>
+    /// </summary>
+    [Fact]
+    public void SuppressesATableAnalyzedWhileEmptyAndThenWrittenTo()
+    {
+        var reason = DarlingMcpPgTableBloatTools.EstimateSuppressionReason(
+            Row(liveTuples: 0, deadTuples: 0, modsSinceAnalyze: 400_000));
+
+        Assert.NotNull(reason);
+        Assert.Contains("STALE", reason, StringComparison.Ordinal);
+
+        Assert.True(DarlingPgTableBloatReader.EstimateIsUnpublishable(
+            Row(liveTuples: 0, deadTuples: 0, modsSinceAnalyze: 400_000)));
+    }
+
+    /// <summary>
+    /// The control, so the widened guard does not simply suppress everything at zero: a genuinely empty
+    /// table with NO modifications since its analyze still publishes. Without this the fix above could be
+    /// satisfied by suppressing every zero-row table, which would be a different wrong answer.
+    /// </summary>
+    [Fact]
+    public void AnEmptyTableWithNoModificationsStillPublishes()
+    {
+        Assert.Null(DarlingMcpPgTableBloatTools.EstimateSuppressionReason(
+            Row(liveTuples: 0, deadTuples: 0, modsSinceAnalyze: 0)));
+    }
+
+    // ── The sort key (review finding) ────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The ORDER BY accounts for ALL THREE suppression reasons, not just <c>estimate_unavailable</c>.
+    ///
+    /// <para>A row suppressed for stale statistics or for never having been analyzed still carries an
+    /// arbitrarily large and untrustworthy <c>bloat_bytes_estimate</c> — the measured stale case was
+    /// 94.28% — so ordering on the flag alone let precisely those rows take the top of a LIMIT that reads
+    /// as a work queue, which is the outcome the ordering exists to prevent.</para>
+    ///
+    /// <para>This is a text pin because an ORDER BY cannot call into C#, so the SQL necessarily carries a
+    /// twin of <see cref="DarlingPgTableBloatReader.EstimateIsUnpublishable"/>. Dropping any one condition
+    /// turns this red rather than quietly re-ranking.</para>
+    /// </summary>
+    [Fact]
+    public void TheSortKeyCoversEverySuppressionReason()
+    {
+        var order = Squeezed[Squeezed.LastIndexOf("ORDER BY", StringComparison.Ordinal)..];
+
+        Assert.Contains("l.estimate_unavailable", order, StringComparison.Ordinal);
+        Assert.Contains("l.live_tuples < 0", order, StringComparison.Ordinal);
+        Assert.Contains("l.mods_since_analyze > l.live_tuples", order, StringComparison.Ordinal);
+
+        /* And the zero case, which is the whole point of the sibling fix above: >= rather than >. */
+        Assert.Contains("l.live_tuples >= 0", order, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The ratio written into the ORDER BY is the shared one. A raw string literal cannot be spliced, so
+    /// the number is inlined in the SQL; this is what stops it drifting after somebody tunes the constant
+    /// and misses the query.
+    /// </summary>
+    [Fact]
+    public void TheSortKeyUsesTheSharedChurnRatio()
+    {
+        Assert.Equal(
+            DarlingPgTableBloatReader.StaleStatisticsChurnRatio,
+            double.Parse(DarlingPgTableBloatReader.StaleStatisticsChurnRatioSql, CultureInfo.InvariantCulture));
+
+        Assert.Contains(
+            "l.live_tuples * " + DarlingPgTableBloatReader.StaleStatisticsChurnRatioSql,
+            Squeezed,
+            StringComparison.Ordinal);
+    }
+
+    // ── Severity, and web/desktop parity (review finding) ────────────────────────────────────────
+
+    /// <summary>
+    /// The read hands the browser a SERVER-computed band, because the web renderer never re-derives one —
+    /// so without this the web grid could not colour a row at all and the two front ends disagreed about
+    /// which rows look urgent.
+    ///
+    /// <para><c>Unknown</c> for a suppressed estimate is the load-bearing case rather than a fallback: the
+    /// row has no trustworthy number, so giving it a severity would assert exactly what the suppression
+    /// denies. It matches the neutral grey the WPF grid paints for the same state.</para>
+    /// </summary>
+    [Fact]
+    public void TheSeverityBandNeverColoursASuppressedRow()
+    {
+        Assert.Equal("Unknown", DarlingMcpPgTableBloatTools.BloatSeverity(Row(estimateUnavailable: true)));
+        Assert.Equal("Unknown", DarlingMcpPgTableBloatTools.BloatSeverity(
+            Row(liveTuples: 150_000, modsSinceAnalyze: 300_000)));
+        Assert.Equal("Unknown", DarlingMcpPgTableBloatTools.BloatSeverity(Row(liveTuples: -1)));
+    }
+
+    /// <summary>A published estimate bands by its percentage, on the same 50/20 boundaries the WPF grid
+    /// paints red at.</summary>
+    [Fact]
+    public void TheSeverityBandTracksAPublishedEstimate()
+    {
+        Assert.Equal("Critical", DarlingMcpPgTableBloatTools.BloatSeverity(Row()));
+        Assert.Equal("Healthy", DarlingMcpPgTableBloatTools.BloatSeverity(Row(bloatPct: 5m)));
+        Assert.Equal("Warning", DarlingMcpPgTableBloatTools.BloatSeverity(Row(bloatPct: 35m)));
+        Assert.Equal("Critical", DarlingMcpPgTableBloatTools.BloatSeverity(Row(bloatPct: 50m)));
     }
 }

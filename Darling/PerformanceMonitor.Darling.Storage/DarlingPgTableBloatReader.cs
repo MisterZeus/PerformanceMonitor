@@ -139,13 +139,34 @@ public static class DarlingPgTableBloatReader
           AND s.schema_name   IS NOT DISTINCT FROM l.schema_name
           AND s.table_name    IS NOT DISTINCT FROM l.table_name
         /* Unusable estimates sort last rather than being filtered out - see the remarks. Within each
-           group, biggest estimated waste first. */
+           group, biggest estimated waste first.
+
+           ALL THREE suppression reasons are in the sort key, not just estimate_unavailable. A row
+           suppressed for stale statistics or for never having been analyzed carries an arbitrarily large
+           and untrustworthy bloat_bytes_estimate - the 81-percentage-point case measured 94.28% - so
+           ordering on the flag alone let exactly those rows take the top of a LIMIT that reads as a work
+           queue, which is the outcome this ordering exists to prevent.
+
+           This is the SQL twin of EstimateIsUnpublishable, and the duplication is forced: an ORDER BY
+           cannot call into C#. TheSortKeyCoversEverySuppressionReason pins the two together by asserting
+           each condition appears here, so dropping one goes red rather than quietly re-ranking. */
         ORDER BY
-            l.estimate_unavailable ASC,
+            (   l.estimate_unavailable
+             OR l.live_tuples < 0
+             OR (l.live_tuples >= 0 AND l.mods_since_analyze > l.live_tuples * 0.2)
+            ) ASC,
             l.bloat_bytes_estimate DESC,
             l.heap_bytes DESC
         LIMIT $4
         """;
+
+    /// <summary>
+    /// The churn ratio as it is WRITTEN INTO the ORDER BY above. A raw string literal cannot be spliced,
+    /// so the number is inlined there and this names what it must equal;
+    /// <c>TheSortKeyUsesTheSharedChurnRatio</c> asserts the SQL actually contains it, which is what stops
+    /// the two drifting after somebody tunes <see cref="StaleStatisticsChurnRatio"/> and misses the query.
+    /// </summary>
+    public const string StaleStatisticsChurnRatioSql = "0.2";
 
     public static async Task<List<PgTableBloatRow>> GetPgTableBloatAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
@@ -250,6 +271,18 @@ public static class DarlingPgTableBloatReader
     /// <item>Stale widths — see <see cref="StaleStatisticsChurnRatio"/>. The 81-percentage-point case, and
     /// the only one of the three the <c>estimate_unavailable</c> flag does NOT catch.</item>
     /// </list>
+    ///
+    /// <para><b>The churn comparison is <c>&gt;= 0</c>, not <c>&gt; 0</c>, and the difference is a real
+    /// gap rather than a style choice.</b> <c>live_tuples = 0</c> is a genuine state distinct from the
+    /// <c>-1</c> "never analyzed" sentinel: it means the last ANALYZE really did record zero rows, which is
+    /// what a table analyzed just after a TRUNCATE or a bulk delete looks like. Guarding on <c>&gt; 0</c>
+    /// short-circuits the whole clause there, so a table analyzed while EMPTY and then heavily inserted
+    /// into — a shape the "autovacuum has fallen behind" scenarios this feature exists for produce
+    /// routinely — would publish an estimate anchored to a stale zero row count with no suppression signal
+    /// at all. That is the false-confidence failure this function exists to prevent, reached through the
+    /// one input value the guard did not cover. At zero the comparison reduces to "any modification since
+    /// the last analyze suppresses", which is correct: with no live rows recorded, ANY write makes the row
+    /// count stale by definition.</para>
     /// </summary>
     public static bool EstimateIsUnpublishable(PgTableBloatRow row)
     {
@@ -260,7 +293,7 @@ public static class DarlingPgTableBloatReader
 
         return row.EstimateUnavailable
             || row.LiveTuples < 0
-            || (row.LiveTuples > 0 && row.ModsSinceAnalyze > row.LiveTuples * StaleStatisticsChurnRatio);
+            || (row.LiveTuples >= 0 && row.ModsSinceAnalyze > row.LiveTuples * StaleStatisticsChurnRatio);
     }
 
     public static async Task<PgTableBloatProbe> ProbePgTableBloatAsync(

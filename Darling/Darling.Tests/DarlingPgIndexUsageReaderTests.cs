@@ -377,4 +377,34 @@ public class DarlingPgIndexUsageReaderTests
         Assert.Contains("VACUUM", cost, StringComparison.Ordinal);
         Assert.Contains("write", cost, StringComparison.OrdinalIgnoreCase);
     }
+
+    // ── Severity, and web/desktop parity (review finding) ────────────────────────────────────────
+
+    /// <summary>
+    /// The read hands the browser a SERVER-computed band, because the web renderer never re-derives one —
+    /// without it the web grid could not colour a row and the two front ends disagreed about which rows
+    /// look urgent.
+    ///
+    /// <para>The ranking mirrors the WPF row-style triggers exactly, including the case that is easiest to
+    /// get wrong: an index we have not watched for two samples is <b>Healthy</b>, not Warning.
+    /// Too-early-to-say must not look like a finding, and it is the same reason the droppability sentence
+    /// refuses a disuse claim there.</para>
+    /// </summary>
+    [Fact]
+    public void TheSeverityBandMirrorsTheDesktopHighlights()
+    {
+        Assert.Equal("Critical", DarlingMcpPgIndexUsageTools.IndexSeverity(Row(valid: false)));
+        Assert.Equal("Warning", DarlingMcpPgIndexUsageTools.IndexSeverity(Row()));
+        Assert.Equal("Healthy", DarlingMcpPgIndexUsageTools.IndexSeverity(Row(sampleCount: 1)));
+
+        /* Every structural blocker keeps the row Healthy: a constraint index reporting zero scans is the
+           normal state, not a finding, and colouring it amber is how somebody ends up dropping it. */
+        Assert.Equal("Healthy", DarlingMcpPgIndexUsageTools.IndexSeverity(Row(primaryKey: true, unique: true, supportsConstraint: true)));
+        Assert.Equal("Healthy", DarlingMcpPgIndexUsageTools.IndexSeverity(Row(supportsConstraint: true)));
+        Assert.Equal("Healthy", DarlingMcpPgIndexUsageTools.IndexSeverity(Row(unique: true)));
+        Assert.Equal("Healthy", DarlingMcpPgIndexUsageTools.IndexSeverity(Row(replicaIdentity: true)));
+
+        /* INVALID outranks every blocker, matching the XAML's severity ordering. */
+        Assert.Equal("Critical", DarlingMcpPgIndexUsageTools.IndexSeverity(Row(valid: false, primaryKey: true, supportsConstraint: true)));
+    }
 }

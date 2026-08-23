@@ -159,6 +159,29 @@ public sealed class DarlingMcpPgTableBloatTools
              + "usually the larger share on a table that has been churning for a while.";
     }
 
+    /// <summary>
+    /// The row's severity band, computed HERE rather than in the browser — the web renderer's rule is that
+    /// it never re-derives a band, so a grid can only colour a row if the read hands it one. This is what
+    /// gives the web dashboard the same visual cue the WPF grid gets from its row-style triggers; without
+    /// it the two front ends disagree about which rows look urgent, which was a review finding.
+    ///
+    /// <para><c>Unknown</c> for a SUPPRESSED estimate, deliberately, and it is the whole reason this is not
+    /// a plain percentage band: the row has no trustworthy number, so colouring it by severity would assert
+    /// exactly what the suppression denies. It matches the neutral grey the WPF grid paints for the same
+    /// state.</para>
+    /// </summary>
+    internal static string BloatSeverity(DarlingPgTableBloatReader.PgTableBloatRow r)
+    {
+        if (DarlingPgTableBloatReader.EstimateIsUnpublishable(r))
+        {
+            return "Unknown";
+        }
+
+        return r.BloatPctEstimate >= 50m ? "Critical"
+             : r.BloatPctEstimate >= 20m ? "Warning"
+             : "Healthy";
+    }
+
     /// <summary>Bytes for PROSE only; the payload carries raw <c>_bytes</c> and a numeric <c>_mb</c>.</summary>
     internal static string DescribeBytes(long bytes)
     {
@@ -241,6 +264,9 @@ public sealed class DarlingMcpPgTableBloatTools
                     database = r.DatabaseName,
                     schema = r.SchemaName,
                     table = r.TableName,
+                    /* Server-computed, because the browser never re-derives a band. Drives the web grid's
+                       cell colour and matches what the WPF row-style triggers paint. */
+                    severity = BloatSeverity(r),
 
                     /* MEASURED, always reported. These are pg_relation_size readings and are true whatever
                        the statistics or the grants look like. */

@@ -181,7 +181,13 @@ SELECT
     CASE WHEN s.heap_pages > 0 AND s.heap_pages > s.estimated_heap_pages
          THEN round(100 * (s.heap_pages - s.estimated_heap_pages) / s.heap_pages::numeric, 2)
          ELSE 0::numeric END                                             AS bloat_pct_estimate,
-    s.estimate_unavailable,
+    /* A FOURTH way the estimate has no basis, and it has to be OR-ed in HERE rather than in the inner
+       query because that is where estimated_heap_pages first exists. When every column of a table has a
+       zero avg_width the tuple size computes to 0, the NULLIF guards fire, estimated_heap_pages comes back
+       NULL, and the two CASE expressions above resolve to a confident 0%% bloat - an estimate presented
+       as a measurement, which is the one thing this collector must never do. Probably unreachable behind
+       the 1 MB size floor, but probably-unreachable is not the standard the flag is held to. */
+    (s.estimate_unavailable OR s.estimated_heap_pages IS NULL)      AS estimate_unavailable,
     s.alignment_bytes,
     s.pgstattuple_available
 FROM
@@ -269,6 +275,8 @@ FROM
                 (   bool_or(att.atttypid = 'pg_catalog.name'::regtype)
                  OR count(sts.attname) <> count(att.attname)
                  OR MAX(tbl.reltuples) < 0 )                             AS estimate_unavailable,
+                /* A fourth condition - estimated_heap_pages IS NULL - is OR-ed into this column in the
+                   OUTERMOST select, where that value first exists. */
                 EXISTS (SELECT 1 FROM pg_catalog.pg_extension AS e
                         WHERE e.extname = 'pgstattuple')                 AS pgstattuple_available
             FROM pg_catalog.pg_attribute AS att

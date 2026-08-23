@@ -2841,6 +2841,11 @@ const PG_BLOAT_COLUMNS = [
   { key: "database", label: "Database" },
   { key: "schema", label: "Schema" },
   { key: "table", label: "Table" },
+  /* sevKey, not statusSev: the band is SERVER-computed (the browser never re-derives one) and it is what
+     gives this grid the cue the WPF grid gets from its row-style triggers. A suppressed row comes back
+     "Unknown" rather than a severity, so it renders neutral - colouring it would assert the very thing the
+     suppression denies. */
+  { key: "severity", label: "Severity", sevKey: "severity" },
   { key: "heap_mb", label: "Heap", format: "mb" },
   { key: "bloat_mb_estimate", label: "Bloat (est.)", format: "mb" },
   { key: "bloat_pct_estimate", label: "Bloat % (est.)", format: "num2" },
@@ -2872,6 +2877,10 @@ const PG_INDEX_USAGE_COLUMNS = [
   { key: "schema", label: "Schema" },
   { key: "table", label: "Table" },
   { key: "index", label: "Index" },
+  /* Server-computed, same as the bloat grid: INVALID is Critical, an unscanned index with no structural
+     blocker is Warning, and an index we have not watched for two samples is Healthy rather than Warning -
+     too-early-to-say must not look like a finding. */
+  { key: "severity", label: "Severity", sevKey: "severity" },
   { key: "index_mb", label: "Size", format: "mb" },
   { key: "scans_in_window", label: "Scans in Window", format: "int" },
   { key: "total_scans_since_stats_reset", label: "Lifetime Scans", format: "int" },

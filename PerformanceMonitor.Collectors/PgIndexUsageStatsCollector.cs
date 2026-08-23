@@ -42,7 +42,11 @@ namespace PerformanceMonitor.Collectors;
 ///
 /// <para>Runs once per database: <c>pg_stat_user_indexes</c> shows only the connected database's indexes,
 /// with no cross-database equivalent — the same constraint that makes
-/// <see cref="PgAutovacuumStatsCollector"/> a fan-out, and the reason this shares its hourly cadence.</para>
+/// <see cref="PgAutovacuumStatsCollector"/> a fan-out. The CADENCE, though, is inherited from
+/// <c>index_object_stats</c> — the SQL Server collector answering the same question — and is DAILY rather
+/// than that sibling's hourly: "has anything scanned this index" is a structural question about a schema,
+/// not a rate, so an hourly sample would re-record the same catalog facts 24 times a day and pay 24x the
+/// fan-out connections to do it.</para>
 /// </summary>
 public sealed class PgIndexUsageStatsCollector : PostgresCollectorDefinitionBase<PgIndexUsageStatsCollector.Row>
 {
@@ -220,8 +224,9 @@ ORDER BY s.index_scans ASC, s.index_bytes DESC";
     /// <summary>
     /// <c>pg_stat_user_indexes</c> is scoped to the connected database and PostgreSQL has no cross-database
     /// read, so this is necessarily a fan-out — the second one, after
-    /// <see cref="PgAutovacuumStatsCollector"/>, and it shares that collector's hourly cadence for the same
-    /// reason: on PostgreSQL a fan-out is one CONNECTION per database per cycle.
+    /// <see cref="PgAutovacuumStatsCollector"/>. On PostgreSQL a fan-out is one CONNECTION per database per
+    /// cycle, which is why the schedule is DAILY here rather than that collector's hourly; see the cadence
+    /// note in the class remarks.
     /// </summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => true;
 

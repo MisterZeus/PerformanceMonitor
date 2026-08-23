@@ -302,7 +302,7 @@ Through MCP, one tool per collector:
   replication slots is the common one, and it is good news.
 - **No rows, collector never ran** — gated off (step 3) or failing (step 9).
 
-Two results that look like bugs and are not:
+Four results that look like bugs and are not:
 
 - `get_pg_io_stats` on Aurora reports **write counters not tracked**. Correct: Aurora backends do not
   write data files, the storage layer does, so those columns are NULL — which is why the tool reports
@@ -312,6 +312,10 @@ Two results that look like bugs and are not:
 - `get_pg_table_bloat` reporting most of its rows with a **suppressed** estimate is almost always a
   permissions gap rather than a missing ANALYZE, and it is the one step in this runbook that `GRANT
   pg_monitor` alone does not satisfy. See the note below.
+- `get_pg_database_stats` reporting `stats_reset_count` above zero is the tool working, not a fault. The
+  counters it reads are cumulative since the last `pg_stat_reset()`, so a reset zeroes them; the window
+  totals become LOWER BOUNDS and the tool says so rather than letting the reset surface as a negative
+  rate or a spike. A crash restart shows the same way.
 
 ### The one grant `pg_monitor` does not cover
 
@@ -341,10 +345,6 @@ byte-identical to a superuser's. This is a genuine widening of what the monitori
 a decision to take deliberately rather than a step to run — every other collector works without it, and a
 fleet that does not want it simply gets measured sizes and dead-tuple counts from this surface instead of
 an estimate.
-- `get_pg_database_stats` reporting `stats_reset_count` above zero is the tool working, not a fault. The
-  counters it reads are cumulative since the last `pg_stat_reset()`, so a reset zeroes them; the window
-  totals become LOWER BOUNDS and the tool says so rather than letting the reset surface as a negative
-  rate or a spike. A crash restart shows the same way.
 
 ## 9. Alerting
 

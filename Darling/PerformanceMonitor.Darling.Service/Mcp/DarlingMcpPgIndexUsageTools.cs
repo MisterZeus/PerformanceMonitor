@@ -149,6 +149,30 @@ public sealed class DarlingMcpPgIndexUsageTools
     }
 
     /// <summary>
+    /// The row's severity band, computed HERE rather than in the browser — the web renderer never
+    /// re-derives a band, so a grid can only colour a row if the read hands it one. This is what gives the
+    /// web dashboard the cue the WPF grid gets from its row-style triggers.
+    ///
+    /// <para>The ranking mirrors the desktop's exactly: INVALID is <c>Critical</c> (the planner will never
+    /// use it while writes still maintain it — the one state where "unused" and "safe to remove" coincide),
+    /// an unscanned index with no structural blocker and enough history is <c>Warning</c> (a candidate,
+    /// never a conclusion), and everything else is <c>Healthy</c>. An index we have not watched long enough
+    /// is Healthy rather than Warning: too-early-to-say must not look like a finding.</para>
+    /// </summary>
+    internal static string IndexSeverity(DarlingPgIndexUsageReader.PgIndexUsageRow r)
+    {
+        if (!r.IsValid)
+        {
+            return "Critical";
+        }
+
+        var blocked = r.IsPrimaryKey || r.SupportsConstraint || r.IsUnique || r.IsReplicaIdentity;
+        return !blocked && r.ScansInWindow == 0 && r.SampleCount >= MinimumSamplesForADisuseClaim
+            ? "Warning"
+            : "Healthy";
+    }
+
+    /// <summary>
     /// Bytes rendered for PROSE only. The payload carries the raw <c>_bytes</c> plus a numeric <c>_mb</c>,
     /// per the house pattern (<c>get_pg_autovacuum_health</c>'s <c>total_bytes</c>/<c>total_gb</c>); this
     /// exists so a finding sentence can say "6.6 MB" rather than a nine-digit number nobody reads.
@@ -226,6 +250,9 @@ public sealed class DarlingMcpPgIndexUsageTools
                 schema = r.SchemaName,
                 table = r.TableName,
                 index = r.IndexName,
+                /* Server-computed, because the browser never re-derives a band. Drives the web grid's cell
+                   colour and matches what the WPF row-style triggers paint. */
+                severity = IndexSeverity(r),
                 index_bytes = r.IndexBytes,
                 index_mb = r.IndexBytes >= 0 ? Math.Round(r.IndexBytes / 1024.0 / 1024, 2) : (double?)null,
                 table_bytes = r.TableBytes,
