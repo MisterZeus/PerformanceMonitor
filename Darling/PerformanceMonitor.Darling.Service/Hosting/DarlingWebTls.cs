@@ -254,19 +254,7 @@ internal static class DarlingWebTls
                 ex);
         }
 
-        /* The leaf is the one holding the private key. A bundle's ordering is not guaranteed, so this must be
-           a search rather than [0] — and a bundle with no private key at all cannot serve TLS, which is worth
-           saying plainly instead of failing later at the handshake. */
-        X509Certificate2? leaf = null;
-        foreach (var candidate in bundle)
-        {
-            if (candidate.HasPrivateKey)
-            {
-                leaf = candidate;
-                break;
-            }
-        }
-
+        var leaf = FindLeaf(bundle);
         if (leaf is null)
         {
             foreach (var candidate in bundle)
@@ -340,6 +328,60 @@ internal static class DarlingWebTls
         }
 
         return new LoadedCertificate(leaf, IntermediatesOf(bundle, leaf));
+    }
+
+    /// <summary>
+    /// The end-entity certificate in a PKCS#12 bundle, or null when there is none to serve.
+    ///
+    /// <para><b>"The first one with a private key" is not good enough</b>, which a test caught rather than a
+    /// review: a bundle exported wholesale from a CA machine can carry keys for the intermediate and even the
+    /// root, and that rule then happily serves the ROOT as the server certificate. Position is no help either
+    /// — PKCS#12 ordering is not a contract.</para>
+    ///
+    /// <para>So the leaf is identified by what actually makes it a leaf: it holds a private key AND it is the
+    /// terminal node — no other certificate in the bundle was issued by it. Compared on the raw encoded
+    /// names, never the rendered strings, because X.500 name formatting is not canonical.</para>
+    ///
+    /// <para>The fallback to "first with a key" exists for a bundle that defeats the rule (a cross-signed
+    /// oddity, or a chain whose links are not all present). Serving something the operator supplied and
+    /// letting the handshake or the SAN warning report it beats refusing to start over a shape we did not
+    /// anticipate.</para>
+    /// </summary>
+    private static X509Certificate2? FindLeaf(X509Certificate2Collection bundle)
+    {
+        X509Certificate2? firstWithKey = null;
+
+        foreach (var candidate in bundle)
+        {
+            if (!candidate.HasPrivateKey)
+            {
+                continue;
+            }
+
+            firstWithKey ??= candidate;
+
+            var issuedSomething = false;
+            foreach (var other in bundle)
+            {
+                if (ReferenceEquals(other, candidate))
+                {
+                    continue;
+                }
+
+                if (other.IssuerName.RawData.AsSpan().SequenceEqual(candidate.SubjectName.RawData))
+                {
+                    issuedSomething = true;
+                    break;
+                }
+            }
+
+            if (!issuedSomething)
+            {
+                return candidate;
+            }
+        }
+
+        return firstWithKey;
     }
 
     /// <summary>

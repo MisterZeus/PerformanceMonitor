@@ -296,11 +296,16 @@ public sealed class DarlingWebTlsTests
     }
 
     [Fact]
-    public void Load_Pfx_CarriesTheIntermediate_AndFindsTheLeafByItsKey()
+    public void Load_Pfx_CarriesTheIntermediate_AndPicksTheLeafNotAnIssuer()
     {
         /* A PKCS#12 bundle routinely holds the whole chain, and LoadPkcs12FromFile returns exactly one
-           certificate of it - silently, with no ordering guarantee about which. The leaf is identified by
-           holding the private key rather than by position, because position is not a contract. */
+           certificate of it - silently, with no ordering guarantee about which.
+
+           This fixture gives the root and the intermediate private keys too, which is what a bundle exported
+           wholesale from a CA machine looks like. That is deliberate: the first version of the loader picked
+           "the first certificate with a private key" and this test caught it serving the ROOT as the server
+           certificate. Holding a key is necessary but not sufficient - the leaf is the terminal node, the one
+           that issued nothing else in the bundle. */
         using var temp = new TempDir();
         var (root, intermediate, leaf, leafKey) = Chain();
         using (root)
