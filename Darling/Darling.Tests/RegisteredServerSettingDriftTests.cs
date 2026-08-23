@@ -8,6 +8,8 @@
 
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
+using System.Text.Json.Serialization;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Notifications;
@@ -70,6 +72,10 @@ public sealed class RegisteredServerSettingDriftTests
         return copy;
     }
 
+    /// <summary>A registry ROW: the settings plus the control plane's enabled flag (default: enabled).</summary>
+    private static StoreConfigProvider.RegisteredServer Registered(MonitoredServer store, bool isEnabled = true) =>
+        new(store, isEnabled);
+
     private static IReadOnlyList<StoreConfigProvider.SettingDrift> Compare(
         MonitoredServer file, MonitoredServer store) =>
         StoreConfigProvider.CompareServerSettings(file, store);
@@ -118,7 +124,7 @@ public sealed class RegisteredServerSettingDriftTests
         file.MonthlyCostUsd = 1200m;
 
         Assert.Empty(Compare(file, StoreRow(file)));
-        Assert.Empty(StoreConfigProvider.DescribeSettingDrift(new[] { file }, new[] { StoreRow(file) }));
+        Assert.Empty(StoreConfigProvider.DescribeSettingDrift(new[] { file }, new[] { Registered(StoreRow(file)) }));
     }
 
     /* ---------------- the normalization hazards, one test per fold ---------------- */
@@ -338,7 +344,7 @@ public sealed class RegisteredServerSettingDriftTests
 
         /* And nothing about a password can reach the rendered line even when other fields DO drift. */
         file.TrustServerCertificate = !store.TrustServerCertificate;
-        var drifted = StoreConfigProvider.DescribeSettingDrift(new[] { file }, new[] { store });
+        var drifted = StoreConfigProvider.DescribeSettingDrift(new[] { file }, new[] { Registered(store) });
         var rendered = StoreConfigProvider.FormatSettingDrift(drifted, 10);
 
         Assert.DoesNotContain(plaintext, rendered, System.StringComparison.Ordinal);
@@ -421,7 +427,7 @@ public sealed class RegisteredServerSettingDriftTests
         file.Name = "Alpha";
 
         var drift = Assert.Single(Compare(file, store));
-        Assert.Equal("displayName", drift.Field);
+        Assert.Equal("name", drift.Field);
         Assert.Equal("Alpha", drift.FileValue);
         Assert.Equal("alpha", drift.StoreValue);
         Assert.False(drift.AffectsConnection);
@@ -453,7 +459,7 @@ public sealed class RegisteredServerSettingDriftTests
         var file = FileEntry("alpha", "alpha-new-host");
         Assert.NotEqual(file.ServerId, store.ServerId);
 
-        var drifted = Assert.Single(StoreConfigProvider.DescribeSettingDrift(new[] { file }, new[] { store }));
+        var drifted = Assert.Single(StoreConfigProvider.DescribeSettingDrift(new[] { file }, new[] { Registered(store) }));
         Assert.Equal("alpha", drifted.Server);
         var host = Assert.Single(drifted.Fields);
         Assert.Equal("host", host.Field);
@@ -476,7 +482,7 @@ public sealed class RegisteredServerSettingDriftTests
         var file = FileEntry("reporting", "reporting-c");
         file.TrustServerCertificate = true;
 
-        Assert.Empty(StoreConfigProvider.DescribeSettingDrift(new[] { file }, new[] { first, second }));
+        Assert.Empty(StoreConfigProvider.DescribeSettingDrift(new[] { file }, new[] { Registered(first), Registered(second) }));
     }
 
     /// <summary>
@@ -491,7 +497,7 @@ public sealed class RegisteredServerSettingDriftTests
         var one = FileEntry("reporting", "reporting-b");
         var two = FileEntry("reporting", "reporting-c");
 
-        Assert.Empty(StoreConfigProvider.DescribeSettingDrift(new[] { one, two }, new[] { store }));
+        Assert.Empty(StoreConfigProvider.DescribeSettingDrift(new[] { one, two }, new[] { Registered(store) }));
     }
 
     /// <summary>
@@ -512,7 +518,7 @@ public sealed class RegisteredServerSettingDriftTests
 
         Assert.Equal(one.ServerId, two.ServerId);
         Assert.Equal(store.ServerId, one.ServerId);
-        Assert.Empty(StoreConfigProvider.DescribeSettingDrift(new[] { one, two }, new[] { store }));
+        Assert.Empty(StoreConfigProvider.DescribeSettingDrift(new[] { one, two }, new[] { Registered(store) }));
     }
 
     /// <summary>
@@ -527,7 +533,7 @@ public sealed class RegisteredServerSettingDriftTests
         var added = FileEntry("beta", "beta-host");
         added.TrustServerCertificate = true;
 
-        Assert.Empty(StoreConfigProvider.DescribeSettingDrift(new[] { added }, new[] { registered }));
+        Assert.Empty(StoreConfigProvider.DescribeSettingDrift(new[] { added }, new[] { Registered(registered) }));
     }
 
     /// <summary>Several servers drift at once — the ordinary case on a fleet, not an exotic one.</summary>
@@ -537,7 +543,7 @@ public sealed class RegisteredServerSettingDriftTests
         var alpha = FileEntry("alpha", "alpha-host");
         var beta = FileEntry("beta", "beta-host");
         var gamma = FileEntry("gamma", "gamma-host");
-        var store = new[] { StoreRow(alpha), StoreRow(beta), StoreRow(gamma) };
+        var store = new[] { Registered(StoreRow(alpha)), Registered(StoreRow(beta)), Registered(StoreRow(gamma)) };
 
         alpha.TrustServerCertificate = true;
         gamma.EncryptMode = "Strict";
@@ -562,7 +568,7 @@ public sealed class RegisteredServerSettingDriftTests
         file.TrustServerCertificate = true;
 
         var rendered = StoreConfigProvider.FormatSettingDrift(
-            StoreConfigProvider.DescribeSettingDrift(new[] { file }, new[] { store }), 10);
+            StoreConfigProvider.DescribeSettingDrift(new[] { file }, new[] { Registered(store) }), 10);
 
         Assert.Equal("pgtarget: trustServerCertificate (file=true, store=false)", rendered);
     }
@@ -576,11 +582,11 @@ public sealed class RegisteredServerSettingDriftTests
     public void TheListingTruncatesAndCountsTheRemainder()
     {
         var file = new List<MonitoredServer>();
-        var store = new List<MonitoredServer>();
+        var store = new List<StoreConfigProvider.RegisteredServer>();
         for (int i = 0; i < 12; i++)
         {
             var entry = FileEntry($"server{i:00}", $"host{i:00}");
-            store.Add(StoreRow(entry));
+            store.Add(Registered(StoreRow(entry)));
             entry.TrustServerCertificate = true;
             file.Add(entry);
         }
@@ -619,11 +625,147 @@ public sealed class RegisteredServerSettingDriftTests
     [Fact]
     public void NullAndEmptyInputsAreNotAnError()
     {
-        Assert.Empty(StoreConfigProvider.DescribeSettingDrift(null, new List<MonitoredServer>()));
+        Assert.Empty(StoreConfigProvider.DescribeSettingDrift(null, new List<StoreConfigProvider.RegisteredServer>()));
         Assert.Empty(StoreConfigProvider.DescribeSettingDrift(new List<MonitoredServer>(), null));
-        Assert.Empty(StoreConfigProvider.DescribeSettingDrift(new List<MonitoredServer>(), new List<MonitoredServer>()));
+        Assert.Empty(StoreConfigProvider.DescribeSettingDrift(new List<MonitoredServer>(), new List<StoreConfigProvider.RegisteredServer>()));
         Assert.Empty(StoreConfigProvider.CompareServerSettings(null!, new MonitoredServer()));
         Assert.Empty(StoreConfigProvider.CompareServerSettings(new MonitoredServer(), null!));
         Assert.Equal("", StoreConfigProvider.FormatSettingDrift(new List<StoreConfigProvider.ServerSettingDrift>(), 10));
+    }
+    /* ---------------- a paused server is a different sentence ---------------- */
+
+    /// <summary>
+    /// Raised in review on #2556. A control-plane-DISABLED server is still registered, so it still pairs and
+    /// its drift is still real — but "the registry is what the service uses" is not a true sentence about a
+    /// server nothing is connecting to. It is reported on its own line, at Information, which is the same
+    /// two-line shape cause A already uses for "never monitored" versus "deliberately removed".
+    ///
+    /// <para>The rejected alternatives are worth naming. Filtering the STORE READ to <c>is_enabled = TRUE</c>
+    /// is the one that must not be taken: that read also feeds <see cref="StoreConfigProvider.ServersOnlyInFile"/>,
+    /// whose question is whether a file entry is REGISTERED — and a paused server is — so filtering there
+    /// would report it as never-monitored and advise re-adding it, which is the #2158 defect. Dropping it
+    /// from the drift pass silently is rejected more narrowly: #2552 is a defect about silence being
+    /// expensive, and the drift is exactly what the operator walks back into when they re-enable.</para>
+    /// </summary>
+    [Fact]
+    public void ADisabledServerStillPairs_ButIsReportedSeparately()
+    {
+        var file = FileEntry("alpha", "alpha-host");
+        var store = StoreRow(file);
+        file.TrustServerCertificate = true;
+
+        var live = Assert.Single(StoreConfigProvider.DescribeSettingDrift(new[] { file }, new[] { Registered(store) }));
+        Assert.True(live.IsEnabled);
+
+        var paused = Assert.Single(
+            StoreConfigProvider.DescribeSettingDrift(new[] { file }, new[] { Registered(store, isEnabled: false) }));
+        Assert.False(paused.IsEnabled);
+
+        /* Same server, same fields — only the sentence it belongs under changes. */
+        Assert.Equal(live.Server, paused.Server);
+        Assert.Equal(
+            live.Fields.Select(f => f.Field).ToArray(),
+            paused.Fields.Select(f => f.Field).ToArray());
+    }
+
+    /* ---------------- the category, not the instance ---------------- */
+
+    /// <summary>
+    /// <b>The invariant this file exists for.</b> #2552 is not "trustServerCertificate was not compared" — it
+    /// is "a per-server darling.json setting that NOTHING compares is silently dead text", and fixing the
+    /// reported field would leave the next one to be discovered the same way, in the field, by an operator
+    /// staring at an unchanged error.
+    ///
+    /// <para>So the covered set is DERIVED from both ends rather than listed. One end is
+    /// <see cref="MonitoredServer"/>'s <c>[JsonPropertyName]</c> properties — the keys darling.json can
+    /// actually carry, which is what an operator edits. The other is
+    /// <see cref="StoreConfigProvider.CompareServerSettings"/> itself, driven with two entries that differ in
+    /// every field and asked what it reports; the comparison's own output is the evidence, not a
+    /// reimplementation of it that could keep agreeing while the shipped code drifts. It runs twice because
+    /// two fields are engine-gated, and a single pass can only ever see one side of that gate.</para>
+    ///
+    /// <para>Two keys are excluded, and only two: the credential. That exclusion is the point rather than an
+    /// omission — see the test above — so it is spelled out here where a future reader will look for it.</para>
+    /// </summary>
+    [Fact]
+    public void EveryPerServerDarlingJsonKeyIsEitherComparedOrDeliberatelyExcluded()
+    {
+        /* The credential, and nothing else. A file entry legitimately carries a reference or a dev plaintext
+           password against a store row holding a DPAPI blob, which is the supported shape rather than drift —
+           and comparing a secret is how one reaches a log line. */
+        var excluded = new HashSet<string>(System.StringComparer.Ordinal) { "password", "encryptedPassword" };
+
+        var keys = typeof(MonitoredServer)
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Select(p => p.GetCustomAttribute<JsonPropertyNameAttribute>()?.Name)
+            .Where(n => !string.IsNullOrEmpty(n))
+            .Select(n => n!)
+            .ToHashSet(System.StringComparer.Ordinal);
+
+        Assert.NotEmpty(keys);
+
+        var compared = new HashSet<string>(System.StringComparer.Ordinal);
+        foreach (var engine in new[] { "sqlserver", "postgres" })
+        {
+            var store = new MonitoredServer
+            {
+                Name = "alpha",
+                Host = "alpha-host",
+                Database = "alpha-db",
+                /* SQL auth on the STORE row, because that is the gate the username comparison reads. */
+                Auth = "sql",
+                Username = "monitor",
+                EncryptMode = "Strict",
+                TrustServerCertificate = false,
+                ReadOnlyIntent = false,
+                MultiSubnetFailover = false,
+                ExcludedDatabases = new List<string> { "scratch" },
+                MonthlyCostUsd = 100m,
+                AlertDeliveryModeOverride = null,
+                Engine = engine,
+                Port = 5432,
+            };
+            store.StoredServerId = ServerIdHelper.GetDeterministicHashCode(store.StorageName);
+
+            var file = new MonitoredServer
+            {
+                Name = "beta",
+                Host = "beta-host",
+                Database = "beta-db",
+                Auth = "integrated",
+                Username = "monitor2",
+                EncryptMode = "Optional",
+                TrustServerCertificate = true,
+                ReadOnlyIntent = true,
+                MultiSubnetFailover = true,
+                ExcludedDatabases = new List<string> { "staging" },
+                MonthlyCostUsd = 200m,
+                AlertDeliveryModeOverride = AlertNotificationMode.PerEvent,
+                Engine = engine == "postgres" ? "sqlserver" : "postgres",
+                Port = 5433,
+            };
+
+            foreach (var d in StoreConfigProvider.CompareServerSettings(file, store))
+            {
+                compared.Add(d.Field);
+            }
+        }
+
+        var uncovered = keys.Where(k => !compared.Contains(k) && !excluded.Contains(k)).OrderBy(k => k).ToArray();
+        Assert.True(
+            uncovered.Length == 0,
+            "a per-server darling.json key is neither compared nor deliberately excluded, so editing it on a "
+            + "registered server is silently dead text — the defect #2552 reports, in a new field: "
+            + string.Join(", ", uncovered));
+
+        /* The other direction, so the pin cannot pass by comparing something darling.json cannot express —
+           a field label that is not a real key sends the operator to edit something that is not there. */
+        var unknown = compared.Where(f => !keys.Contains(f)).OrderBy(f => f).ToArray();
+        Assert.True(
+            unknown.Length == 0,
+            "the drift report names a field that is not a darling.json per-server key: " + string.Join(", ", unknown));
+
+        /* And that the exclusion list has not quietly grown past the credential. */
+        Assert.Equal(new[] { "encryptedPassword", "password" }, excluded.OrderBy(k => k).ToArray());
     }
 }
