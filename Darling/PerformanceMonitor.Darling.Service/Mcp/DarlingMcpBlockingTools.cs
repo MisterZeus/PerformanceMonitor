@@ -172,6 +172,11 @@ public sealed class DarlingMcpBlockingTools
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "deadlocks")
+                    /* #2546: capability first (permanent), then the runtime precondition (fixable), then the
+                       read's own miss. A deadlock capture whose XE session is gone records SESSION_MISSING
+                       and then returns zero rows forever, which is byte-identical to a server that simply
+                       did not deadlock — the one answer nobody should be given without being told. */
+                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "deadlocks")
                     ?? McpHelpers.Status("empty", "No deadlocks found in the specified time range.");
 
             /* #2159: see get_blocking — fingerprint the window, filter, then cap. */
@@ -313,6 +318,9 @@ public sealed class DarlingMcpBlockingTools
             var withXml = rows.Where(r => r.HasReportXml).Take(limit).ToList();
             if (withXml.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report")
+                    /* #2546: same order and same reason as get_deadlocks — a blocked-process capture whose
+                       session is gone is indistinguishable here from a server that never blocked. */
+                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report")
                     ?? McpHelpers.Status("empty", "No blocked process report XML available in the specified time range.");
 
             var result = withXml.Select(r => new
