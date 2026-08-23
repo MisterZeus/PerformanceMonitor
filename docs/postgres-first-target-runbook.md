@@ -260,6 +260,7 @@ difference a cumulative counter, so the first read after startup legitimately sh
 | `pg_io_stats` | 1 min | 1 min | 2 min |
 | `pg_wraparound_stats` | 5 min | 5 min | 5 min (levels) |
 | `pg_blocking` | 1 min | 1 min | 1 min (a sample, not a counter) |
+| `pg_session_states` | 1 min | 1 min | 1 min (a sample, not a counter) |
 | `pg_database_stats` | 1 min | 1 min | 2 min |
 | `pg_autovacuum_stats` | 60 min | **60 min** | 2 h (growing/flat needs two) |
 | `pg_table_bloat_stats` | 60 min | **60 min** | 2 h (growing/flat needs two) |
@@ -293,6 +294,7 @@ Through MCP, one tool per collector:
 | `get_pg_database_stats` | temp-file spills, cache hit ratio, deadlocks, commit/rollback split |
 | `get_pg_index_usage` | which indexes nothing scans — **and whether each one can actually be dropped** |
 | `get_pg_table_bloat` | how much space the vacuum lag above has cost, as an **estimate** with its own error stated |
+| `get_pg_session_states` | who is holding a transaction open — **and whether they actually pin the xmin horizon** |
 
 **Proof, and the trap:** on a healthy target most of these are *supposed* to be boring. Do not read
 "nothing alarming" as "not collecting" — check `collection_log` (step 6) for that. Distinguish:
@@ -302,7 +304,7 @@ Through MCP, one tool per collector:
   replication slots is the common one, and it is good news.
 - **No rows, collector never ran** — gated off (step 3) or failing (step 9).
 
-Four results that look like bugs and are not:
+Five results that look like bugs and are not:
 
 - `get_pg_io_stats` on Aurora reports **write counters not tracked**. Correct: Aurora backends do not
   write data files, the storage layer does, so those columns are NULL — which is why the tool reports
@@ -312,6 +314,12 @@ Four results that look like bugs and are not:
 - `get_pg_table_bloat` reporting most of its rows with a **suppressed** estimate is almost always a
   permissions gap rather than a missing ANALYZE, and it is the one step in this runbook that `GRANT
   pg_monitor` alone does not satisfy. See the note below.
+- `get_pg_session_states` reporting a session **idle in transaction for an hour with `peak_horizon_age`
+  of `-1`** is not a contradiction and not a rounding artefact. It means the session pins nothing: a
+  READ COMMITTED transaction releases its snapshot at the end of each statement, and one whose write
+  matched no rows never got a transaction id to hold. Both were measured on a live PostgreSQL 16.15
+  instance. Terminating such a session reclaims not one dead row, which is exactly why the tool says
+  so instead of letting the duration imply otherwise.
 - `get_pg_database_stats` reporting `stats_reset_count` above zero is the tool working, not a fault. The
   counters it reads are cumulative since the last `pg_stat_reset()`, so a reset zeroes them; the window
   totals become LOWER BOUNDS and the tool says so rather than letting the reset surface as a negative
@@ -348,7 +356,7 @@ an estimate.
 
 ## 9. Alerting
 
-The three outage predictors alert; the other six collectors are read-only signals.
+The three outage predictors alert; the other nine collectors are read-only signals.
 
 - Evaluated on the **30-second** alert sweep, after the shared SQL Server sweep, gated on the probed
   engine.

@@ -506,7 +506,9 @@ page carries one of **two** tab sets, chosen from the engine the store recorded 
   (tempdb, Query Store, trace flags, plan cache, the `system_health` ring buffer) have no PostgreSQL analogue
   to fill them. Vacuum is deliberately one tab rather than three — an old xmin horizon starves vacuum, starved
   vacuum falls behind on freezing, and freezing falling behind is what ends in wraparound; read separately each
-  looks survivable, and together they are one escalating story. **Storage** is separate from Vacuum for the
+  looks survivable, and together they are one escalating story. Since #2540 that story is FOUR panels: the
+  first names the session actually holding the horizon, which is the link the chain used to start one step
+  past. **Storage** is separate from Vacuum for the
   same reason in reverse: table bloat is what vacuum lag COSTS, and dropping the damage into the middle of a
   three-panel causal sequence would break the sequence — so bloat sits beside index usage instead, where both
   panels answer one question (where the space went and whether it is earning its keep).
@@ -566,6 +568,21 @@ dash and the reason column says "no column statistics", that is a permissions ga
 collector: `pg_stats` is filtered by SELECT privilege and `pg_monitor` does not confer it, so the monitoring
 role needs `pg_read_all_data` (PostgreSQL 14+) before this panel can say anything. The measured sizes and the
 dead-tuple percentage beside it are unaffected — those come from the server's own counters.
+
+**The Sessions panel on the Vacuum tab needs `pg_monitor`, and without it it fails QUIETLY rather than
+loudly.** PostgreSQL does not refuse the read: it returns every row with `state`, `state_change`,
+`xact_start`, `backend_start` and `query_id` NULL and the statement text replaced by an
+insufficient-privilege literal — while leaving `backend_xmin` and `backend_xid` VISIBLE. So the horizon
+still reads as pinned and nothing on the screen can say by what. Measured against a least-privileged role
+on the same nine backends, the privileged role saw four sessions idle in transaction and the unprivileged
+one saw zero. Rows in that state are marked redacted and carry no severity at all rather than being
+painted healthy. Unlike the bloat panel this needs no `pg_read_all_data` — plain `pg_monitor` is enough.
+
+**A long `idle in transaction` on that panel is not automatically a problem**, and the panel will tell you
+which kind you have. Two of the four idle-in-transaction shapes measured on a live instance pin nothing:
+a READ COMMITTED transaction that only read has already released its snapshot, and one whose `UPDATE`
+matched zero rows never got a transaction id. Those rows show a horizon age of "pins nothing" rather than
+a number, and terminating them reclaims not one dead row. Read the horizon column, not the clock.
 
 **Waits** is the only tab that is *wholly* Aurora-only. Activity's other half, the blocking panels, is
 collected at every PostgreSQL target including standbys, where a recovery conflict is blocking that happens
