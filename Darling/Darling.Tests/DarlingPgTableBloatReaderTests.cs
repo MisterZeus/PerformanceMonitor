@@ -68,16 +68,32 @@ public class DarlingPgTableBloatReaderTests
     /// drop the rows a reader most needs to see — a table whose estimate is unusable is still a table
     /// somebody asked about — while letting an unusable estimate RANK would put the least-known tables at
     /// the top of a list that reads as a work queue.
+    ///
+    /// <para>The assertion is on the compound sort EXPRESSION rather than on a single column, and that
+    /// shape is the fix for a review finding: the first draft ordered on <c>estimate_unavailable</c>
+    /// alone, which left the other two suppression reasons free to rank. <see cref="TheSortKeyCoversEverySuppressionReason"/>
+    /// pins the conditions themselves; this one pins that the tier exists, sorts ascending, and is not a
+    /// filter.</para>
     /// </summary>
     [Fact]
     public void SortsUntrustworthyEstimatesLastRatherThanRemovingThem()
     {
-        Assert.Contains("l.estimate_unavailable ASC", Sql, StringComparison.Ordinal);
+        var order = Squeezed[Squeezed.LastIndexOf("ORDER BY", StringComparison.Ordinal)..];
+
+        Assert.Contains("l.estimate_unavailable", order, StringComparison.Ordinal);
+        /* The whole compound expression is the first sort key and it sorts ASCENDING, so false (publishable)
+           comes first and every suppressed row lands below every trustworthy one. */
+        Assert.Contains(") ASC", order, StringComparison.Ordinal);
+        Assert.True(
+            order.IndexOf(") ASC", StringComparison.Ordinal)
+            < order.IndexOf("l.bloat_bytes_estimate DESC", StringComparison.Ordinal),
+            "the trustworthiness tier must outrank the size ordering, or a suppressed row with a large "
+            + "estimate still reaches the top of the LIMIT");
 
         /* No WHERE on the flag anywhere: the decision belongs to the tool, which suppresses the NUMBER
            rather than the ROW. */
-        Assert.DoesNotContain("WHERE l.estimate_unavailable", Sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("AND NOT estimate_unavailable", Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("WHERE l.estimate_unavailable", Squeezed, StringComparison.Ordinal);
+        Assert.DoesNotContain("AND NOT estimate_unavailable", Squeezed, StringComparison.Ordinal);
     }
 
     /// <summary>
