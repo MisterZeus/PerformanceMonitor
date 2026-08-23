@@ -295,7 +295,16 @@ WITH activity AS
 totals AS
 (
     SELECT
+        /* EVERY backend the view reports, background workers included — checkpointer, walwriter, the
+           autovacuum launcher and any autovacuum workers, minus this collector's own session and minus
+           parallel workers. Not filtered to backend_type = 'client backend', deliberately: backend_type is
+           in the privileged column set, so that filter would come back NULL for every row on a target
+           without pg_monitor and collapse the denominator to zero — losing it precisely where the numerator
+           is already unreliable. A handful of background rows inflates the count on a quiet instance and
+           changes nothing on a busy one, which is the cheaper error. */
         count(*)::int                                                       AS total_sessions,
+        /* Also NULL-driven under redaction, and therefore 0 there. state_is_redacted on the row is what
+           says so; these counts must be read through it rather than at face value. */
         count(*) FILTER (WHERE state = 'active')::int                       AS active_sessions,
         count(*) FILTER (WHERE is_idle_in_transaction)::int                 AS idle_in_transaction_sessions,
         /* The oldest holder on the instance, or NULL when nothing holds the horizon at all. Computed over
