@@ -1,0 +1,418 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.IO;
+using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Hosting;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #2562 — the web dashboard's opt-in HTTPS listener. Three groups, and they answer different questions:
+/// the PURE config/lifetime matrices (no file, no clock), the REAL certificate round-trip (a self-signed
+/// certificate generated in-test, exported both ways, loaded through the shipped loader), and the WIRING
+/// pins that read the shipped source — because the defect this feature could most plausibly ship with is not
+/// a wrong decision but a decision that never reaches Kestrel or the cookie.
+/// </summary>
+public sealed class DarlingWebTlsTests
+{
+    /* ---- PURE: what the tls block asks for, decided before any file is opened ---- */
+
+    [Fact]
+    public void Describe_NoBlock_IsNotConfigured()
+        => Assert.Equal(DarlingWebTls.TlsShape.NotConfigured, DarlingWebTls.Describe(null).Shape);
+
+    [Fact]
+    public void Describe_EmptyBlock_IsNotConfigured()
+    {
+        /* A block present but blank must read as "TLS was never asked for", not as a misconfiguration: an
+           operator who left the keys in place with empty values gets plain HTTP + the exposure warning, which
+           is the same outcome as omitting the block. */
+        var plan = DarlingWebTls.Describe(new WebTlsConfig { PfxPath = "   ", CertPath = "", KeyPath = null });
+        Assert.Equal(DarlingWebTls.TlsShape.NotConfigured, plan.Shape);
+        Assert.Null(plan.Problem);
+    }
+
+    [Fact]
+    public void Describe_PfxOnly_IsPfx()
+        => Assert.Equal(
+            DarlingWebTls.TlsShape.Pfx,
+            DarlingWebTls.Describe(new WebTlsConfig { PfxPath = "/certs/dash.pfx" }).Shape);
+
+    [Fact]
+    public void Describe_PemPair_IsPem()
+        => Assert.Equal(
+            DarlingWebTls.TlsShape.Pem,
+            DarlingWebTls.Describe(new WebTlsConfig { CertPath = "/certs/dash.crt", KeyPath = "/certs/dash.key" }).Shape);
+
+    [Fact]
+    public void Describe_BothForms_IsInvalid_AndSaysWhy()
+    {
+        /* The behaviour under test is the REFUSAL, not a precedence rule: silently preferring one form would
+           serve a certificate the operator was not watching, and would look identical to working until the
+           unwatched one expired. */
+        var plan = DarlingWebTls.Describe(new WebTlsConfig
+        {
+            PfxPath = "/certs/dash.pfx",
+            CertPath = "/certs/dash.crt",
+            KeyPath = "/certs/dash.key",
+        });
+
+        Assert.Equal(DarlingWebTls.TlsShape.Invalid, plan.Shape);
+        Assert.Contains("never both", plan.Problem, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Describe_CertWithoutKey_IsInvalid()
+    {
+        var plan = DarlingWebTls.Describe(new WebTlsConfig { CertPath = "/certs/dash.crt" });
+        Assert.Equal(DarlingWebTls.TlsShape.Invalid, plan.Shape);
+        Assert.Contains("keyPath", plan.Problem, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Describe_KeyWithoutCert_IsInvalid()
+    {
+        var plan = DarlingWebTls.Describe(new WebTlsConfig { KeyPath = "/certs/dash.key" });
+        Assert.Equal(DarlingWebTls.TlsShape.Invalid, plan.Shape);
+        Assert.Contains("certPath", plan.Problem, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("hunter2", null)]
+    [InlineData(null, "AQAAAsomeblob")]
+    public void Describe_PasswordWithoutBundle_IsInvalid(string? plaintext, string? encrypted)
+    {
+        /* A password with nothing to unlock is a half-finished edit, and the operator who wrote it believes
+           TLS is on. Refusing is louder than ignoring it — and ignoring it would expose plain HTTP. */
+        var plan = DarlingWebTls.Describe(new WebTlsConfig { PfxPassword = plaintext, EncryptedPfxPassword = encrypted });
+        Assert.Equal(DarlingWebTls.TlsShape.Invalid, plan.Shape);
+        Assert.Contains("no pfxPath", plan.Problem, StringComparison.Ordinal);
+    }
+
+    /* ---- PURE: the lifetime gate ---- */
+
+    private static readonly DateTimeOffset Now = new(2026, 8, 23, 12, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public void LifetimeRefusal_Valid_IsNull()
+        => Assert.Null(DarlingWebTls.LifetimeRefusal(Now.AddDays(-10), Now.AddDays(200), Now));
+
+    [Fact]
+    public void LifetimeRefusal_Expired_Refuses()
+    {
+        var refusal = DarlingWebTls.LifetimeRefusal(Now.AddDays(-400), Now.AddDays(-1), Now);
+        Assert.NotNull(refusal);
+        Assert.Contains("expired", refusal, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LifetimeRefusal_NotYetValid_SaysSo_NotExpired()
+    {
+        /* Its own arm on purpose: a not-yet-valid certificate is the signature of a clock skew or a rotation
+           issued early, and reporting it as "expired" would send the operator to the wrong problem. */
+        var refusal = DarlingWebTls.LifetimeRefusal(Now.AddDays(5), Now.AddDays(400), Now);
+        Assert.NotNull(refusal);
+        Assert.Contains("not valid until", refusal, StringComparison.Ordinal);
+        Assert.DoesNotContain("expired", refusal, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LifetimeRefusal_ExactlyAtNotAfter_Refuses()
+    {
+        /* The boundary is closed at notAfter: the handshake would fail on the instant, so refusing here keeps
+           the log honest rather than starting a listener that lasts zero seconds. */
+        Assert.NotNull(DarlingWebTls.LifetimeRefusal(Now.AddDays(-10), Now, Now));
+    }
+
+    /* ---- PURE: the advance expiry warning ---- */
+
+    [Fact]
+    public void ExpiryWarning_FarOut_IsSilent()
+        => Assert.Null(DarlingWebTls.ExpiryWarning(Now.AddDays(DarlingWebTls.ExpiryWarningDays + 1), Now));
+
+    [Fact]
+    public void ExpiryWarning_InsideWindow_CountsDays()
+    {
+        var warning = DarlingWebTls.ExpiryWarning(Now.AddDays(10), Now);
+        Assert.NotNull(warning);
+        Assert.Contains("10 days", warning, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ExpiryWarning_LastDay_RoundsUpToOneDay_Singular()
+    {
+        /* Rounded UP so the final 23 hours read "1 day" rather than "0 days" — a warning that says zero reads
+           as a bug and gets ignored on the one day it matters most. */
+        var warning = DarlingWebTls.ExpiryWarning(Now.AddHours(3), Now);
+        Assert.Equal($"expires in 1 day ({Now.AddHours(3).UtcDateTime:u})", warning);
+    }
+
+    [Fact]
+    public void ExpiryWarning_AlreadyExpired_IsSilent()
+    {
+        /* LifetimeRefusal owns the expired case and refuses the bind outright; a second, softer line about it
+           here would be noise contradicting a Critical. */
+        Assert.Null(DarlingWebTls.ExpiryWarning(Now.AddDays(-1), Now));
+    }
+
+    /* ---- REAL certificates: the round-trip through the shipped loader ---- */
+
+    [Fact]
+    public void Load_Pfx_WithPassword_KeepsThePrivateKey()
+    {
+        using var temp = new TempDir();
+        using var generated = SelfSigned();
+        var path = Path.Combine(temp.Path, "dash.pfx");
+        File.WriteAllBytes(path, generated.Export(X509ContentType.Pkcs12, "hunter2"));
+
+        var config = new WebTlsConfig { PfxPath = path, PfxPassword = "hunter2" };
+        using var loaded = DarlingWebTls.Load(config, DarlingWebTls.Describe(config).Shape);
+
+        Assert.True(loaded.HasPrivateKey);
+        Assert.Equal(generated.Thumbprint, loaded.Thumbprint);
+    }
+
+    [Fact]
+    public void Load_Pfx_WithoutPassword_Works()
+    {
+        /* An unprotected bundle is legitimate — ResolvePfxPassword returning null must load it, not throw. */
+        using var temp = new TempDir();
+        using var generated = SelfSigned();
+        var path = Path.Combine(temp.Path, "dash.pfx");
+        File.WriteAllBytes(path, generated.Export(X509ContentType.Pkcs12));
+
+        var config = new WebTlsConfig { PfxPath = path };
+        using var loaded = DarlingWebTls.Load(config, DarlingWebTls.Describe(config).Shape);
+
+        Assert.True(loaded.HasPrivateKey);
+    }
+
+    [Fact]
+    public void Load_Pem_KeepsTheKeyUsable()
+    {
+        /* THE trap this test exists for: a certificate built straight from PEM carries an EPHEMERAL private
+           key, which Windows cannot use for TLS server authentication. Kestrel accepts such a certificate at
+           configuration time and then fails every handshake, so nothing short of a real load catches it. The
+           loader round-trips through an in-memory PKCS#12; this asserts the key survives that. */
+        using var temp = new TempDir();
+        using var generated = SelfSigned();
+        var certPath = Path.Combine(temp.Path, "dash.crt");
+        var keyPath = Path.Combine(temp.Path, "dash.key");
+        File.WriteAllText(certPath, generated.ExportCertificatePem());
+        File.WriteAllText(keyPath, generated.GetRSAPrivateKey()!.ExportPkcs8PrivateKeyPem());
+
+        var config = new WebTlsConfig { CertPath = certPath, KeyPath = keyPath };
+        using var loaded = DarlingWebTls.Load(config, DarlingWebTls.Describe(config).Shape);
+
+        Assert.True(loaded.HasPrivateKey);
+        Assert.Equal(generated.Thumbprint, loaded.Thumbprint);
+    }
+
+    [Fact]
+    public void Load_WrongPassword_NamesTheSetting()
+    {
+        using var temp = new TempDir();
+        using var generated = SelfSigned();
+        var path = Path.Combine(temp.Path, "dash.pfx");
+        File.WriteAllBytes(path, generated.Export(X509ContentType.Pkcs12, "hunter2"));
+
+        var config = new WebTlsConfig { PfxPath = path, PfxPassword = "wrong" };
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => DarlingWebTls.Load(config, DarlingWebTls.Describe(config).Shape));
+
+        /* Windows reports a wrong PKCS#12 password as unreadable data rather than as a bad password (macOS is
+           explicit about it), so the message names both the path setting and the password slot regardless of
+           what the platform said. Assert on OUR wrapper text, never on the platform's. */
+        Assert.Contains("pfxPath", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("password", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Load_MissingFile_NamesTheSettingThatPointsAtIt(bool pem)
+    {
+        using var temp = new TempDir();
+        var missing = Path.Combine(temp.Path, "absent.pem");
+        var config = pem
+            ? new WebTlsConfig { CertPath = missing, KeyPath = missing }
+            : new WebTlsConfig { PfxPath = missing };
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => DarlingWebTls.Load(config, DarlingWebTls.Describe(config).Shape));
+
+        Assert.Contains(pem ? "certPath" : "pfxPath", ex.Message, StringComparison.Ordinal);
+    }
+
+    /* ---- The password slots, mirroring the token slots ---- */
+
+    [Fact]
+    public void ResolvePfxPassword_Unset_IsNull_AndNotPlaintext()
+    {
+        Assert.Null(new WebTlsConfig().ResolvePfxPassword(out var usedPlaintext));
+        Assert.False(usedPlaintext);
+    }
+
+    [Fact]
+    public void ResolvePfxPassword_Literal_IsPlaintext()
+    {
+        Assert.Equal("hunter2", new WebTlsConfig { PfxPassword = "hunter2" }.ResolvePfxPassword(out var usedPlaintext));
+        Assert.True(usedPlaintext);
+    }
+
+    [Fact]
+    public void ResolvePfxPassword_FileReference_IsNotPlaintext()
+    {
+        /* #1804's indirection is the container path: the compose distribution mounts the password as a file,
+           and a mounted secret must not trip the plaintext-in-config warning. */
+        using var temp = new TempDir();
+        var secret = Path.Combine(temp.Path, "pfx.pwd");
+        File.WriteAllText(secret, "hunter2");
+
+        Assert.Equal(
+            "hunter2",
+            new WebTlsConfig { PfxPassword = "file:" + secret }.ResolvePfxPassword(out var usedPlaintext));
+        Assert.False(usedPlaintext);
+    }
+
+    /* ---- IsConfigured: a tls-only block still counts as a configured network block ---- */
+
+    [Fact]
+    public void WebNetworkConfig_IsConfigured_SeesATlsOnlyBlock()
+    {
+        /* IsConfigured drives the BYO "network.* is ignored" notice. A block carrying only TLS must trip it,
+           or an operator who moved a certificate into a BYO deployment is told nothing at all. */
+        var network = new WebNetworkConfig { Tls = new WebTlsConfig { PfxPath = "/certs/dash.pfx" } };
+        Assert.True(network.IsConfigured);
+    }
+
+    [Fact]
+    public void WebNetworkConfig_IsConfigured_IgnoresAnEmptyTlsBlock()
+        => Assert.False(new WebNetworkConfig { Tls = new WebTlsConfig() }.IsConfigured);
+
+    /* ---- WIRING, parsed from the shipped source ---- */
+
+    [Fact]
+    public void TheNetworkListener_GetsUseHttps_AndTheLoopbackListenersDoNot()
+    {
+        /* #1648's lesson: a pure-function test passes happily on a build where the decision never reaches the
+           server. Both halves are pinned — that the primary bind is configured with the certificate, and that
+           the loopback listeners are NOT, since serving the LAN certificate on "localhost" would hand the
+           local browser a name mismatch on the one surface that never leaves the machine. */
+        var source = ReadSource(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs"));
+
+        Assert.Contains("listen.UseHttps(listenerCertificate)", source, StringComparison.Ordinal);
+        Assert.Contains("options.Listen(IPAddress.Loopback, effectivePort);", source, StringComparison.Ordinal);
+        Assert.Contains("options.Listen(IPAddress.IPv6Loopback, effectivePort);", source, StringComparison.Ordinal);
+
+        /* Exactly one UseHttps call: a second would mean a loopback listener acquired one. */
+        Assert.Equal(1, CountOccurrences(source, "UseHttps("));
+    }
+
+    [Fact]
+    public void TheCertificatesSan_IsCheckedAgainstTheListenIp()
+    {
+        /* The Host allowlist accepts only `localhost`, a loopback literal, or the configured listen IP, so a
+           LAN client cannot reach this dashboard by DNS name at all — which makes a DNS-name-only
+           certificate, the normal thing an internal CA issues, permanently unusable here. Without this check
+           the operator learns that from a browser warning instead of from the service log. */
+        var source = ReadSource(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs"));
+
+        Assert.Contains("DarlingManagedPostgres.CertificateSanCoversIp(certificate, networkListenIp)", source, StringComparison.Ordinal);
+        Assert.Contains("iPAddress SAN", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheHostAllowlist_RefusesADnsName_WhichIsWhyTheSanMustNameTheIp()
+    {
+        /* The premise the warning above rests on, pinned against the shipped guard rather than asserted in a
+           comment: if this ever starts accepting a hostname, the SAN advice becomes wrong and this test is
+           where that gets noticed. */
+        var listen = System.Net.IPAddress.Parse("192.168.1.205");
+
+        Assert.True(HostHeaderGuard.IsAllowedHost("192.168.1.205", listen));
+        Assert.True(HostHeaderGuard.IsAllowedHost("localhost", listen));
+        Assert.False(HostHeaderGuard.IsAllowedHost("darling.corp.local", listen));
+    }
+
+    [Fact]
+    public void TheSessionCookie_MarksSecurePerRequest()
+    {
+        /* One host now serves both schemes at once (TLS on the network listener, plain HTTP on loopback), so
+           a hardcoded Secure is wrong in both directions: true loops the loopback login forever, false lets a
+           cookie minted over TLS ride an http:// downgrade. */
+        var source = ReadSource(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs"));
+
+        Assert.Contains("Secure = context.Request.IsHttps,", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("Secure = false,", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("Secure = true,", source, StringComparison.Ordinal);
+    }
+
+    /* ---- helpers ---- */
+
+    private static X509Certificate2 SelfSigned()
+    {
+        using var rsa = RSA.Create(2048);
+        var request = new CertificateRequest(
+            "CN=darling-web-tests", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365));
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        var count = 0;
+        var index = haystack.IndexOf(needle, StringComparison.Ordinal);
+        while (index >= 0)
+        {
+            count++;
+            index = haystack.IndexOf(needle, index + needle.Length, StringComparison.Ordinal);
+        }
+
+        return count;
+    }
+
+    private static string ReadSource(string relative) => File.ReadAllText(Path.Combine(RepoRoot(), relative));
+
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile)!;
+        while (dir is not null && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln")) && !Directory.Exists(Path.Combine(dir, ".git")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return dir!;
+    }
+
+    private sealed class TempDir : IDisposable
+    {
+        public TempDir()
+        {
+            Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "darling-tls-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path);
+        }
+
+        public string Path { get; }
+
+        public void Dispose()
+        {
+            try { Directory.Delete(Path, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+}

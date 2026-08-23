@@ -260,8 +260,15 @@
   // (#1649: the Custom Views composer is a write path, so a tokenless local process could mutate views).
   // A dashboard with NO "network" block registers no auth middleware at all and stays tokenless.
   // Fail-closed: any missing precondition (token / valid allowFrom / managed mode) keeps it loopback-only.
-  // There is deliberately NO TLS (a browser over plain HTTP on a trusted LAN); the MITM control is a TLS
-  // REVERSE PROXY in front of the port, same as MCP -- a trusted-LAN opt-in, NEVER internet-exposed.
+  // TLS is OPT-IN via the "tls" block (#2562) and applies to the network listener only -- loopback stays
+  // plain HTTP, because the certificate names the LAN address rather than "localhost". WITHOUT it the token
+  // and its session cookie cross the segment in the clear and every exposed start warns about exactly that;
+  // "allowFrom" bounds who can ROUTE to the port, never what an on-path attacker reads off the wire. The
+  // product consumes a certificate, it does not issue one: no ACME, and no self-signed fallback (that would
+  // buy encryption without authentication and train you to click through the warning). An internal CA is the
+  // normal answer here. A missing, unreadable, ambiguous or EXPIRED certificate keeps the dashboard
+  // loopback-only rather than quietly serving the LAN over HTTP. A TLS reverse proxy in front of the port
+  // remains a perfectly good alternative -- it is what MCP still relies on. NEVER internet-exposed either way.
   // "enabled"/"port" here are the SEED; after first start they live in the control plane and the Viewer's
   // Settings toggles them LIVE (the service starts/stops/rebinds the endpoint within seconds - no restart).
   // The "network" exposure block below stays file-defined and restart-only; the Viewer toggle still stops an
@@ -274,7 +281,21 @@
     // "network": {
     //   "listen": "192.168.1.205",                     // specific bind IP preferred; "0.0.0.0" = all interfaces.
     //   "allowFrom": "192.168.1.0/24",                 // in-app RemoteIpAddress check + firewall CIDR (loopback always allowed).
-    //   "encryptedToken": "<output of --encrypt-password>"  // REQUIRED to expose; or a plaintext "token" (dev only, warned).
+    //   "encryptedToken": "<output of --encrypt-password>",  // REQUIRED to expose; or a plaintext "token" (dev only, warned).
+    //
+    //   // OPTIONAL TLS (#2562) -- omit the whole block for plain HTTP. Give ONE form, never both.
+    //   // The certificate must name the address browsers actually use ("listen" above), or every visit
+    //   // is a warning; issue it from your internal CA. Renew it: an EXPIRED certificate takes the
+    //   // dashboard down (by design -- it will not fall back to HTTP), and the service logs a warning
+    //   // for the last 30 days before that happens.
+    //   "tls": {
+    //     "pfxPath": "C:\\ProgramData\\PerformanceMonitorDarling\\certs\\dashboard.pfx",
+    //     "encryptedPfxPassword": "<output of --encrypt-password>"  // or "pfxPassword" (file:/env: reference, or plaintext for dev)
+    //                                                               // omit both if the bundle has no password
+    //     // ... OR a PEM pair instead of the two lines above:
+    //     // "certPath": "C:\\ProgramData\\PerformanceMonitorDarling\\certs\\dashboard.crt",
+    //     // "keyPath":  "C:\\ProgramData\\PerformanceMonitorDarling\\certs\\dashboard.key"
+    //   }
     // }
   },
 

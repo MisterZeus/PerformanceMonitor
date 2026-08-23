@@ -1233,4 +1233,21 @@ New-NetFirewallRule -DisplayName "Darling Web" -Direction Inbound -Action Allow 
 
 **What a web token can reach.** The web dashboard is **read-only over the collected store** — it connects as the least-privilege `viewer` role and hosts no live-server queries (no `analyze_server`, no plan re-execution). Its one write path is the Custom Views composer: INSERT/UPDATE/DELETE on `config.custom_views`, and the web host maps no other write route. (The `viewer` role holds one further narrow grant — INSERT/UPDATE/DELETE on `config.database_state_expected`, for the Viewer's per-database state-override editor ([#1986](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1986)) — which no web route reaches, and which the WPF editor itself gates on the `has_table_privilege` read-only probe a `viewer`-role seat fails.) So a token-holder can read everything collected and author saved views, and reach no monitored server — but that write is why an exposed dashboard authenticates loopback too, exactly as MCP does.
 
-**Web has no TLS either — same reverse-proxy control as MCP.** The token/cookie travels cleartext on the segment, so the in-app CIDR bounds *who can route to* the port but does not protect the wire. On an untrusted segment, put a TLS-terminating reverse proxy in front of the web port.
+**The web dashboard can serve HTTPS itself ([#2562](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2562)).** Without it the token and the session cookie it mints travel cleartext on the segment, and the in-app CIDR bounds *who can route to* the port without protecting the wire — so an exposed dashboard with no `tls` block warns about exactly that at every start. Add a certificate to `web.network`:
+
+```jsonc
+"network": {
+  "listen": "192.168.1.205",
+  "allowFrom": "192.168.1.0/24",
+  "encryptedToken": "<output of --encrypt-password>",
+  "tls": {
+    "pfxPath": "C:\\ProgramData\\PerformanceMonitorDarling\\certs\\dashboard.pfx",
+    "encryptedPfxPassword": "<output of --encrypt-password>"
+    // ...or a PEM pair instead: "certPath" + "keyPath" (what the compose distribution mounts)
+  }
+}
+```
+
+Give **one** form, never both — a PKCS#12 bundle or a PEM pair — and the password may sit in `encryptedPfxPassword` (DPAPI), in `pfxPassword` as a `file:`/`env:` reference, or nowhere at all if the bundle is unprotected. TLS applies to the **network listener only**: the loopback listeners stay plain HTTP, because your certificate names the LAN address and not `localhost`, and loopback traffic never reaches the segment this protects. There is no redirect-from-HTTP, because one port cannot speak both schemes and adding a second HTTP port would reopen the cleartext surface; a plain-HTTP client simply fails the handshake.
+
+The product **consumes** a certificate and does not manage a PKI — no ACME, and deliberately no self-signed fallback, which would buy encryption without authentication and train you to click through the warning. An internal CA is the normal answer on a LAN. Loading **fails closed**: a certificate that is missing, unreadable, ambiguous, or **expired** keeps the dashboard loopback-only with a Critical log line rather than quietly serving the LAN over HTTP — and because an expired certificate takes the dashboard down, the service warns for the last 30 days before that happens. A TLS-terminating reverse proxy in front of the port remains a perfectly good alternative, and is still the only control for MCP, which has no TLS of its own.
