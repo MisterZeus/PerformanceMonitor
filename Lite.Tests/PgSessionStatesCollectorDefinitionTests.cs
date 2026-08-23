@@ -8,6 +8,7 @@
 
 using System;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Lite.Tests.Helpers;
@@ -146,8 +147,16 @@ public class PgSessionStatesCollectorDefinitionTests
             var sql = PgSessionStatesCollector.Instance.BuildQuery(MakeContext(major)).Text;
 
             /* The reference is allowed in the redaction test and in the command-tag whitelist, where the
-               text is COMPARED but never emitted. What must not appear is a projection of it. */
-            Assert.DoesNotContain("AS query", sql, StringComparison.Ordinal);
+               text is COMPARED but never emitted. What must not appear is a projection of it.
+
+               A REGEX with a trailing word boundary, not DoesNotContain("AS query"): the plain
+               substring also matches "AS query_id", which is the column this collector deliberately
+               DOES emit, so the loose form failed against correct code. It failed in the safe
+               direction - a guard that cries wolf costs a CI round, where one that stays quiet costs
+               a leak - but a guard that cannot tell the thing it forbids from the thing it requires
+               is not yet a guard. \b after "query" needs a non-word character next, and "_" is a word
+               character, so "AS query_id" no longer matches while "AS query," still does. */
+            Assert.DoesNotMatch(new Regex(@"\bAS\s+query\b"), sql);
             Assert.DoesNotContain("a.query AS", sql, StringComparison.Ordinal);
             Assert.DoesNotContain("left(a.query", sql, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("substring(a.query", sql, StringComparison.OrdinalIgnoreCase);

@@ -95,10 +95,28 @@ public sealed class DarlingMcpPgSessionStatesTools
 
         if (r.HorizonHolderSamples > 0)
         {
-            return "Held the oldest xmin in "
-                 + $"{r.HorizonHolderSamples} of {r.SampleCount} sample(s) - a passing sighting rather than "
-                 + "a sustained hold. Every write transaction is briefly the oldest holder, so this on its "
-                 + "own is normal traffic and not a finding. It becomes one if the share climbs.";
+            var passing = "Held the oldest xmin in "
+                        + $"{r.HorizonHolderSamples} of {r.SampleCount} sample(s) - a passing sighting "
+                        + "rather than a sustained hold. Every write transaction is briefly the oldest "
+                        + "holder, so the hold ON ITS OWN is normal traffic. It becomes a finding if the "
+                        + "share climbs.";
+
+            /* But the hold is not the only thing this row can be. A session that is ALSO idle in
+               transaction past the attention floor is a real finding whatever its share of the holds -
+               and returning only the sentence above for it was a genuine bug: the severity band said
+               Warning while this text said "not a finding", in the same JSON object. The two now agree,
+               and the reason they nearly did not is that is_horizon_holder means OLDEST rather than
+               HOLDS: several long transactions on one instance take turns being oldest, so none of them
+               reaches the sustained threshold and every one of them still needs saying. */
+            return r.IdleInTransactionSamples > 0
+                && r.PeakStateDurationMs >= IdleWithoutHorizonAttentionMs
+                ? passing + " It is a finding on the OTHER axis though: at "
+                          + FormatDuration(r.PeakStateDurationMs) + " idle inside a transaction it is "
+                          + "holding a connection and any locks the transaction took, and it did pin "
+                          + "the horizon while it did so - just not as the oldest holder for most of "
+                          + "the window. Being the oldest is a property of the INSTANCE, not of this "
+                          + "session: on a busy one several long transactions take turns."
+                : passing;
         }
 
         if (r.PeakHorizonAge < 0 && r.IdleInTransactionSamples > 0)
@@ -156,6 +174,13 @@ public sealed class DarlingMcpPgSessionStatesTools
             return "Critical";
         }
 
+        /* The Warning band is LONG IDLE IN TRANSACTION, and it is deliberately not conditioned on
+           whether the session pinned anything. Review suggested adding "&& PeakHorizonAge < 0" here to
+           match the viewer; the agreement was real and the direction was wrong. is_horizon_holder means
+           OLDEST on the instance rather than HOLDS, so on a busy instance several genuinely long idle
+           transactions each take turns being oldest, none of them clears the sustained threshold, and
+           that gate would have painted every one of them Healthy - the dangerous direction. The viewer
+           and the finding text were changed to agree with THIS instead. */
         if (r.IdleInTransactionSamples > 0 && r.PeakStateDurationMs >= IdleWithoutHorizonAttentionMs)
         {
             return "Warning";
@@ -277,6 +302,13 @@ public sealed class DarlingMcpPgSessionStatesTools
                 peak_state_duration_ms = r.PeakStateDurationMs,
                 peak_state_duration = FormatDuration(r.PeakStateDurationMs),
                 peak_query_duration_ms = r.PeakQueryDurationMs,
+                /* How long the BACKEND has existed, against how long it has held its transaction. The pair
+                   separates two different bugs that look identical in the transaction duration alone: a
+                   connection created ten minutes ago that has been idle in transaction for all ten is a
+                   pool handing out a session nobody finished with, while a three-day-old worker that has
+                   held one for ten minutes is a code path that forgot to commit. */
+                backend_age_ms = r.PeakBackendDurationMs,
+                backend_age = FormatDuration(r.PeakBackendDurationMs),
                 /* -1 means pinned NOTHING. Not a small age - no age. */
                 peak_horizon_age = r.PeakHorizonAge,
                 peak_xmin_age = r.PeakXminAge,

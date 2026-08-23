@@ -3843,7 +3843,7 @@
                                  at all — painting it by a severity would assert exactly what the redaction
                                  denies. -->
                             <Style.Triggers>
-                                <DataTrigger Binding="{Binding IsIdleWithoutHorizon}" Value="True">
+                                <DataTrigger Binding="{Binding IsLongIdleTransaction}" Value="True">
                                     <Setter Property="Background" Value="#33FFB86B"/>
                                 </DataTrigger>
                                 <DataTrigger Binding="{Binding IsSustainedHorizonHolder}" Value="True">
@@ -3873,6 +3873,7 @@
                         <DataGridTextColumn Header="Peak Xact" Binding="{Binding PeakXactDuration}" Width="110"/>
                         <DataGridTextColumn Header="Peak State" Binding="{Binding PeakStateDuration}" Width="110"/>
                         <DataGridTextColumn Header="Peak Query" Binding="{Binding PeakQueryDuration}" Width="110"/>
+                        <DataGridTextColumn Header="Backend Age" Binding="{Binding BackendAge}" Width="110"/>
                         <DataGridTextColumn Header="Peak xmin Age" Binding="{Binding PeakXminAge}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
                         <DataGridTextColumn Header="Peak XID Age" Binding="{Binding PeakXidAge}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
                         <DataGridTextColumn Header="Last Wait" Binding="{Binding LastWait}" Width="150"/>

@@ -3017,6 +3017,10 @@ const PG_SESSION_STATE_COLUMNS = [
      measured". The third has no string twin, so it goes through sentinelCell for the same reason. */
   { key: "peak_xact_duration", label: "Peak Xact" },
   { key: "peak_state_duration", label: "Peak State" },
+  /* Backend age against transaction age: a connection created ten minutes ago that has been idle in
+     transaction for all ten is a pool handing out a session nobody finished with, while a three-day-old
+     worker holding one for ten minutes is a code path that forgot to commit. Same duration, different bug. */
+  { key: "backend_age", label: "Backend Age" },
   {
     key: "peak_query_duration_ms",
     label: "Peak Query",

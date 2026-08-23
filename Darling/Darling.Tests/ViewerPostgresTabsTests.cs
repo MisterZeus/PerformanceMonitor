@@ -500,7 +500,7 @@ public sealed class ViewerPostgresTabsTests
                transaction that pins NOTHING holds a connection and its locks and costs VACUUM exactly
                zero, so it must never be painted over a session that IS pinning the horizon: that would
                show the harmless shape in the colour reserved for the harmful one. */
-            ["IsIdleWithoutHorizon"] = 1,
+            ["IsLongIdleTransaction"] = 1,
             /* Act-on-this: a SUSTAINED xmin holder is the thing actually starving vacuum across the whole
                cluster. Sustained, not any sighting - every write transaction is momentarily the oldest
                holder, and the projection is what draws that line. */
@@ -610,6 +610,17 @@ public sealed class ViewerPostgresTabsTests
        short idle transaction, the other a brief holder — which is why both cases are here: a bug that
        routed either of them to Warning or Critical would still pass a single-case test. */
     [InlineData(10, 1, 0, 1_000L, 5_000_000L, false, "Healthy")]
+    /* THE CASE THAT WAS MISSING, and its absence hid a real cross-surface bug (found in review): a PASSING
+       holder — 3 of 10, below the sustained threshold — that is ALSO idle in transaction past the attention
+       floor, with a real horizon age because it genuinely pinned. No other row here combines
+       holderSamples > 0 with peakHorizonAge >= 0 AND a long idle, so nothing exercised the path where the
+       MCP band said Warning and the viewer flag fired not at all.
+
+       Warning is the right answer and the VIEWER was the side that was wrong. is_horizon_holder means
+       OLDEST on the instance rather than HOLDS, so several genuinely long idle transactions each take turns
+       being oldest, none of them clears the sustained threshold, and gating the amber on "pinned nothing"
+       painted every one of them Healthy — the dangerous direction. */
+    [InlineData(10, 3, 10, 600_000L, 40_000L, false, "Warning")]
     /* Redacted: its own band above every severity, and neither of the other two flags may fire. */
     [InlineData(10, 9, 10, 600_000L, -1L, true, "Unknown")]
     public void TheViewerFlags_AgreeWithTheMcpSeverityBand(
@@ -625,12 +636,12 @@ public sealed class ViewerPostgresTabsTests
         var display = PgDisplay.SessionState(row);
 
         Assert.Equal(expectedBand == "Critical", display.IsSustainedHorizonHolder);
-        Assert.Equal(expectedBand == "Warning", display.IsIdleWithoutHorizon);
+        Assert.Equal(expectedBand == "Warning", display.IsLongIdleTransaction);
         Assert.Equal(expectedBand == "Unknown", display.StateUnknown);
 
         /* At most one flag is ever set, so the trigger ORDER decides nothing about which colour a row
            takes — it only guarantees the outcome if that ever stops being true. */
-        var lit = new[] { display.IsSustainedHorizonHolder, display.IsIdleWithoutHorizon, display.StateUnknown }
+        var lit = new[] { display.IsSustainedHorizonHolder, display.IsLongIdleTransaction, display.StateUnknown }
             .Count(f => f);
         Assert.True(lit <= 1, $"{lit} row flags fired for band '{expectedBand}'; the bands are exclusive.");
     }
@@ -663,7 +674,8 @@ public sealed class ViewerPostgresTabsTests
             LastSeenAt: new DateTime(2026, 1, 1, 1, 0, 0, DateTimeKind.Unspecified),
             SampleCount: sampleCount, IdleInTransactionSamples: idleSamples,
             HorizonHolderSamples: holderSamples, PeakStateDurationMs: peakStateMs,
-            PeakXactDurationMs: peakStateMs, PeakQueryDurationMs: -1, PeakHorizonAge: peakHorizonAge,
+            PeakXactDurationMs: peakStateMs, PeakQueryDurationMs: -1,
+            PeakBackendDurationMs: peakStateMs + 1_000, PeakHorizonAge: peakHorizonAge,
             PeakXminAge: peakHorizonAge, PeakXidAge: -1, StateWasRedacted: redacted, TotalSessions: 212,
             ActiveSessions: 8, IdleInTransactionSessions: 3, ReportableSessions: 3,
             CaptureWasTruncated: false);

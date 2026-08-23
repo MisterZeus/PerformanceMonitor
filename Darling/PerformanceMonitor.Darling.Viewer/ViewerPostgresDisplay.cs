@@ -854,6 +854,13 @@ internal static class PgDisplay
         public string PeakStateDuration { get; init; } = "";
         public string PeakQueryDuration { get; init; } = "";
 
+        /// <summary>How long the BACKEND has existed, against how long it has held its transaction. The
+        /// pair separates two bugs that look identical in the transaction duration alone: a connection
+        /// created ten minutes ago that has been idle in transaction for all ten is a pool handing out a
+        /// session nobody finished with; a three-day-old worker that has held one for ten minutes is a
+        /// code path that forgot to commit.</summary>
+        public string BackendAge { get; init; } = "";
+
         /// <summary>How often this session was the oldest holder, as a fraction of the samples that saw it —
         /// never a bare count. One sighting in a hundred is normal write traffic; ninety-eight in a hundred
         /// is the reason vacuum reclaims nothing, and a count alone cannot tell them apart.</summary>
@@ -878,10 +885,13 @@ internal static class PgDisplay
         /// sighting — which every write transaction produces — is not painted as a cause.</summary>
         public bool IsSustainedHorizonHolder { get; init; }
 
-        /// <summary>Idle in transaction past the attention threshold and pinning NOTHING: the amber. A
-        /// different finding from the red rather than a weaker one — it costs vacuum nothing and costs a
-        /// connection and its locks, so the two must never share a colour.</summary>
-        public bool IsIdleWithoutHorizon { get; init; }
+        /// <summary>Idle in transaction past the attention threshold: the amber. A different finding from
+        /// the red rather than a weaker one — the red is a session PROVEN to be setting the horizon, this
+        /// is one holding a connection and its locks for minutes, so the two must never share a colour.
+        /// <para>Not gated on whether it pinned anything: <c>is_horizon_holder</c> means OLDEST on the
+        /// instance, so several real long transactions can each take turns being oldest and none of them
+        /// reach the red. The horizon columns say separately whether this one pinned.</para></summary>
+        public bool IsLongIdleTransaction { get; init; }
 
         /// <summary>The row's state columns came back NULL because the monitoring login lacks pg_monitor.
         /// Not a severity: nothing on this row is a trustworthy observation about the database, and painting
@@ -914,9 +924,15 @@ internal static class PgDisplay
             && r.SampleCount > 0
             && r.HorizonHolderSamples >= Math.Max(1, (int)Math.Ceiling(r.SampleCount * SustainedHolderSampleShare));
 
-        var idleWithoutHorizon = !unknown
+        /* Deliberately NOT gated on PeakHorizonAge < 0, and the gate that used to be here was a real
+           cross-surface bug. is_horizon_holder means "the OLDEST holder on the instance", not "holds
+           anything" - so on a busy instance several genuinely long idle transactions each take turns
+           being oldest, none of them clears the sustained threshold, and every one of them pinned
+           something. Requiring "pinned nothing" here painted all of them Healthy while the MCP band
+           called them Warning. The band is "long idle transaction", full stop; whether it pins is an
+           orthogonal fact the horizon columns already carry. */
+        var longIdleTransaction = !unknown
             && r.IdleInTransactionSamples > 0
-            && r.PeakHorizonAge < 0
             && r.PeakStateDurationMs >= IdleWithoutHorizonAttentionMs;
 
         var caveats = new List<string>();
@@ -963,6 +979,7 @@ internal static class PgDisplay
             PeakXactDuration = Milliseconds(r.PeakXactDurationMs),
             PeakStateDuration = Milliseconds(r.PeakStateDurationMs),
             PeakQueryDuration = Milliseconds(r.PeakQueryDurationMs),
+            BackendAge = Milliseconds(r.PeakBackendDurationMs),
             HorizonHoldShare = r.SampleCount <= 0
                 ? NotApplicableText
                 : string.Create(CultureInfo.CurrentCulture,
@@ -979,7 +996,7 @@ internal static class PgDisplay
                 + $"{r.TotalSessions:N0} sessions; {r.ReportableSessions:N0} reportable"),
             Caveats = string.Join("; ", caveats),
             IsSustainedHorizonHolder = sustained,
-            IsIdleWithoutHorizon = idleWithoutHorizon,
+            IsLongIdleTransaction = longIdleTransaction,
             StateUnknown = unknown,
         };
     }

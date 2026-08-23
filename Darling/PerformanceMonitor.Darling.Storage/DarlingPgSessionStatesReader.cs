@@ -46,6 +46,7 @@ public static class DarlingPgSessionStatesReader
         long PeakStateDurationMs,
         long PeakXactDurationMs,
         long PeakQueryDurationMs,
+        long PeakBackendDurationMs,
         long PeakHorizonAge,
         long PeakXminAge,
         long PeakXidAge,
@@ -113,6 +114,7 @@ public static class DarlingPgSessionStatesReader
                 state_duration_ms,
                 xact_duration_ms,
                 query_duration_ms,
+                backend_duration_ms,
                 xmin_age,
                 xid_age,
                 horizon_age,
@@ -169,6 +171,7 @@ public static class DarlingPgSessionStatesReader
                 max(s.state_duration_ms)                            AS peak_state_duration_ms,
                 max(s.xact_duration_ms)                             AS peak_xact_duration_ms,
                 max(s.query_duration_ms)                            AS peak_query_duration_ms,
+                max(s.backend_duration_ms)                          AS peak_backend_duration_ms,
                 max(s.horizon_age)                                  AS peak_horizon_age,
                 max(s.xmin_age)                                     AS peak_xmin_age,
                 max(s.xid_age)                                      AS peak_xid_age,
@@ -200,6 +203,7 @@ public static class DarlingPgSessionStatesReader
             coalesce(r.peak_state_duration_ms, -1)                  AS peak_state_duration_ms,
             coalesce(r.peak_xact_duration_ms, -1)                   AS peak_xact_duration_ms,
             coalesce(r.peak_query_duration_ms, -1)                  AS peak_query_duration_ms,
+            coalesce(r.peak_backend_duration_ms, -1)                AS peak_backend_duration_ms,
             coalesce(r.peak_horizon_age, -1)                        AS peak_horizon_age,
             coalesce(r.peak_xmin_age, -1)                           AS peak_xmin_age,
             coalesce(r.peak_xid_age, -1)                            AS peak_xid_age,
@@ -284,15 +288,16 @@ public static class DarlingPgSessionStatesReader
             reader.IsDBNull(20) ? -1 : reader.GetInt64(20),
             reader.IsDBNull(21) ? -1 : reader.GetInt64(21),
             reader.IsDBNull(22) ? -1 : reader.GetInt64(22),
+            reader.IsDBNull(23) ? -1 : reader.GetInt64(23),
             /* Defaults TRUE on an absent value, deliberately the cautious direction: state_was_redacted is
                the flag that tells a reader the state columns cannot be trusted, so an unknown must not
                manufacture confidence. Every other boolean here defaults false. */
-            reader.IsDBNull(23) || reader.GetBoolean(23),
-            reader.IsDBNull(24) ? 0 : reader.GetInt32(24),
+            reader.IsDBNull(24) || reader.GetBoolean(24),
             reader.IsDBNull(25) ? 0 : reader.GetInt32(25),
             reader.IsDBNull(26) ? 0 : reader.GetInt32(26),
             reader.IsDBNull(27) ? 0 : reader.GetInt32(27),
-            !reader.IsDBNull(28) && reader.GetBoolean(28));
+            reader.IsDBNull(28) ? 0 : reader.GetInt32(28),
+            !reader.IsDBNull(29) && reader.GetBoolean(29));
     }
 
     /// <summary>

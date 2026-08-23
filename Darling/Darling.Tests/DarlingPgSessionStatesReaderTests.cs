@@ -7,7 +7,9 @@
  */
 
 using System;
+using System.Linq;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -89,6 +91,10 @@ public class DarlingPgSessionStatesReaderTests
     [InlineData("max(s.horizon_age)")]
     [InlineData("max(s.xmin_age)")]
     [InlineData("max(s.xid_age)")]
+    /* backend_duration_ms was collected, stored and given its own V86 column, and the reader never
+       selected it - found in review. It is the "captured data that no read reports" category, and the
+       repair for that category is an assertion rather than a one-off fix. */
+    [InlineData("max(s.backend_duration_ms)")]
     public void ReportsPeaksNotAverages(string fragment)
     {
         Assert.Contains(fragment, Squeezed, StringComparison.Ordinal);
@@ -154,6 +160,35 @@ public class DarlingPgSessionStatesReaderTests
             "bool_or(c.reportable_sessions > c.rows_stored)", Squeezed, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// EVERY column the collector stores is read back by some read.
+    ///
+    /// <para><b>An invariant, not a spot fix.</b> Review found <c>backend_duration_ms</c> collected, written
+    /// by <c>WritePayload</c> and given its own column in the V86 rung — and never selected by the reader,
+    /// so it was written every minute of every day and reachable only by hand-written SQL against the store.
+    /// That is the "captured data that no read reports" category, and the repair for a category is an
+    /// assertion that closes it rather than one more remembered column.</para>
+    ///
+    /// <para>Derived from the SHIPPED artifacts on both sides — <c>PayloadColumns</c> and the reader's own
+    /// SQL constants — rather than from a list written here, so it cannot keep passing while the two drift
+    /// underneath it.</para>
+    /// </summary>
+    [Fact]
+    public void EveryStoredColumn_IsReadBackBySomeRead()
+    {
+        var unread = PgSessionStatesCollector.Instance.PayloadColumns
+            .Select(c => c.Name)
+            .Where(name => !Sql.Contains(name, StringComparison.Ordinal)
+                           && !CountsSql.Contains(name, StringComparison.Ordinal))
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
+
+        Assert.True(unread.Count == 0,
+            "These columns are collected and stored every cycle and no read selects them, so they are "
+            + "reachable only by hand-written SQL against the store. Either surface them or stop storing "
+            + "them:\n  " + string.Join("\n  ", unread));
+    }
+
     // ── The denominator ──────────────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -211,6 +246,7 @@ public class DarlingPgSessionStatesReaderTests
             PeakStateDurationMs: peakStateDurationMs,
             PeakXactDurationMs: peakStateDurationMs,
             PeakQueryDurationMs: peakStateDurationMs,
+            PeakBackendDurationMs: peakStateDurationMs + 1_000,
             PeakHorizonAge: peakHorizonAge,
             PeakXminAge: -1,
             PeakXidAge: peakHorizonAge,
