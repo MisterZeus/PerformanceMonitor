@@ -570,9 +570,12 @@ role needs `pg_read_all_data` (PostgreSQL 14+) before this panel can say anythin
 dead-tuple percentage beside it are unaffected — those come from the server's own counters.
 
 **The Sessions panel on the Vacuum tab needs `pg_monitor`, and without it it fails QUIETLY rather than
-loudly.** PostgreSQL does not refuse the read: it returns every row with `state`, `state_change`,
-`xact_start`, `backend_start` and `query_id` NULL and the statement text replaced by an
-insufficient-privilege literal — while leaving `backend_xmin` and `backend_xid` VISIBLE. So the horizon
+loudly.** PostgreSQL does not refuse the read: for every backend the login does not own it returns the
+row with all but six columns NULL. Measured column by column on PostgreSQL 16.15, what survives is
+`pid`, `application_name`, the database and the user — plus `backend_xid` and `backend_xmin`. `state`,
+`state_change`, `xact_start`, `query_start`, `backend_start`, `wait_event`, `backend_type`,
+`client_addr` and `query_id` all come back NULL and the statement text is replaced by an
+insufficient-privilege literal — while `backend_xmin` and `backend_xid` stay VISIBLE. So the horizon
 still reads as pinned and nothing on the screen can say by what. Measured against a least-privileged role
 on the same nine backends, the privileged role saw four sessions idle in transaction and the unprivileged
 one saw zero. Rows in that state are marked redacted and carry no severity at all rather than being

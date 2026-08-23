@@ -301,8 +301,9 @@ public class DarlingPgSessionStatesReaderTests
     /// healthy or critical.
     /// <para>If the state columns came back NULL for want of pg_monitor then every input to every other
     /// finding is an artefact of a missing GRANT rather than an observation about the database. Measured:
-    /// PostgreSQL does not refuse the read, it returns the row with state, state_change, xact_start,
-    /// backend_start and query_id NULL — while leaving backend_xmin and backend_xid VISIBLE, so the horizon
+    /// PostgreSQL does not refuse the read, it returns the row with everything but pid, application_name,
+    /// datname, usename, backend_xid and backend_xmin NULL — so backend_xmin and backend_xid stay VISIBLE
+    /// and the horizon
     /// still reads as pinned and nothing can say by what. Same treatment estimate_unavailable gets on the
     /// bloat surface, for the same reason.</para>
     /// </summary>

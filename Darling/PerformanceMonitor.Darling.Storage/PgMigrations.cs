@@ -1904,9 +1904,12 @@ CREATE INDEX IF NOT EXISTS idx_pg_table_bloat_stats_time
     ///
     /// <para><b><c>state_is_redacted</c> exists because this feature fails silently without
     /// <c>pg_monitor</c>.</b> Measured against a least-privileged role: PostgreSQL does not refuse the read,
-    /// it returns every row with <c>state</c>, <c>state_change</c>, <c>xact_start</c>, <c>backend_start</c>
-    /// and <c>query_id</c> NULL and the query text replaced by an insufficient-privilege literal — while
-    /// leaving <c>backend_xmin</c> and <c>backend_xid</c> visible. So the horizon still reads as pinned and
+    /// it returns every row for every backend the login does not own with all but SIX columns NULL. What
+    /// survives is <c>pid</c>, <c>application_name</c>, <c>datname</c>, <c>usename</c>, <c>backend_xid</c>
+    /// and <c>backend_xmin</c>; <c>state</c>, <c>state_change</c>, <c>xact_start</c>, <c>query_start</c>,
+    /// <c>backend_start</c>, <c>wait_event_type</c>, <c>wait_event</c>, <c>backend_type</c>,
+    /// <c>client_addr</c>, <c>leader_pid</c> and <c>query_id</c> do not, and the query text is replaced by
+    /// an insufficient-privilege literal — leaving <c>backend_xmin</c> and <c>backend_xid</c> visible. So the horizon still reads as pinned and
     /// every column that could explain it is gone. On the same live capture the privileged role saw four
     /// idle-in-transaction sessions and the unprivileged one saw zero, out of the same nine backends. The
     /// flag is derived from the privilege literal rather than from a NULL state because background workers

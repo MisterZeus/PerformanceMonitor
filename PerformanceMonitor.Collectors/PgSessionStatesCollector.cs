@@ -72,11 +72,15 @@ namespace PerformanceMonitor.Collectors;
 ///
 /// <para><b><c>pg_monitor</c> is load-bearing here in a way that fails silently.</b> Measured against a
 /// least-privileged role on the live rig: without <c>pg_monitor</c>, PostgreSQL does not deny the read — it
-/// returns every row with <c>state</c>, <c>state_change</c>, <c>xact_start</c>, <c>query_start</c>,
-/// <c>backend_type</c> and <c>query_id</c> all NULL and <c>query</c> replaced by the literal
-/// <c>&lt;insufficient privilege&gt;</c>, for every backend the login does not own.
-/// <c>backend_xmin</c> and <c>backend_xid</c> stay visible, which is the cruel part: the horizon still reads
-/// as pinned and nothing can say by what. Every discriminating column this collector needs is in the
+/// returns every row, for every backend the login does not own, with all but SIX columns NULL. Measured
+/// column by column on PostgreSQL 16.15 rather than enumerated from memory: what survives is
+/// <c>pid</c>, <c>application_name</c>, <c>datname</c>, <c>usename</c>, <c>backend_xid</c> and
+/// <c>backend_xmin</c>. Everything else — <c>state</c>, <c>state_change</c>, <c>xact_start</c>,
+/// <c>query_start</c>, <c>backend_start</c>, <c>wait_event_type</c>, <c>wait_event</c>,
+/// <c>backend_type</c>, <c>client_addr</c>, <c>leader_pid</c> and <c>query_id</c> — comes back NULL, and
+/// <c>query</c> is replaced by the literal <c>&lt;insufficient privilege&gt;</c>. That two of the six
+/// survivors are <c>backend_xid</c> and <c>backend_xmin</c> is the cruel part: the horizon still reads as
+/// pinned and nothing can say by what. Every discriminating column this collector needs is in the
 /// redacted set, so without the grant the feature is gutted while looking healthy. That is why
 /// <c>state_is_redacted</c> is stamped per row off the <c>&lt;insufficient privilege&gt;</c> literal rather
 /// than off <c>state IS NULL</c> — background workers legitimately have a NULL state under full privilege
@@ -281,7 +285,13 @@ WITH activity AS
        the instance's parallelism. The leader represents them. The '<> pid' guard rather than a bare NULL
        check because leader_pid is documented NULL for a plain leader but is set to the process's OWN pid for
        a leader that participates in its parallel group on newer majors — excluding on NULL alone would drop
-       those leaders entirely. leader_pid exists from PostgreSQL 13, the floor. */
+       those leaders entirely. leader_pid exists from PostgreSQL 13, the floor.
+
+       leader_pid is itself in the privileged column set (measured), so without pg_monitor it is NULL for
+       every backend the login does not own and this guard stops excluding anything - a parallel worker
+       would come through as its own row. That errs toward INCLUDING rather than dropping, which is the safe
+       direction for a guard whose only job is to avoid double-counting, and state_is_redacted already tells
+       the reader the whole row is untrustworthy. */
     AND   (a.leader_pid IS NULL OR a.leader_pid = a.pid)
 ),
 /* Capture-wide context, computed once and carried on every row.
@@ -303,8 +313,15 @@ totals AS
            is already unreliable. A handful of background rows inflates the count on a quiet instance and
            changes nothing on a busy one, which is the cheaper error. */
         count(*)::int                                                       AS total_sessions,
-        /* Also NULL-driven under redaction, and therefore 0 there. state_is_redacted on the row is what
-           says so; these counts must be read through it rather than at face value. */
+        /* Both are derived from state, which redaction nulls - so under redaction they count only the
+           backends the monitoring login OWNS. Redaction is per-BACKEND and ownership-based rather than
+           per-role-wide (measured: an unprivileged role sees its OWN backend with a live state and a real
+           query while every other row is redacted), and this collector already excludes its own session,
+           so in practice that leaves 0 unless the login holds several connections at capture time.
+
+           Either way these two UNDER-report rather than reporting nothing, which is the more dangerous
+           shape of the two: state_is_redacted on the row is what says the numbers cannot be read at face
+           value. */
         count(*) FILTER (WHERE state = 'active')::int                       AS active_sessions,
         count(*) FILTER (WHERE is_idle_in_transaction)::int                 AS idle_in_transaction_sessions,
         /* The oldest holder on the instance, or NULL when nothing holds the horizon at all. Computed over

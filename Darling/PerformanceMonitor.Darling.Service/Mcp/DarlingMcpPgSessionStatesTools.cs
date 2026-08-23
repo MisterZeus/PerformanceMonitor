@@ -69,11 +69,12 @@ public sealed class DarlingMcpPgSessionStatesTools
         if (r.StateWasRedacted)
         {
             return "CANNOT SAY - the monitoring login lacks pg_monitor on this target, so PostgreSQL "
-                 + "redacted this row. state, state_change, xact_start, backend_start and query_id all came "
-                 + "back NULL and the query text was replaced. backend_xmin and backend_xid are NOT "
-                 + "redacted, which is why an xid age can still appear above: the horizon still reads as "
-                 + "pinned and nothing here can say by what. Grant pg_monitor to the monitoring role and "
-                 + "this becomes answerable.";
+                 + "redacted this row. Only pid, application_name, database and user survive - state, "
+                 + "state_change, xact_start, query_start, backend_start, wait_event, backend_type, "
+                 + "client_addr and query_id all came back NULL and the query text was replaced. "
+                 + "backend_xmin and backend_xid are NOT redacted, which is why an xid age can still "
+                 + "appear above: the horizon still reads as pinned and nothing here can say by what. "
+                 + "Grant pg_monitor to the monitoring role and this becomes answerable.";
         }
 
         var sustained = r.SampleCount > 0
