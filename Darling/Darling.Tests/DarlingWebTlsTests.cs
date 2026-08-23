@@ -180,8 +180,9 @@ public sealed class DarlingWebTlsTests
         var config = new WebTlsConfig { PfxPath = path, PfxPassword = "hunter2" };
         using var loaded = DarlingWebTls.Load(config, DarlingWebTls.Describe(config).Shape);
 
-        Assert.True(loaded.HasPrivateKey);
-        Assert.Equal(generated.Thumbprint, loaded.Thumbprint);
+        Assert.True(loaded.Leaf.HasPrivateKey);
+        Assert.Equal(generated.Thumbprint, loaded.Leaf.Thumbprint);
+        Assert.Empty(loaded.Chain);
     }
 
     [Fact]
@@ -196,7 +197,7 @@ public sealed class DarlingWebTlsTests
         var config = new WebTlsConfig { PfxPath = path };
         using var loaded = DarlingWebTls.Load(config, DarlingWebTls.Describe(config).Shape);
 
-        Assert.True(loaded.HasPrivateKey);
+        Assert.True(loaded.Leaf.HasPrivateKey);
     }
 
     [Fact]
@@ -216,8 +217,8 @@ public sealed class DarlingWebTlsTests
         var config = new WebTlsConfig { CertPath = certPath, KeyPath = keyPath };
         using var loaded = DarlingWebTls.Load(config, DarlingWebTls.Describe(config).Shape);
 
-        Assert.True(loaded.HasPrivateKey);
-        Assert.Equal(generated.Thumbprint, loaded.Thumbprint);
+        Assert.True(loaded.Leaf.HasPrivateKey);
+        Assert.Equal(generated.Thumbprint, loaded.Leaf.Thumbprint);
     }
 
     [Fact]
@@ -255,6 +256,115 @@ public sealed class DarlingWebTlsTests
 
         Assert.Contains(pem ? "certPath" : "pfxPath", ex.Message, StringComparison.Ordinal);
     }
+
+    /* ---- The intermediate chain: what actually reaches the wire ---- */
+
+    [Fact]
+    public void Load_Pem_CarriesTheIntermediate_AndDropsTheRoot()
+    {
+        /* The bug this pins: X509Certificate2.CreateFromPemFile materializes only the FIRST certificate in
+           the file, so a leaf+intermediate PEM - exactly the layout WebTlsConfig.CertPath documents - loaded
+           as a bare leaf and the listener served an incomplete chain. Measured before the fix with
+           `openssl s_client -showcerts`: a PEM holding two certificates put ONE on the wire, which fails the
+           handshake on any client that has not independently cached the intermediate. Revert IntermediatesOf
+           and this test goes red.
+
+           The root is excluded on purpose: a client that does not trust it is not persuaded by our sending
+           it, and one that does already has it. */
+        using var temp = new TempDir();
+        var (root, intermediate, leaf, leafKey) = Chain();
+        using (root)
+        using (intermediate)
+        using (leaf)
+        using (leafKey)
+        {
+            var certPath = Path.Combine(temp.Path, "chain.crt");
+            var keyPath = Path.Combine(temp.Path, "chain.key");
+            File.WriteAllText(
+                certPath,
+                leaf.ExportCertificatePem() + "\n" + intermediate.ExportCertificatePem() + "\n" + root.ExportCertificatePem() + "\n");
+            File.WriteAllText(keyPath, leafKey.ExportPkcs8PrivateKeyPem());
+
+            var config = new WebTlsConfig { CertPath = certPath, KeyPath = keyPath };
+            using var loaded = DarlingWebTls.Load(config, DarlingWebTls.Describe(config).Shape);
+
+            Assert.Equal(leaf.Thumbprint, loaded.Leaf.Thumbprint);
+            Assert.True(loaded.Leaf.HasPrivateKey);
+            Assert.Equal(1, loaded.Chain.Count);
+            Assert.Equal(intermediate.Thumbprint, loaded.Chain[0].Thumbprint);
+        }
+    }
+
+    [Fact]
+    public void Load_Pfx_CarriesTheIntermediate_AndFindsTheLeafByItsKey()
+    {
+        /* A PKCS#12 bundle routinely holds the whole chain, and LoadPkcs12FromFile returns exactly one
+           certificate of it - silently, with no ordering guarantee about which. The leaf is identified by
+           holding the private key rather than by position, because position is not a contract. */
+        using var temp = new TempDir();
+        var (root, intermediate, leaf, leafKey) = Chain();
+        using (root)
+        using (intermediate)
+        using (leafKey)
+        {
+            var bundle = new X509Certificate2Collection { root, intermediate, leaf };
+            var path = Path.Combine(temp.Path, "chain.pfx");
+            File.WriteAllBytes(path, bundle.Export(X509ContentType.Pkcs12, "hunter2")!);
+            leaf.Dispose();
+
+            var config = new WebTlsConfig { PfxPath = path, PfxPassword = "hunter2" };
+            using var loaded = DarlingWebTls.Load(config, DarlingWebTls.Describe(config).Shape);
+
+            Assert.True(loaded.Leaf.HasPrivateKey);
+            Assert.Equal("CN=localhost", loaded.Leaf.Subject);
+            Assert.Equal(1, loaded.Chain.Count);
+            Assert.Equal(intermediate.Thumbprint, loaded.Chain[0].Thumbprint);
+        }
+    }
+
+    [Fact]
+    public void Load_Pfx_WithNoPrivateKey_SaysSo()
+    {
+        /* A bundle exported without the key configures fine and then fails every handshake. Naming it here
+           costs one search and turns a runtime mystery into a startup sentence. */
+        using var temp = new TempDir();
+        using var generated = SelfSigned();
+        var path = Path.Combine(temp.Path, "public-only.pfx");
+        File.WriteAllBytes(path, new X509Certificate2Collection(
+            X509CertificateLoader.LoadCertificate(generated.Export(X509ContentType.Cert))).Export(X509ContentType.Pkcs12)!);
+
+        var config = new WebTlsConfig { PfxPath = path };
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => DarlingWebTls.Load(config, DarlingWebTls.Describe(config).Shape));
+
+        Assert.Contains("no certificate with a private key", ex.Message, StringComparison.Ordinal);
+    }
+
+    /* ---- A stray password beside a working PEM pair ---- */
+
+    [Fact]
+    public void Describe_PemPairWithAStrayPfxPassword_WarnsButStillServes()
+    {
+        /* Deliberately NOT a refusal, unlike password-with-no-bundle. There the operator believes TLS is on
+           when nothing is configured, so refusing is the only thing standing between them and plain HTTP.
+           Here TLS genuinely is on and the leftover password is inert - taking a working dashboard down over
+           it would be the worse outcome. The case worth naming is a half-finished PEM->PFX migration. */
+        var plan = DarlingWebTls.Describe(new WebTlsConfig
+        {
+            CertPath = "/certs/dash.crt",
+            KeyPath = "/certs/dash.key",
+            PfxPassword = "left-over",
+        });
+
+        Assert.Equal(DarlingWebTls.TlsShape.Pem, plan.Shape);
+        Assert.Null(plan.Problem);
+        Assert.NotNull(plan.Warning);
+        Assert.Contains("the PEM pair is being served", plan.Warning, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Describe_CleanPemPair_HasNoWarning()
+        => Assert.Null(DarlingWebTls.Describe(new WebTlsConfig { CertPath = "/c", KeyPath = "/k" }).Warning);
 
     /* ---- The password slots, mirroring the token slots ---- */
 
@@ -314,7 +424,8 @@ public sealed class DarlingWebTlsTests
         var source = ReadSource(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs"));
 
-        Assert.Contains("listen.UseHttps(listenerCertificate)", source, StringComparison.Ordinal);
+        Assert.Contains("https.ServerCertificate = listenerCertificate.Value.Leaf;", source, StringComparison.Ordinal);
+        Assert.Contains("https.ServerCertificateChain = listenerCertificate.Value.Chain;", source, StringComparison.Ordinal);
         Assert.Contains("options.Listen(IPAddress.Loopback, effectivePort);", source, StringComparison.Ordinal);
         Assert.Contains("options.Listen(IPAddress.IPv6Loopback, effectivePort);", source, StringComparison.Ordinal);
 
@@ -371,6 +482,30 @@ public sealed class DarlingWebTlsTests
         var request = new CertificateRequest(
             "CN=darling-web-tests", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
         return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365));
+    }
+
+    /// <summary>A real root -> intermediate -> leaf chain, so the chain tests measure the thing itself.</summary>
+    private static (X509Certificate2 Root, X509Certificate2 Intermediate, X509Certificate2 Leaf, RSA LeafKey) Chain()
+    {
+        using var rootKey = RSA.Create(2048);
+        var rootRequest = new CertificateRequest("CN=darling-test-root", rootKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        rootRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
+        var root = rootRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(3650));
+
+        using var interKey = RSA.Create(2048);
+        var interRequest = new CertificateRequest("CN=darling-test-intermediate", interKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        interRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
+        interRequest.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(interRequest.PublicKey, false));
+        using var interNoKey = interRequest.Create(root, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1825), Guid.NewGuid().ToByteArray());
+        var intermediate = interNoKey.CopyWithPrivateKey(interKey);
+
+        var leafKey = RSA.Create(2048);
+        var leafRequest = new CertificateRequest("CN=localhost", leafKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        leafRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
+        using var leafNoKey = leafRequest.Create(intermediate, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365), Guid.NewGuid().ToByteArray());
+        var leaf = leafNoKey.CopyWithPrivateKey(leafKey);
+
+        return (root, intermediate, leaf, leafKey);
     }
 
     private static int CountOccurrences(string haystack, string needle)

@@ -56,9 +56,30 @@ internal static class DarlingWebTls
         Invalid,
     }
 
-    /// <summary>The (shape, problem) pair from <see cref="Describe"/>. <see cref="Problem"/> is non-null
-    /// exactly when <see cref="Shape"/> is <see cref="TlsShape.Invalid"/>, and is operator-facing text.</summary>
-    internal readonly record struct TlsPlan(TlsShape Shape, string? Problem);
+    /// <summary>The verdict from <see cref="Describe"/>. <see cref="Problem"/> is non-null exactly when
+    /// <see cref="Shape"/> is <see cref="TlsShape.Invalid"/>. <see cref="Warning"/> is independent of both: a
+    /// usable block that still says something the operator probably did not mean.</summary>
+    internal readonly record struct TlsPlan(TlsShape Shape, string? Problem, string? Warning = null);
+
+    /// <summary>
+    /// A loaded certificate and the intermediates that must travel with it. Separate fields rather than one
+    /// collection because Kestrel wants them separately (<c>ServerCertificate</c> +
+    /// <c>ServerCertificateChain</c>), and because conflating "the certificate we present" with "the certs
+    /// that prove it" is the confusion that produced the bug this type exists to fix.
+    /// </summary>
+    internal readonly record struct LoadedCertificate(X509Certificate2 Leaf, X509Certificate2Collection Chain)
+        : IDisposable
+    {
+        /// <summary>Disposes the leaf AND every intermediate — on Windows each holds machine key-store state.</summary>
+        public void Dispose()
+        {
+            Leaf.Dispose();
+            foreach (var extra in Chain)
+            {
+                extra.Dispose();
+            }
+        }
+    }
 
     /// <summary>
     /// PURE classification of the <c>tls</c> block. Never touches the filesystem: "the config names a PFX" and
@@ -97,7 +118,20 @@ internal static class DarlingWebTls
 
         if (hasCert && hasKey)
         {
-            return new TlsPlan(TlsShape.Pem, null);
+            /* A PKCS#12 password left behind on a PEM deployment is inert — the certificate served is
+               unambiguous — so this WARNS rather than refusing, unlike the password-with-no-bundle case
+               below. The difference is what the operator believes: there, nothing is configured and they
+               think TLS is on, so refusing is the only thing that prevents plain HTTP; here TLS genuinely
+               is on, and taking a working dashboard down over a stale key would be the worse outcome. The
+               case that makes it worth saying anything at all is a half-finished PEM->PFX migration, where
+               the password landed before the pfxPath and the operator is watching the wrong certificate. */
+            return new TlsPlan(
+                TlsShape.Pem,
+                null,
+                hasPassword
+                    ? "web.network.tls sets a PKCS#12 password alongside a PEM pair — the PEM pair is being served "
+                      + "and the password is ignored. Remove it, or finish setting pfxPath if the bundle was the one you meant."
+                    : null);
         }
 
         if (hasCert || hasKey)
@@ -172,7 +206,7 @@ internal static class DarlingWebTls
     /// </summary>
     /// <param name="tls">The block, already classified by <see cref="Describe"/>.</param>
     /// <param name="shape">The classification, so this never re-decides what the config meant.</param>
-    internal static X509Certificate2 Load(WebTlsConfig tls, TlsShape shape)
+    internal static LoadedCertificate Load(WebTlsConfig tls, TlsShape shape)
     {
         ArgumentNullException.ThrowIfNull(tls);
 
@@ -185,7 +219,7 @@ internal static class DarlingWebTls
         };
     }
 
-    private static X509Certificate2 LoadPfx(WebTlsConfig tls)
+    private static LoadedCertificate LoadPfx(WebTlsConfig tls)
     {
         var path = tls.PfxPath!.Trim();
         RequireFile(path, "web.network.tls.pfxPath");
@@ -203,9 +237,13 @@ internal static class DarlingWebTls
                 $"web.network.tls: the PKCS#12 password could not be resolved ({ex.Message})", ex);
         }
 
+        X509Certificate2Collection bundle;
         try
         {
-            return X509CertificateLoader.LoadPkcs12FromFile(path, password, KeyStorageFlags());
+            /* The COLLECTION loader, not LoadPkcs12FromFile: a PKCS#12 bundle routinely carries the issuing
+               chain beside the leaf, and the single-certificate loader returns only one of them — silently,
+               so the listener comes up and serves an incomplete chain. */
+            bundle = X509CertificateLoader.LoadPkcs12CollectionFromFile(path, password, KeyStorageFlags());
         }
         catch (Exception ex)
         {
@@ -215,22 +253,61 @@ internal static class DarlingWebTls
                 + "rather than as a bad password.",
                 ex);
         }
+
+        /* The leaf is the one holding the private key. A bundle's ordering is not guaranteed, so this must be
+           a search rather than [0] — and a bundle with no private key at all cannot serve TLS, which is worth
+           saying plainly instead of failing later at the handshake. */
+        X509Certificate2? leaf = null;
+        foreach (var candidate in bundle)
+        {
+            if (candidate.HasPrivateKey)
+            {
+                leaf = candidate;
+                break;
+            }
+        }
+
+        if (leaf is null)
+        {
+            foreach (var candidate in bundle)
+            {
+                candidate.Dispose();
+            }
+
+            throw new InvalidOperationException(
+                $"web.network.tls.pfxPath '{path}' contains no certificate with a private key — a TLS server "
+                + "certificate must carry its key (export the bundle with the key included).");
+        }
+
+        return new LoadedCertificate(leaf, IntermediatesOf(bundle, leaf));
     }
 
-    private static X509Certificate2 LoadPem(WebTlsConfig tls)
+    private static LoadedCertificate LoadPem(WebTlsConfig tls)
     {
         var certPath = tls.CertPath!.Trim();
         var keyPath = tls.KeyPath!.Trim();
         RequireFile(certPath, "web.network.tls.certPath");
         RequireFile(keyPath, "web.network.tls.keyPath");
 
+        /* Read the WHOLE file, not just the leaf. CreateFromPemFile below materializes only the FIRST
+           certificate, so on its own it drops every intermediate the operator appended — which is exactly what
+           the config doc tells them to do, and exactly the incomplete-chain handshake failure that produces on
+           any client that has not independently cached the intermediate. Measured before this was fixed: a PEM
+           holding leaf + intermediate served one certificate. */
+        var bundle = new X509Certificate2Collection();
         X509Certificate2 fromPem;
         try
         {
+            bundle.ImportFromPemFile(certPath);
             fromPem = X509Certificate2.CreateFromPemFile(certPath, keyPath);
         }
         catch (Exception ex)
         {
+            foreach (var loaded in bundle)
+            {
+                loaded.Dispose();
+            }
+
             throw new InvalidOperationException(
                 $"web.network.tls: the PEM pair '{certPath}' / '{keyPath}' could not be loaded ({ex.Message})", ex);
         }
@@ -240,21 +317,64 @@ internal static class DarlingWebTls
            configuration time and then fails every handshake at runtime, which is the worst possible place for
            this to surface. Round-tripping through an in-memory PKCS#12 re-associates the key through the
            platform's own key store and is the standard fix. Costs one export/import at startup, once. */
+        X509Certificate2 leaf;
         using (fromPem)
         {
             var pkcs12 = fromPem.Export(X509ContentType.Pkcs12);
             try
             {
-                return X509CertificateLoader.LoadPkcs12(pkcs12, password: null, KeyStorageFlags());
+                leaf = X509CertificateLoader.LoadPkcs12(pkcs12, password: null, KeyStorageFlags());
             }
             catch (Exception ex)
             {
+                foreach (var loaded in bundle)
+                {
+                    loaded.Dispose();
+                }
+
                 throw new InvalidOperationException(
                     $"web.network.tls: the PEM pair '{certPath}' / '{keyPath}' loaded but could not be prepared "
                     + $"for the TLS listener ({ex.Message})",
                     ex);
             }
         }
+
+        return new LoadedCertificate(leaf, IntermediatesOf(bundle, leaf));
+    }
+
+    /// <summary>
+    /// The certificates from <paramref name="bundle"/> that must accompany <paramref name="leaf"/> on the
+    /// wire, disposing the ones that must not. Two exclusions, each deliberate:
+    ///
+    /// <list type="bullet">
+    /// <item>The <b>leaf itself</b>, matched by thumbprint — Kestrel is handed it separately, and sending it
+    /// twice is a malformed chain.</item>
+    /// <item>Any <b>self-issued root</b>. A root a client does not already trust is not made trustworthy by
+    /// our sending it, and a root it does trust it already has; either way it is handshake bytes that buy
+    /// nothing. Bundles routinely include one because that is what "export the whole chain" produces.</item>
+    /// </list>
+    /// </summary>
+    private static X509Certificate2Collection IntermediatesOf(X509Certificate2Collection bundle, X509Certificate2 leaf)
+    {
+        var chain = new X509Certificate2Collection();
+        foreach (var candidate in bundle)
+        {
+            if (string.Equals(candidate.Thumbprint, leaf.Thumbprint, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(candidate.SubjectName.Name, candidate.IssuerName.Name, StringComparison.Ordinal))
+            {
+                /* Not the caller's to release: the leaf is returned separately and lives on. */
+                if (!ReferenceEquals(candidate, leaf))
+                {
+                    candidate.Dispose();
+                }
+
+                continue;
+            }
+
+            chain.Add(candidate);
+        }
+
+        return chain;
     }
 
     /// <summary>

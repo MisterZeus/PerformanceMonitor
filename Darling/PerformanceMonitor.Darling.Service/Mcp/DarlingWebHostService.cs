@@ -70,11 +70,12 @@ public sealed class DarlingWebHostService : BackgroundService
     private WebApplication? _app;
     private NpgsqlDataSource? _appDataSource;
 
-    /// <summary>The TLS certificate the current network listener presents, held for its lifetime (#2562).
-    /// Disposal is not bookkeeping: on Windows the private key is loaded with
-    /// <c>MachineKeySet</c> and no <c>PersistKeySet</c>, so disposing is what REMOVES the key material from the
-    /// machine key store. A rebind that leaked it would accumulate a key per restart.</summary>
-    private X509Certificate2? _serverCertificate;
+    /// <summary>The TLS certificate the current network listener presents — the leaf AND the intermediates
+    /// that travel with it (#2562) — held for its lifetime. Disposal is not bookkeeping: on Windows the
+    /// private key is loaded with <c>MachineKeySet</c> and no <c>PersistKeySet</c>, so disposing is what
+    /// REMOVES the key material from the machine key store. A rebind that leaked it would accumulate a key
+    /// per restart.</summary>
+    private DarlingWebTls.LoadedCertificate? _serverCertificate;
 
     private int _runningPort;
 
@@ -367,7 +368,7 @@ public sealed class DarlingWebHostService : BackgroundService
                kept free of both. It also means a certificate failure degrades exactly the way a token failure
                does — Critical, then loopback-only — instead of needing its own BindReason, which the MCP host's
                parallel enum would have had to grow a member it can never use. */
-            X509Certificate2? serverCertificate = null;
+            DarlingWebTls.LoadedCertificate? serverCertificate = null;
             if (networkMode)
             {
                 var plan = DarlingWebTls.Describe(network!.Tls);
@@ -395,7 +396,13 @@ public sealed class DarlingWebHostService : BackgroundService
                     default:
                         try
                         {
-                            var certificate = DarlingWebTls.Load(network.Tls!, plan.Shape);
+                            var loaded = DarlingWebTls.Load(network.Tls!, plan.Shape);
+                            var certificate = loaded.Leaf;
+
+                            if (plan.Warning is not null)
+                            {
+                                _logger.LogWarning("Web dashboard TLS: {Warning}", plan.Warning);
+                            }
 
                             /* Lifetime is checked BEFORE the listener is built, not left to the handshake: an
                                expired certificate takes the dashboard down either way, and this is the only
@@ -411,7 +418,7 @@ public sealed class DarlingWebHostService : BackgroundService
                                 DateTimeOffset.UtcNow);
                             if (refusal is not null)
                             {
-                                certificate.Dispose();
+                                loaded.Dispose();
                                 _logger.LogCritical(
                                     "Web dashboard TLS certificate cannot be used ({Refusal}) — refusing to expose; binding loopback-only.",
                                     refusal);
@@ -421,8 +428,8 @@ public sealed class DarlingWebHostService : BackgroundService
 
                             /* Adopted by the field IMMEDIATELY, before any of the bail paths below it (port in
                                use, store credential not ready), so every one of them releases the key. */
-                            serverCertificate = certificate;
-                            _serverCertificate = certificate;
+                            serverCertificate = loaded;
+                            _serverCertificate = loaded;
 
                             /* The SAN has to name the IP, not a hostname, and that is a consequence of a
                                control that lives two files away: the anti-DNS-rebind Host allowlist accepts
@@ -553,7 +560,19 @@ public sealed class DarlingWebHostService : BackgroundService
                     {
                         if (listenerCertificate is not null)
                         {
-                            listen.UseHttps(listenerCertificate);
+                            /* ServerCertificateChain, not just ServerCertificate: Kestrel presents ONLY what
+                               it is handed, so an intermediate left out here is an incomplete chain and a
+                               failed handshake on every client that has not independently cached it. Measured
+                               against a real leaf+intermediate PEM before this was wired: the server sent one
+                               certificate. */
+                            listen.UseHttps(https =>
+                            {
+                                https.ServerCertificate = listenerCertificate.Value.Leaf;
+                                if (listenerCertificate.Value.Chain.Count > 0)
+                                {
+                                    https.ServerCertificateChain = listenerCertificate.Value.Chain;
+                                }
+                            });
                         }
                     });
 
