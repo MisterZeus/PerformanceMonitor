@@ -5,11 +5,11 @@ and creates Desktop + Start Menu shortcuts for the bundled viewer.
 
 .DESCRIPTION
 Run from an ELEVATED PowerShell, from the folder you extracted the Darling zip into (the script
-installs the service pointing at THAT folder — extract to the final location first, e.g.
+installs the service pointing at THAT folder - extract to the final location first, e.g.
 C:\PerformanceMonitorDarling). What it does, in order:
 
   1. Verifies elevation, the service exe, and darling.json (offers to copy darling.sample.json
-     and stops so you can edit it — the service is not installed with an unedited sample).
+     and stops so you can edit it - the service is not installed with an unedited sample).
   1b. REFUSES an install directory the service account can never read: anywhere under a user profile
      (C:\Users\...), or a UNC / mapped-drive path. The service runs as an unprivileged virtual account
      that is neither you nor an administrator, and a profile folder grants nothing to it, so the
@@ -21,10 +21,10 @@ C:\PerformanceMonitorDarling). What it does, in order:
      nothing of ours on it. Part of the pre-flight, so -SkipPreflight skips it.
   2. Optional pre-flight: runs `--test-connection` and shows the per-server PASS/FAIL lines
      (continue-or-abort prompt on failure; -SkipPreflight to skip).
-  3. Registers the Windows Event Log source 'PerformanceMonitor Darling' (requires elevation —
+  3. Registers the Windows Event Log source 'PerformanceMonitor Darling' (requires elevation -
      the service's own virtual account cannot; without it Event Log diagnostics are silently
      dropped. The file log under %ProgramData%\PerformanceMonitorDarling\logs works regardless).
-  4. Creates the service under the NT SERVICE virtual account (NEVER LocalSystem — the bundled
+  4. Creates the service under the NT SERVICE virtual account (NEVER LocalSystem - the bundled
      PostgreSQL refuses to run with administrative privileges), start=auto. If the service
      already exists this is an UPGRADE: it is stopped and its binPath updated in place; your
      darling.json, store data, and credentials are untouched.
@@ -37,7 +37,7 @@ C:\PerformanceMonitorDarling). What it does, in order:
   5. Starts the service and confirms it reaches Running.
   6. Creates 'Darling Viewer' shortcuts on the Desktop and in the Start Menu pointing at
      viewer\PerformanceMonitor.Darling.Viewer.exe. (Taskbar pinning is deliberately not
-     attempted — Windows blocks programmatic pinning by design; pin from the Start Menu entry.)
+     attempted - Windows blocks programmatic pinning by design; pin from the Start Menu entry.)
 
 Uninstall with uninstall-darling.ps1 (same folder).
 
