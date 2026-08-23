@@ -400,44 +400,137 @@ public sealed class DarlingDeployStaleFileTests
     }
 
     /// <summary>
-    /// The whole script PARSES, and no PowerShell operator is bound as a command parameter.
+    /// The PowerShell that runs on a Windows box rather than on a developer's: the three the release zip
+    /// ships and an operator is told to run, plus the pg-runtime build script the workflows invoke.
+    /// <c>new-upgraded-store-fixture.ps1</c> is deliberately absent — it generates a test fixture and never
+    /// leaves the repo.
+    /// </summary>
+    private static readonly string[] s_shippedScripts =
+    [
+        "upgrade-darling.ps1",
+        "install-darling.ps1",
+        "uninstall-darling.ps1",
+        "fetch-pg-runtime.ps1",
+    ];
+
+    /// <summary>
+    /// Every shipped script PARSES under Windows PowerShell, and none of them binds a PowerShell operator
+    /// as a command parameter.
     ///
-    /// <para>This guards the file rather than this change, because the bug it is about has already cost a
-    /// deploy here: <c>$x | ForEach-Object { } -join ', '</c> binds <c>-join</c> to <c>ForEach-Object</c> as
-    /// a PARAMETER. It parses clean, it reads correctly, and it throws at RUNTIME — which in this script
-    /// means after the service has been stopped, leaving a monitoring host down over a formatting mistake.
-    /// Two of the comments in the file warn about it; a warning is not a check, and the AST can see it
-    /// directly.</para>
+    /// <para>Two different bugs, one check, and this pin has already earned itself twice over.</para>
+    ///
+    /// <para><b>The operator half.</b> <c>$x | ForEach-Object { } -join ', '</c> binds <c>-join</c> to
+    /// <c>ForEach-Object</c> as a PARAMETER. It parses clean, it reads correctly, and it throws at RUNTIME —
+    /// which in <c>upgrade-darling.ps1</c> means after the service has been stopped, leaving a monitoring
+    /// host down over a formatting mistake. Two comments in that file warn about it; a warning is not a
+    /// check, and the AST can see it directly.</para>
+    ///
+    /// <para><b>The parse half is what this actually caught (#2529).</b> It ran red on the FIRST CI round
+    /// against lines nobody had touched, and the cause was real:
+    /// <c>Parser::ParseFile</c> under Windows PowerShell 5.1 reads a BOM-less file using the ANSI code page,
+    /// which is exactly what <c>powershell.exe</c> itself does when it RUNS one. The em dashes #2528 put
+    /// inside double-quoted strings are three UTF-8 bytes, and the third of them decodes in CP1252 to
+    /// <c>&#x201D;</c> — a character PowerShell honours as a closing double quote. So every one of them
+    /// terminated its string early and the file did not parse at all, on the default shell of the operating
+    /// system it targets. Reproduced byte for byte, down to the same "The '&lt;' operator is reserved for
+    /// future use" the CI run reported.</para>
+    ///
+    /// <para>This is deliberately NOT fixed by adding a byte-order mark, which would work and would decay:
+    /// a BOM is one careless save away from being gone, and its absence is invisible. <see
+    /// cref="TheShippedScripts_HoldNoByteAbove127"/> pins the version that cannot decay instead.</para>
     /// </summary>
     [Fact]
-    public void TheDeployScript_ParsesAndBindsNoOperatorAsACommandParameter()
+    public void TheShippedScripts_ParseAndBindNoOperatorAsACommandParameter()
     {
         var probe = new StringBuilder();
-        probe.AppendLine("$errors = $null");
-        probe.AppendLine("$tokens = $null");
-        probe.AppendLine($"$ast = [System.Management.Automation.Language.Parser]::ParseFile('{DeployScriptPath}', [ref]$tokens, [ref]$errors)");
-        probe.AppendLine("foreach ($e in @($errors)) { \"PARSE-ERROR line $($e.Extent.StartLineNumber): $($e.Message)\" }");
-        probe.AppendLine("if (-not $errors -or $errors.Count -eq 0) {");
-        probe.AppendLine("  $operators = @('join', 'f', 'replace', 'split', 'match', 'contains', 'eq', 'ne', 'like', 'is', 'as')");
-        probe.AppendLine("  $commands = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)");
-        probe.AppendLine("  foreach ($command in $commands) {");
-        probe.AppendLine("    foreach ($element in $command.CommandElements) {");
-        probe.AppendLine("      if ($element -is [System.Management.Automation.Language.CommandParameterAst]) {");
-        probe.AppendLine("        if ($operators -contains $element.ParameterName) {");
-        probe.AppendLine("          \"OPERATOR-AS-PARAMETER line $($element.Extent.StartLineNumber): -$($element.ParameterName) on $($command.GetCommandName())\"");
-        probe.AppendLine("        }");
-        probe.AppendLine("      }");
-        probe.AppendLine("    }");
-        probe.AppendLine("  }");
-        probe.AppendLine("}");
+        probe.AppendLine("$found = @()");
+
+        foreach (var name in s_shippedScripts)
+        {
+            var path = Path.Combine(RepoRoot, "Darling", "tools", name);
+            Assert.True(File.Exists(path), $"expected {path} to exist");
+
+            probe.AppendLine("$errors = $null");
+            probe.AppendLine("$tokens = $null");
+            probe.AppendLine($"$ast = [System.Management.Automation.Language.Parser]::ParseFile('{path}', [ref]$tokens, [ref]$errors)");
+            probe.AppendLine($"foreach ($e in @($errors)) {{ $found += \"{name} PARSE-ERROR line $($e.Extent.StartLineNumber): $($e.Message)\" }}");
+            probe.AppendLine("if (-not $errors -or $errors.Count -eq 0) {");
+            probe.AppendLine("  $operators = @('join', 'f', 'replace', 'split', 'match', 'contains', 'eq', 'ne', 'like', 'is', 'as')");
+            probe.AppendLine("  $commands = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)");
+            probe.AppendLine("  foreach ($command in $commands) {");
+            probe.AppendLine("    foreach ($element in $command.CommandElements) {");
+            probe.AppendLine("      if ($element -is [System.Management.Automation.Language.CommandParameterAst]) {");
+            probe.AppendLine("        if ($operators -contains $element.ParameterName) {");
+            probe.AppendLine($"          $found += \"{name} OPERATOR-AS-PARAMETER line $($element.Extent.StartLineNumber): -$($element.ParameterName) on $($command.GetCommandName())\"");
+            probe.AppendLine("        }");
+            probe.AppendLine("      }");
+            probe.AppendLine("    }");
+            probe.AppendLine("  }");
+            probe.AppendLine("}");
+        }
+
+        probe.AppendLine("foreach ($f in @($found)) { $f }");
         probe.AppendLine("'DONE'");
 
         var answers = RunWindowsPowerShell(probe.ToString());
 
         Assert.True(
             answers.Count == 1 && answers[0] == "DONE",
-            "upgrade-darling.ps1 does not parse cleanly, or binds a PowerShell operator as a command parameter:\n  "
+            "a shipped PowerShell script does not parse under Windows PowerShell, or binds an operator as a command parameter:\n  "
             + string.Join("\n  ", answers));
+    }
+
+    /// <summary>
+    /// No shipped PowerShell script holds a byte above 127.
+    ///
+    /// <para>The rule the parse pin above proved we need, in the form that cannot be got wrong. Windows
+    /// PowerShell 5.1 decodes a BOM-less script using the machine's ANSI code page, so a single em dash
+    /// inside a double-quoted string ends that string early and the script stops parsing — which is what
+    /// <c>upgrade-darling.ps1</c> was doing when this test was written, on the default shell of the OS it
+    /// ships to. The five em dashes already in <c>install-darling.ps1</c> and <c>fetch-pg-runtime.ps1</c>
+    /// were harmless only because they happened to sit in COMMENTS, where a mis-decoded character is never
+    /// parsed. That is not a property anybody can maintain by eye.</para>
+    ///
+    /// <para>So the rule is not "no em dash inside a double-quoted string" — that needs a parser and gets it
+    /// wrong once. It is "no byte above 127", which anyone can check, holds under every code page, and does
+    /// not care whether the file has a byte-order mark. The same rule keeps the extracted-function probes in
+    /// this file and in <c>DarlingDeployRollbackRetentionTests</c> honest: they write extracted PowerShell
+    /// to a temp file and run it under <c>powershell.exe</c>, so a non-ASCII byte inside any function they
+    /// lift would break the test in a way that looks nothing like its cause.</para>
+    ///
+    /// <para>Scoped to the scripts we SHIP, not to every .ps1 in the repo. These are the ones an operator
+    /// runs on a Windows Server box with whatever shell that box has.</para>
+    /// </summary>
+    [Fact]
+    public void TheShippedScripts_HoldNoByteAbove127()
+    {
+        var offenders = new List<string>();
+
+        foreach (var name in s_shippedScripts)
+        {
+            var path = Path.Combine(RepoRoot, "Darling", "tools", name);
+            var bytes = File.ReadAllBytes(path);
+
+            var line = 1;
+            for (var i = 0; i < bytes.Length; i++)
+            {
+                if (bytes[i] == (byte)'\n') { line++; continue; }
+                if (bytes[i] > 127)
+                {
+                    offenders.Add($"{name} line {line}: byte 0x{bytes[i]:X2}");
+                    /* One report per line is enough — an em dash is three bytes and would otherwise name
+                       itself three times. */
+                    while (i < bytes.Length && bytes[i] != (byte)'\n') { i++; }
+                    line++;
+                }
+            }
+        }
+
+        Assert.True(offenders.Count == 0,
+            "a shipped PowerShell script holds a byte above 127. Windows PowerShell 5.1 decodes a BOM-less "
+            + "script with the ANSI code page, and the third byte of a UTF-8 em dash becomes a smart closing "
+            + "quote there, which ends a double-quoted string early and stops the file parsing (#2529). Use "
+            + "ASCII:\n  " + string.Join("\n  ", offenders));
     }
 
     /// <summary>Runs the shipped <c>Select-DarlingStaleFiles</c> over two lists and returns what it

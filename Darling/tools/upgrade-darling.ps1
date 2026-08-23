@@ -1,32 +1,32 @@
 <#
 .SYNOPSIS
 Upgrades an installed PerformanceMonitor Darling in place from a newer build, keeping a BOUNDED number of
-rollback backups — or prunes the ones an earlier deploy left behind (-PruneOnly).
+rollback backups - or prunes the ones an earlier deploy left behind (-PruneOnly).
 
 .DESCRIPTION
 This is the supported version of a procedure that had been living in people's heads and in ad-hoc SSM
 scripts: stop the service, copy the install tree's root files aside as _rollback_manual_<stamp>, lay the new
 build over the top, start the service, verify. Every step of it was already documented somewhere. What was
 missing was the step nobody remembered to do by hand, which is deleting the backups from the LAST twenty
-deploys — a dogfood box was found carrying 46 of them, 5.48 GB, the oldest three weeks old, and the service
+deploys - a dogfood box was found carrying 46 of them, 5.48 GB, the oldest three weeks old, and the service
 warning about every single one on every single start (#2525).
 
 Retention lives HERE, at deploy time, and not in the service. The service does not delete things it did not
 create; this script created every one of these directories, so this script is the only thing entitled to
 remove them. It keeps the newest -KeepRollbacks (3 by default) and removes the rest, after the new backup is
-made — so a failed upgrade always has something to roll back to, including the copy it just took.
+made - so a failed upgrade always has something to roll back to, including the copy it just took.
 
 What it does, in order:
 
   1. Verifies elevation, resolves the install root from the REGISTERED service (or -InstallRoot), and
-     refuses if the service is not installed — this upgrades an install, it does not create one. Use
+     refuses if the service is not installed - this upgrades an install, it does not create one. Use
      install-darling.ps1 for that.
   2. Refuses to copy a source that IS the install root. The upgrade would be overwriting this very script
      while PowerShell is reading it, and Expand-Archive dying half-way through leaves the service stopped
      with mixed binaries. Run the copy that came out of the NEW zip instead.
   3. Verifies the source zip's SHA256 (against -Sha256, or a SHA256SUMS.txt sitting beside it). Refuses an
      unverified zip unless you say -SkipHashCheck out loud.
-  4. Names any process running out of the install tree and STOPS — it never kills one. The bundled
+  4. Names any process running out of the install tree and STOPS - it never kills one. The bundled
      PostgreSQL lives under pg-runtime and a blanket kill takes the store down with it; the last time this
      guard fired, what it caught was an operator's own psql.exe sitting in the install directory from a
      diagnostic query.
@@ -41,9 +41,9 @@ What it does, in order:
  10. Names the files an EARLIER build shipped and this one does not, and removes them with
      -RemoveStaleFiles. An in-place upgrade is an OVERLAY: it writes what the new build ships and deletes
      nothing else, so a dropped dependency or a stranded runtimes\<rid>\lib\<tfm>\ subtree stays in the
-     tree forever — in a directory .NET probes for assemblies. The authority is a manifest this script
+     tree forever - in a directory .NET probes for assemblies. The authority is a manifest this script
      writes into the install root after every copy (#2529).
- 11. Starts the service, waits for Running, and prints the post-install health check — which is a STAGE of
+ 11. Starts the service, waits for Running, and prints the post-install health check - which is a STAGE of
      the install, not a favour.
 
 Every step is safe to re-run. That is not a nicety: steps 5 through 9 leave the service DOWN if anything
@@ -83,8 +83,8 @@ Delete the files an earlier build shipped and this one does not, rather than onl
 
 The check itself runs on every upgrade and reports either way; this switch is the difference between a
 report and a delete. It is OFF for the first release on purpose. Everything this can name provably came out
-of one of our own build payloads — the manifest is written from the payload, so darling.json, the DPAPI
-credential blobs, the rollback backups and pg-runtime were never in it and cannot come out of it — but a
+of one of our own build payloads - the manifest is written from the payload, so darling.json, the DPAPI
+credential blobs, the rollback backups and pg-runtime were never in it and cannot come out of it - but a
 delete that runs inside a monitoring host's install directory should spend a few deploys showing operators
 its answer before it starts acting on it. Flip the default once boxes have been reporting it and the lists
 have been the ones people expected.
@@ -93,8 +93,8 @@ have been the ones people expected.
 Proceed with a source zip whose SHA256 could not be verified.
 
 .PARAMETER SkipStopGuard
-Proceed even though processes are running out of the install tree. Almost always the wrong answer — the
-copy will fail on a locked file and leave mixed binaries — but there is no way to be sure from here that
+Proceed even though processes are running out of the install tree. Almost always the wrong answer - the
+copy will fail on a locked file and leave mixed binaries - but there is no way to be sure from here that
 your case is not the exception.
 #>
 [CmdletBinding()]
@@ -1023,7 +1023,7 @@ if ($sourceIsZip) {
 
     if ([string]::IsNullOrWhiteSpace($expected)) {
         if (-not $SkipHashCheck) {
-            Fail "No SHA256 for '$Source' — pass -Sha256 <hash>, put SHA256SUMS.txt beside the zip, or say -SkipHashCheck. This overwrites the binaries of a running monitoring host; an unverified zip is not something to find out about afterwards."
+            Fail "No SHA256 for '$Source' - pass -Sha256 <hash>, put SHA256SUMS.txt beside the zip, or say -SkipHashCheck. This overwrites the binaries of a running monitoring host; an unverified zip is not something to find out about afterwards."
         }
         Warn "Proceeding with an UNVERIFIED source zip (-SkipHashCheck)."
     }
@@ -1039,7 +1039,7 @@ else {
     if (-not (Test-Path -LiteralPath (Join-Path $Source $serviceExeName))) {
         Fail "'$Source' does not hold $serviceExeName, so it is not an extracted Darling build."
     }
-    Warn "The source is a folder, so this script cannot verify it — verify the zip's SHA256 before you extract it."
+    Warn "The source is a folder, so this script cannot verify it - verify the zip's SHA256 before you extract it."
 }
 
 # ============================ the service has to exist ============================
@@ -1080,7 +1080,7 @@ if ([string]::IsNullOrWhiteSpace($registeredRoot)) {
     Warn "Could not read the '$serviceName' service's ImagePath, so this could not confirm that '$InstallRoot' is the directory the service actually runs from. Check that before trusting the result."
 }
 elseif (-not (Test-DarlingSamePath $registeredRoot $InstallRoot)) {
-    Fail "The '$serviceName' service runs from '$registeredRoot', not from '$InstallRoot'. NOTHING has been stopped or copied. Stopping and starting act on the service by NAME, so upgrading '$InstallRoot' would have taken the real service down, written the new build somewhere it does not read, and brought it back up on its old binaries — reporting success the whole way. Drop -InstallRoot to upgrade the registered install, or pass -InstallRoot '$registeredRoot' if that is really the one you meant."
+    Fail "The '$serviceName' service runs from '$registeredRoot', not from '$InstallRoot'. NOTHING has been stopped or copied. Stopping and starting act on the service by NAME, so upgrading '$InstallRoot' would have taken the real service down, written the new build somewhere it does not read, and brought it back up on its old binaries - reporting success the whole way. Drop -InstallRoot to upgrade the registered install, or pass -InstallRoot '$registeredRoot' if that is really the one you meant."
 }
 
 # ============================ the stop guard ============================
@@ -1100,7 +1100,7 @@ if ($holders.Count -gt 0 -and -not $SkipStopGuard) {
     $names = @($holders | ForEach-Object { "$($_.ProcessName) (pid $($_.Id))" })
     Note "Processes are running out of the install tree that stopping the service will not close:"
     foreach ($name in $names) { Note "  $name" }
-    Fail "Close them and re-run. NOTHING has been stopped or copied — the service is still running and the install is untouched. Do NOT kill them blindly. If these are your own psql.exe or a shell sitting in the install directory, or a Darling Viewer you left open, just exit them. Use -SkipStopGuard only if you are certain the copy will not hit a locked file."
+    Fail "Close them and re-run. NOTHING has been stopped or copied - the service is still running and the install is untouched. Do NOT kill them blindly. If these are your own psql.exe or a shell sitting in the install directory, or a Darling Viewer you left open, just exit them. Use -SkipStopGuard only if you are certain the copy will not hit a locked file."
 }
 
 # ============================ stop, back up, prune, copy, start ============================
@@ -1133,14 +1133,14 @@ if ($stillHolding.Count -gt 0 -and -not $SkipStopGuard) {
     $names = @($stillHolding | ForEach-Object { "$($_.ProcessName) (pid $($_.Id))" })
     Note "The service is stopped, but processes are STILL running out of the install tree:"
     foreach ($name in $names) { Note "  $name" }
-    Fail "Nothing has been copied, so the install is intact — but the service is now STOPPED. Either close these and re-run (safe, and it will reuse the backup it is about to take), or abandon the upgrade with: Start-Service '$serviceName'. Do NOT kill anything under $InstallRoot\pg-runtime — that is the bundled PostgreSQL and killing it takes the store down; give a postmaster that outlived the stop a few seconds and re-run."
+    Fail "Nothing has been copied, so the install is intact - but the service is now STOPPED. Either close these and re-run (safe, and it will reuse the backup it is about to take), or abandon the upgrade with: Start-Service '$serviceName'. Do NOT kill anything under $InstallRoot\pg-runtime - that is the bundled PostgreSQL and killing it takes the store down; give a postmaster that outlived the stop a few seconds and re-run."
 }
 
 $backups = Get-DarlingRollbackBackups $InstallRoot
 $nowUtc = [datetime]::UtcNow
 
 if (Test-DarlingRollbackBackupIsRecent $backups $BackupWindowMinutes $nowUtc) {
-    Note ("Reusing the rollback backup {0}, taken {1:N0} minute(s) ago — this looks like a re-run of an interrupted upgrade, and a second backup now would copy a half-upgraded tree over the good one." -f $backups[0].Name, ($nowUtc - $backups[0].LastWriteTimeUtc).TotalMinutes)
+    Note ("Reusing the rollback backup {0}, taken {1:N0} minute(s) ago - this looks like a re-run of an interrupted upgrade, and a second backup now would copy a half-upgraded tree over the good one." -f $backups[0].Name, ($nowUtc - $backups[0].LastWriteTimeUtc).TotalMinutes)
 }
 else {
     $backupPath = Join-Path $InstallRoot (New-DarlingRollbackBackupName $nowUtc)
@@ -1206,11 +1206,11 @@ foreach ($attempt in 1, 2) {
         # a moment later has worked more than once. Two attempts, then stop: a third would just be a longer
         # way to arrive at the same half-written tree.
         if ($attempt -eq 1) {
-            Warn "The copy failed ($($_.Exception.Message)). Retrying in 10 seconds — this step has lost to a transiently locked DLL before."
+            Warn "The copy failed ($($_.Exception.Message)). Retrying in 10 seconds - this step has lost to a transiently locked DLL before."
             Start-Sleep -Seconds 10
         }
         else {
-            Fail "The copy failed twice ($($_.Exception.Message)). The service is STOPPED and the install tree may be HALF WRITTEN — do not start it. Re-run this script with the same arguments: it will reuse the rollback backup it already took rather than replacing it, and finish the copy, which is the FIRST thing to try. To go back to the old version instead, note that a half-written tree needs BOTH halves: re-extract the PREVIOUS version's zip over $InstallRoot (that restores viewer\, wwwroot\ and runtimes\, which the backup does not hold), then copy the files from the newest _rollback_manual_* directory over the top. Restoring only the backup leaves old root binaries paired with partly-new subdirectories."
+            Fail "The copy failed twice ($($_.Exception.Message)). The service is STOPPED and the install tree may be HALF WRITTEN - do not start it. Re-run this script with the same arguments: it will reuse the rollback backup it already took rather than replacing it, and finish the copy, which is the FIRST thing to try. To go back to the old version instead, note that a half-written tree needs BOTH halves: re-extract the PREVIOUS version's zip over $InstallRoot (that restores viewer\, wwwroot\ and runtimes\, which the backup does not hold), then copy the files from the newest _rollback_manual_* directory over the top. Restoring only the backup leaves old root binaries paired with partly-new subdirectories."
         }
     }
 }
@@ -1224,7 +1224,7 @@ if ($configHashBefore) {
         # The zip ships darling.sample.json and never darling.json, so this should be impossible - which is
         # exactly why it is checked rather than trusted. A config replaced by a deploy is a monitoring host
         # that comes back up watching nothing, and the newest rollback backup still holds the original.
-        Warn "darling.json CHANGED during the copy. The zip ships only darling.sample.json, so this should not happen. The original is in the newest _rollback_manual_* directory — compare them before starting the service."
+        Warn "darling.json CHANGED during the copy. The zip ships only darling.sample.json, so this should not happen. The original is in the newest _rollback_manual_* directory - compare them before starting the service."
     }
     else {
         Good "darling.json is unchanged."
@@ -1247,7 +1247,7 @@ $payload = Get-DarlingPayloadFiles $Source $sourceIsZip
 $carryForward = @()
 
 if (-not $payload.Ok) {
-    Warn "Could not read the new build's own file list ($($payload.Reason)), so this run cannot tell which files an earlier build left behind. NOTHING was removed, and no manifest was written — the next upgrade will be in the same position until a run gets a source it can read."
+    Warn "Could not read the new build's own file list ($($payload.Reason)), so this run cannot tell which files an earlier build left behind. NOTHING was removed, and no manifest was written - the next upgrade will be in the same position until a run gets a source it can read."
 }
 elseif (-not $previousManifest.Ok) {
     Note "Stale-file check skipped: $($previousManifest.Reason). Nothing was removed. This run writes the manifest, so the NEXT upgrade can answer the question."
@@ -1267,9 +1267,9 @@ else {
         # start; this prints once, at the moment of the deploy, with the operator reading it - and the case
         # that matters most is the forty-file one, where a count tells you nothing and the list tells you a
         # whole framework directory was stranded.
-        Warn ("{0} file(s) in the install tree were shipped by an earlier build and are NOT in this one. Nothing was removed — re-run with -RemoveStaleFiles to delete them, or delete them by hand:" -f $stale.Count)
+        Warn ("{0} file(s) in the install tree were shipped by an earlier build and are NOT in this one. Nothing was removed - re-run with -RemoveStaleFiles to delete them, or delete them by hand:" -f $stale.Count)
         foreach ($relative in $stale) { Note "  $relative" }
-        Note "Every path above came out of one of our own build payloads: this check reads the manifest THIS SCRIPT wrote on the previous upgrade, so it can only ever name files one of our zips laid down — never darling.json, never the credential blobs, never pg-runtime."
+        Note "Every path above came out of one of our own build payloads: this check reads the manifest THIS SCRIPT wrote on the previous upgrade, so it can only ever name files one of our zips laid down - never darling.json, never the credential blobs, never pg-runtime."
         $carryForward = @($stale)
     }
     else {
@@ -1283,7 +1283,7 @@ else {
         }
 
         if ($staleResult.Refused.Count -gt 0) {
-            Warn ("{0} path(s) were REFUSED rather than removed, because they name something this procedure never deletes: {1}. Nothing needs doing about it — it is reported because a delete that quietly did not happen is worse than one that says so." -f $staleResult.Refused.Count, ($staleResult.Refused -join ', '))
+            Warn ("{0} path(s) were REFUSED rather than removed, because they name something this procedure never deletes: {1}. Nothing needs doing about it - it is reported because a delete that quietly did not happen is worse than one that says so." -f $staleResult.Refused.Count, ($staleResult.Refused -join ', '))
         }
 
         if ($staleResult.Failures.Count -gt 0) {
@@ -1296,7 +1296,7 @@ else {
 
         # Whatever is still on disk stays NOMINATED. Without this the manifest written below would record
         # only what this build ships, a file that was reported and not removed would drop out of the record,
-        # and no later upgrade would ever mention it again — a check that forgets, which is a check nobody
+        # and no later upgrade would ever mention it again - a check that forgets, which is a check nobody
         # can act on at their own pace.
         $carryForward = @($staleResult.Failures) + @($staleResult.Refused)
     }
@@ -1316,7 +1316,7 @@ if ($payload.Ok) {
 Note "Starting '$serviceName'..."
 Start-Service -Name $serviceName
 try { (Get-Service -Name $serviceName).WaitForStatus('Running', [TimeSpan]::FromMinutes(2)) }
-catch { Fail "'$serviceName' did not reach Running within two minutes. The new build IS in place — read %ProgramData%\PerformanceMonitorDarling\logs before rolling back." }
+catch { Fail "'$serviceName' did not reach Running within two minutes. The new build IS in place - read %ProgramData%\PerformanceMonitorDarling\logs before rolling back." }
 
 Good "Service is Running."
 Note ""
@@ -1325,5 +1325,5 @@ Note "In 10-15 minutes, against the store, confirm all of:"
 Note "  1. MAX(version) FROM darling_schema_version equals this build's expected schema rung."
 Note "  2. COUNT(DISTINCT server_id) FROM collect.collection_log over the last 15 minutes equals the fleet size."
 Note "  3. COUNT(DISTINCT collector_name) over the same window is in the mid-30s, not single digits."
-Note "  4. Any non-SUCCESS rows since the restart are READ, not just counted — YIELDED is the lock-timeout guard working; anything else is a finding."
+Note "  4. Any non-SUCCESS rows since the restart are READ, not just counted - YIELDED is the lock-timeout guard working; anything else is a finding."
 Note "  5. If this build added a collector or a migration, one targeted probe that ITS table moved."
